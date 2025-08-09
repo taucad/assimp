@@ -640,7 +640,17 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
                 dstMesh->mTextureCoords[a][b] = pSrcMesh->mTexCoords[a][pStartVertex + b];
             }
 
+            // Copy UV component count, but ensure it's valid when UV data exists
             dstMesh->mNumUVComponents[a] = pSrcMesh->mNumUVComponents[a];
+            if (dstMesh->mNumUVComponents[a] == 0) {
+                // Try to detect components from UV data - most meshes use 2 components (U,V)
+                // but some use 3 (U,V,W/P). Default to 2 for safety.
+                dstMesh->mNumUVComponents[a] = 2;
+            }
+            // Clamp to valid range - aiVector3D always has 3 floats, but we only use the first N
+            if (dstMesh->mNumUVComponents[a] > 3) {
+                dstMesh->mNumUVComponents[a] = 3;
+            }
         }
     }
 

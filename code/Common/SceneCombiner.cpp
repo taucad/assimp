@@ -1084,14 +1084,18 @@ void SceneCombiner::Copy(aiMesh **_dest, const aiMesh *src) {
     GetArrayCopy(dest->mTangents, dest->mNumVertices);
     GetArrayCopy(dest->mBitangents, dest->mNumVertices);
 
-    unsigned int n = 0;
-    while (dest->HasTextureCoords(n)) {
-        GetArrayCopy(dest->mTextureCoords[n++], dest->mNumVertices);
+    // Copy all texture coordinate channels (not just consecutive ones)
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++n) {
+        if (dest->HasTextureCoords(n)) {
+            GetArrayCopy(dest->mTextureCoords[n], dest->mNumVertices);
+        }
     }
 
-    n = 0;
-    while (dest->HasVertexColors(n)) {
-        GetArrayCopy(dest->mColors[n++], dest->mNumVertices);
+    // Copy all vertex color channels (not just consecutive ones)
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_COLOR_SETS; ++n) {
+        if (dest->HasVertexColors(n)) {
+            GetArrayCopy(dest->mColors[n], dest->mNumVertices);
+        }
     }
 
     // make a deep copy of all bones
@@ -1129,13 +1133,19 @@ void SceneCombiner::Copy(aiAnimMesh **_dest, const aiAnimMesh *src) {
     GetArrayCopy(dest->mTangents, dest->mNumVertices);
     GetArrayCopy(dest->mBitangents, dest->mNumVertices);
 
-    unsigned int n = 0;
-    while (dest->HasTextureCoords(n))
-        GetArrayCopy(dest->mTextureCoords[n++], dest->mNumVertices);
+    // Copy all texture coordinate channels (not just consecutive ones)
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++n) {
+        if (dest->HasTextureCoords(n)) {
+            GetArrayCopy(dest->mTextureCoords[n], dest->mNumVertices);
+        }
+    }
 
-    n = 0;
-    while (dest->HasVertexColors(n))
-        GetArrayCopy(dest->mColors[n++], dest->mNumVertices);
+    // Copy all vertex color channels (not just consecutive ones)  
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_COLOR_SETS; ++n) {
+        if (dest->HasVertexColors(n)) {
+            GetArrayCopy(dest->mColors[n], dest->mNumVertices);
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
