@@ -369,6 +369,14 @@ static void Write(JSONWriter &out, const aiMesh &ai, bool is_elem = true) {
         for (unsigned int n = 0; n < ai.GetNumUVChannels(); ++n) {
             const unsigned int numc = ai.mNumUVComponents[n] ? ai.mNumUVComponents[n] : 2;
 
+            // Defensive programming: check if texture coordinates pointer is valid for this channel
+            if (!ai.mTextureCoords[n]) {
+                // Write empty array to maintain JSON structure consistency
+                out.StartArray(true);
+                out.EndArray();
+                continue;
+            }
+
             out.StartArray(true);
             for (unsigned int i = 0; i < ai.mNumVertices; ++i) {
                 for (unsigned int c = 0; c < numc; ++c) {
@@ -807,6 +815,7 @@ void ExportAssimp2Json(const char *file, Assimp::IOSystem *io, const aiScene *sc
         if (pProperties->GetPropertyBool("JSON_SKIP_WHITESPACES", false)) {
             flags |= JSONWriter::Flag_SkipWhitespaces;
         }
+        
         JSONWriter s(*str, flags);
         Write(s, *scenecopy_tmp);
 
