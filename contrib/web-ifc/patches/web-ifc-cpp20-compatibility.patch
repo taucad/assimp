@@ -1,0 +1,32 @@
+diff --git a/src/cpp/web-ifc/geometry/operations/boolean-utils/shared-position.h b/src/cpp/web-ifc/geometry/operations/boolean-utils/shared-position.h
+index 706688ba..0db58693 100644
+--- a/src/cpp/web-ifc/geometry/operations/boolean-utils/shared-position.h
++++ b/src/cpp/web-ifc/geometry/operations/boolean-utils/shared-position.h
+@@ -204,7 +204,12 @@ namespace fuzzybools
+                 return std::make_pair(points[i - 1].second, points[i].second);
+             };
+ 
+-            return std::views::iota(size_t(1), points.size()) | std::views::transform(makeSegments);
++            // Replaced std::views with traditional approach for Apple Clang compatibility
++            std::vector<std::pair<size_t, size_t>> result;
++            for (size_t i = 1; i < points.size(); ++i) {
++                result.push_back(makeSegments(i));
++            }
++            return result;
+         }
+ 
+         std::vector<std::pair<double, size_t>> points;
+diff --git a/src/cpp/web-ifc/parsing/IfcLoader.cpp b/src/cpp/web-ifc/parsing/IfcLoader.cpp
+index 828f1324..2ad61c08 100644
+--- a/src/cpp/web-ifc/parsing/IfcLoader.cpp
++++ b/src/cpp/web-ifc/parsing/IfcLoader.cpp
+@@ -346,7 +346,8 @@ namespace webifc::parsing {
+ 
+    void IfcLoader::PushDouble(double input)
+    {             
+-      std::string numberString = std::format("{}", input);
++      // Replaced std::format with std::to_string for Apple Clang compatibility  
++      std::string numberString = std::to_string(input);
+       size_t eLoc = numberString.find_first_of('e');
+       if (eLoc != std::string::npos) numberString[eLoc]='E';
+       else if (std::floor(input) == input) numberString+='.';

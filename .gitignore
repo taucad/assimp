@@ -126,3 +126,5 @@ generated/*
 contrib/meshlab/autoclone
 # tinyusdz repo, automatically cloned via CMake
 contrib/tinyusdz/autoclone
+# web-ifc repo, automatically cloned via CMake
+contrib/web-ifc/autoclone

@@ -576,24 +576,13 @@ ADD_ASSIMP_IMPORTER( BLEND
 ADD_ASSIMP_IMPORTER( IFC
   AssetLib/IFC/IFCLoader.cpp
   AssetLib/IFC/IFCLoader.h
-  AssetLib/IFC/IFCReaderGen1_2x3.cpp
-  AssetLib/IFC/IFCReaderGen2_2x3.cpp
-  AssetLib/IFC/IFCReaderGen_2x3.h
-  AssetLib/IFC/IFCUtil.h
-  AssetLib/IFC/IFCUtil.cpp
-  AssetLib/IFC/IFCGeometry.cpp
-  AssetLib/IFC/IFCMaterial.cpp
-  AssetLib/IFC/IFCProfile.cpp
-  AssetLib/IFC/IFCCurve.cpp
-  AssetLib/IFC/IFCBoolean.cpp
-  AssetLib/IFC/IFCOpenings.cpp
 )
 
 if (ASSIMP_BUILD_IFC_IMPORTER)
   if (MSVC)
-    set_source_files_properties(Importer/IFC/IFCReaderGen1_2x3.cpp Importer/IFC/IFCReaderGen2_2x3.cpp PROPERTIES COMPILE_FLAGS "/bigobj")
+    set_source_files_properties(AssetLib/IFC/IFCLoader.cpp PROPERTIES COMPILE_FLAGS "/bigobj")
   elseif(MINGW)
-    set_source_files_properties(Importer/IFC/IFCReaderGen1_2x3.cpp Importer/IFC/IFCReaderGen2_2x3.cpp PROPERTIES COMPILE_FLAGS "-O2 -Wa,-mbig-obj")
+    set_source_files_properties(AssetLib/IFC/IFCLoader.cpp PROPERTIES COMPILE_FLAGS "-O2 -Wa,-mbig-obj")
   endif()
 endif ()
 
@@ -1115,6 +1104,206 @@ ELSE() # IF (ASSIMP_BUILD_USD_IMPORTER)
     MESSAGE(STATUS "tinyusdz disabled")
 ENDIF() # IF (ASSIMP_BUILD_USD_IMPORTER)
 
+# Web-IFC support (Web-IFC ONLY - no old implementation)
+IF (ASSIMP_BUILD_IFC_IMPORTER)
+    # Use CMAKE_CURRENT_SOURCE_DIR which provides assimp-local path (CMAKE_SOURCE_DIR is
+    # relative to top-level/main project)
+    set(WebIFC_BASE_ABSPATH "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/web-ifc")
+    set(WebIFC_REPO_ABSPATH "${WebIFC_BASE_ABSPATH}/autoclone")
+
+    # Note: ALWAYS specify a git commit hash (or tag) instead of a branch name; using a branch
+    #       name can lead to non-deterministic (unpredictable) results since the code is potentially
+    #       in flux
+    # "main" branch, 11 August 2025
+    set(WEBIFC_GIT_TAG "04f5fa476b69bef8860626da0355481323ca059a")
+    message("****")
+    message("\n\n**** Cloning web-ifc repo, git tag ${WEBIFC_GIT_TAG}\n\n")
+
+    # Patch required for C++20 compatibility with Apple Clang
+    set(WEBIFC_PATCH_CMD patch -p1 < ${WebIFC_BASE_ABSPATH}/patches/web-ifc-cpp20-compatibility.patch)
+
+    # Note: CMake's "FetchContent" (which executes at configure time) is much better for this use case
+    #       than "ExternalProject" (which executes at build time); we just want to clone a repo and
+    #       block (wait) as long as necessary until cloning is complete, so we immediately have full
+    #       access to the cloned source files
+    include(FetchContent)
+    # Only want to clone once (on Android, using SOURCE_DIR will clone per-ABI (x86, x86_64 etc))
+    set(FETCHCONTENT_BASE_DIR ${WebIFC_REPO_ABSPATH})
+    set(FETCHCONTENT_QUIET on) # Turn off to troubleshoot repo clone problems
+    set(FETCHCONTENT_UPDATES_DISCONNECTED on) # Prevent other ABIs from re-cloning/re-patching etc
+    FetchContent_Declare(
+            webifc_repo
+            EXCLUDE_FROM_ALL TRUE
+            GIT_REPOSITORY "https://github.com/ThatOpen/engine_web-ifc"
+            GIT_TAG        ${WEBIFC_GIT_TAG}
+            PATCH_COMMAND  ${WEBIFC_PATCH_CMD}
+    )
+    FetchContent_MakeAvailable(webifc_repo)
+    message("**** Finished cloning web-ifc repo")
+    message("****")
+
+    # Web-IFC requires C++20
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    
+    set(WebIFC_SRC_ABSPATH "${WebIFC_REPO_ABSPATH}/webifc_repo-src/src/cpp")
+    
+    # Define Web-IFC source files based on the official test entry point
+    # Reference: https://raw.githubusercontent.com/ThatOpen/engine_web-ifc/refs/heads/main/src/cpp/test/web-ifc-test.cpp
+    set(WebIFC_SRCS
+            # Core parsing and schema management
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/IfcLoader.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/IfcFileStream.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/IfcTokenChunk.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/IfcTokenStream.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/string_parsing.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/schema/IfcSchemaManager.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/schema/schema-functions.cpp
+            
+            # Geometry processing (main Web-IFC API)
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/IfcGeometryProcessor.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/IfcGeometryLoader.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/representation/IfcGeometry.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/representation/IfcCurve.cpp
+            
+            # BIM Geometry operations (all required for complete functionality)
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/geometry.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/extrusion.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/revolution.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/cylindricalRevolution.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/profile.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/curve.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/face.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/sweep.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/boolean.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/buffers.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/aabb.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/plane.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/arc.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/parabola.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/clothoid.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/alignment.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/operations/bim-geometry/circularSweep.cpp
+            
+            # Model management (used in some Web-IFC workflows)
+            ${WebIFC_SRC_ABSPATH}/web-ifc/modelmanager/ModelManager.cpp
+            
+            # Previously excluded dependencies - now included with proper upstream setup:
+            ${WebIFC_SRC_ABSPATH}/web-ifc/geometry/nurbs.cpp
+            ${WebIFC_SRC_ABSPATH}/web-ifc/parsing/uuid_utils.cpp
+    )
+    
+    set(WebIFC_INCLUDE_DIRS "${WebIFC_SRC_ABSPATH}")
+    INCLUDE_DIRECTORIES(${WebIFC_INCLUDE_DIRS})
+    
+    # Note: earcut and other dependencies will be configured via WEBIFC_PARAM_SETTER function
+    
+    # Download the external projects and save their paths (mirroring Web-IFC approach)
+    Message("Downloading FastFloat")
+    FetchContent_Declare(fastfloat
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/fastfloat/fast_float"
+        GIT_TAG "2b2395f9ac836ffca6404424bcc252bff7aa80e4"
+    )
+    
+    Message("Downloading TinyNURBS")
+    FetchContent_Declare(tinynurbs
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/QuimMoya/tinynurbs"
+        GIT_TAG "47115cd9b6e922b27bbc4ab01fdeac2e9ea597a4"
+    )
+    
+    Message("Downloading GLM")
+    FetchContent_Declare(glm
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/g-truc/glm"
+        GIT_TAG "0af55ccecd98d4e5a8d1fad7de25ba429d60e863"
+    )
+    
+    Message("Downloading CDT")
+    FetchContent_Declare(cdt
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/artem-ogre/CDT"
+        GIT_TAG "4d0c9026b8ec846fe544897e7111f8f9080d5f8a"
+    )
+    
+    Message("Downloading spdlog")
+    FetchContent_Declare(spdlog
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/gabime/spdlog"
+        GIT_TAG "f355b3d58f7067eee1706ff3c801c2361011f3d5"
+    )
+    
+    Message("Downloading StdUUID")
+    FetchContent_Declare(stduuid
+        EXCLUDE_FROM_ALL TRUE
+        GIT_REPOSITORY "https://github.com/mariusbancila/stduuid"
+        GIT_TAG "3afe7193facd5d674de709fccc44d5055e144d7a"
+    )
+    
+    # Disable tests for all dependencies
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(TINYNURBS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(CDT_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    
+    FetchContent_MakeAvailable(fastfloat tinynurbs glm cdt spdlog stduuid)
+    
+    Message("Downloads Finished")
+    
+    # Web-IFC parameter setter function (mirroring upstream approach)
+    function(WEBIFC_PARAM_SETTER THE_TARGET)
+        target_include_directories(${THE_TARGET} PRIVATE ${tinynurbs_SOURCE_DIR}/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${fastfloat_SOURCE_DIR}/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${cdt_SOURCE_DIR}/CDT/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${glm_SOURCE_DIR}/)
+        target_include_directories(${THE_TARGET} PRIVATE ${glm_SOURCE_DIR}/glm)
+        target_include_directories(${THE_TARGET} PRIVATE ${spdlog_SOURCE_DIR}/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${stduuid_SOURCE_DIR}/include)
+        # Use existing earcut from contrib
+        target_include_directories(${THE_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/earcut-hpp")
+    endfunction()
+    
+    MESSAGE(STATUS "Added Web-IFC dependency include paths")
+    SOURCE_GROUP( Contrib\\WebIFC
+            FILES
+            ${WebIFC_SRCS}
+    )
+    
+    # Apply Web-IFC parameter setter to configure dependencies (done later after assimp target is created)
+    set(WEBIFC_CONFIGURED FALSE)
+    
+    # Disable strict warnings for Web-IFC (third-party library)
+    if(NOT MSVC)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-unused-value -Wno-unused-const-variable -Wno-return-type -Wno-return-stack-address -Wno-unknown-pragmas -Wno-pragma-once-outside-header -Wno-unused-lambda-capture")
+        # Apply additional warning suppressions specifically to Web-IFC source files
+        foreach(webifc_file ${WebIFC_SRCS})
+            set_source_files_properties(${webifc_file} PROPERTIES 
+                COMPILE_FLAGS "-Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-unused-value -Wno-unused-const-variable -Wno-unused-local-typedefs -Wno-return-type -Wno-return-stack-address -Wno-unknown-pragmas -Wno-pragma-once-outside-header -Wno-unused-lambda-capture")
+        endforeach()
+        
+        # Apply warning suppressions to IFCLoader.cpp specifically (includes Web-IFC headers)
+        set_source_files_properties(AssetLib/IFC/IFCLoader.cpp PROPERTIES
+            COMPILE_FLAGS "-Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-unused-value -Wno-unused-const-variable -Wno-unused-local-typedefs -Wno-return-type -Wno-return-stack-address -Wno-unknown-pragmas -Wno-pragma-once-outside-header -Wno-unused-lambda-capture"
+        )
+        
+        # EMSCRIPTEN-specific optimizations for Web-IFC (mirroring upstream build)
+        if(EMSCRIPTEN)
+            message(STATUS "Applying EMSCRIPTEN-specific optimizations for Web-IFC")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto")  # Link Time Optimization for size reduction
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
+        endif()
+    endif()
+    
+    ADD_DEFINITIONS(-DASSIMP_ENABLE_WEBIFC)
+    MESSAGE(STATUS "Web-IFC enabled - full geometry extraction")
+    MESSAGE(STATUS "IFC importer enabled (Web-IFC ONLY)")
+ELSE() # IF (ASSIMP_BUILD_IFC_IMPORTER)
+    set(WebIFC_SRCS "")
+    MESSAGE(STATUS "IFC importer disabled")
+ENDIF() # IF (ASSIMP_BUILD_IFC_IMPORTER)
 # pugixml
 IF(ASSIMP_HUNTER_ENABLED)
   hunter_add_package(pugixml)
@@ -1365,6 +1554,7 @@ SET( assimp_src
   ${Meshlab_SRCS}
   ${Tinyusdz_SRCS}
   ${Tinyusdz_DEP_SOURCES}
+  ${WebIFC_SRCS}
   ${Pugixml_SRCS}
   ${stb_SRCS}
   # Necessary to show the headers in the project when using the VC++ generator:
@@ -1393,6 +1583,12 @@ ENDIF()
 
 ADD_LIBRARY( assimp ${assimp_src} )
 ADD_LIBRARY(assimp::assimp ALIAS assimp)
+
+# Configure Web-IFC dependencies if enabled
+IF (ASSIMP_BUILD_IFC_IMPORTER)
+    WEBIFC_PARAM_SETTER(assimp)
+    MESSAGE(STATUS "Applied Web-IFC parameter configuration to assimp target")
+ENDIF()
 
 # Add or remove dllexport tags depending on the library type.
 IF (BUILD_SHARED_LIBS)

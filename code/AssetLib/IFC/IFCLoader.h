@@ -39,37 +39,35 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ----------------------------------------------------------------------
 */
 
-/** @file  IFC.h
+/** @file  IFCLoader.h
  *  @brief Declaration of the Industry Foundation Classes (IFC) loader main class
+ *        Web-IFC integration for improved performance and compatibility with
+ *        IFC4, IFC2x3, IFC2x2, IFC1.5, IFC1.4, IFC1.3, IFC1.2, IFC1.1, IFC1.0,
  */
 #ifndef INCLUDED_AI_IFC_LOADER_H
 #define INCLUDED_AI_IFC_LOADER_H
 
 #include <assimp/BaseImporter.h>
 #include <assimp/LogAux.h>
+#include <memory>
+#include <vector>
+
+// Forward declarations for Web-IFC (always available to avoid compilation issues)
+namespace webifc::manager {
+    class ModelManager;
+}
+namespace webifc::geometry {
+    struct IfcFlatMesh;
+}
 
 namespace Assimp {
 
-// TinyFormatter.h
-namespace Formatter {
-
-template <typename T, typename TR, typename A>
-class basic_formatter;
-typedef class basic_formatter<char, std::char_traits<char>, std::allocator<char>> format;
-
-} // namespace Formatter
-
-namespace STEP {
-
-class DB;
-
-}
-
 // -------------------------------------------------------------------------------------------
 /** Load the IFC format, which is an open specification to describe building and construction
-    industry data.
+    industry data. This implementation uses the Web-IFC library for enhanced performance
+    and broader schema support.
 
- See http://en.wikipedia.org/wiki/Industry_Foundation_Classes
+    See http://en.wikipedia.org/wiki/Industry_Foundation_Classes
 */
 // -------------------------------------------------------------------------------------------
 class IFCImporter : public BaseImporter, public LogFunctions<IFCImporter> {
@@ -77,17 +75,25 @@ public:
     // loader settings, publicly accessible via their corresponding AI_CONFIG constants
     struct Settings {
         Settings() :
-                skipSpaceRepresentations(), useCustomTriangulation(), skipAnnotations(), conicSamplingAngle(10.f), cylindricalTessellation(32) {}
+                skipSpaceRepresentations(true), 
+                useCustomTriangulation(true), 
+                skipAnnotations(true), 
+                conicSamplingAngle(10.f), 
+                cylindricalTessellation(32),
+                coordinateToOrigin(false),
+                circleSegments(12) {}
 
         bool skipSpaceRepresentations;
         bool useCustomTriangulation;
         bool skipAnnotations;
         float conicSamplingAngle;
         int cylindricalTessellation;
+        bool coordinateToOrigin;
+        int circleSegments;
     };
 
-    IFCImporter() = default;
-    ~IFCImporter() override = default;
+    IFCImporter();
+    ~IFCImporter() override;
 
     // --------------------
     bool CanRead(const std::string &pFile,
@@ -108,6 +114,20 @@ protected:
 
 private:
     Settings settings;
+
+    // Web-IFC related members
+    webifc::manager::ModelManager* modelManager;
+    uint32_t currentModelID;
+    
+    // Web-IFC integration methods
+    void InitializeWebIFC();
+    void LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler);
+    void ExtractGeometry(uint32_t modelID, aiScene *pScene);
+    void ExtractMaterials(uint32_t modelID, aiScene *pScene);
+    void BuildSceneGraph(uint32_t modelID, aiScene *pScene);
+    aiMesh* ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flatMesh, uint32_t geometryIndex);
+    aiMaterial* CreateMaterialFromColor(const aiColor4D &color, const std::string &name);
+    void CleanupWebIFC(uint32_t modelID);
 
 }; // !class IFCImporter
 
