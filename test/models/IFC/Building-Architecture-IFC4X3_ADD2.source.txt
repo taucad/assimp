@@ -1,0 +1,8 @@
+Downloaded from https://github.com/buildingSMART/Sample-Test-Files/blob/3bc87aac08b930ae3f443dc73e82cf63ad0ae9cd/IFC%204.3.2.0%20(IFC4X3_ADD2)/PCERT-Sample-Scene/Building-Architecture.ifc (2025-08-12)
+
+(C) buildingSMART International Ltd.
+
+This work is licensed under the Creative Commons Attribution 4.0 International License. 
+More info and a link to the full license text is available on http://creativecommons.org/licenses/by/4.0/
+
+Read the full license on https://creativecommons.org/licenses/by/4.0/legalcode.txt
