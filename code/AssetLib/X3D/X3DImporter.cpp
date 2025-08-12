@@ -256,7 +256,12 @@ void X3DImporter::ParseFile(XmlParser &theParser) {
 
 bool X3DImporter::CanRead(const std::string &pFile, IOSystem * /*pIOHandler*/, bool checkSig) const {
     if (checkSig) {
-        if (GetExtension(pFile) == "x3d")
+        std::string ext = GetExtension(pFile);
+        if (ext == "x3d" || ext == "x3db" 
+#if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
+            || ext == "wrl" || ext == "x3dv"
+#endif
+        )
             return true;
     }
 
@@ -267,7 +272,7 @@ void X3DImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
     mpIOHandler = pIOHandler;
 
     Clear();
-    std::stringstream ss = ConvertVrmlFileToX3dXmlFile(pFile);
+    std::stringstream ss = ConvertVrmlFileToX3dXmlFile(pFile, pIOHandler);
     const bool isReadFromMem{ ss.str().length() > 0 };
     if (!isReadFromMem) {
         std::shared_ptr<IOStream> stream(pIOHandler->Open(pFile, "rb"));

@@ -50,15 +50,14 @@ using namespace Assimp;
 
 class utX3DImportExport : public AbstractImportExportBase {
 public:
-    bool importerTest() override {
-        Assimp::Importer importer;
-        const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/X3D/HelloX3dTrademark.x3d", aiProcess_ValidateDataStructure);
-        return nullptr != scene;
-    }
+    // All tests implemented as individual TEST_F functions below
 };
 
 TEST_F(utX3DImportExport, importX3DFromFileTest) {
-    EXPECT_TRUE(importerTest());
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/X3D/HelloX3dTrademark.x3d", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
 }
 
 TEST_F(utX3DImportExport, importX3DIndexedLineSet) {
@@ -94,4 +93,47 @@ TEST_F(utX3DImportExport, importX3DChevyTahoe) {
     //   ChevyTahoe.x3d should have 20 meshes but broken importer only has 19
     ASSERT_EQ(19u, scene->mNumMeshes); // Incorrect value from currently broken importer
     ASSERT_NE(20u, scene->mNumMeshes); // Correct value, to be restored when importer fixed
+}
+
+// X3DB format tests
+TEST_F(utX3DImportExport, importX3DBHelloWorld) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/X3DB/HelloWorld.x3db", aiProcess_ValidateDataStructure);
+    // X3DB (binary X3D) format is not currently supported by assimp X3D importer
+    // The file is recognized but fails to parse due to lack of binary X3D decoder
+    ASSERT_EQ(nullptr, scene);
+    
+    // Verify the importer recognizes the file extension but fails parsing
+    std::string error = importer.GetErrorString();
+    ASSERT_FALSE(error.empty());
+}
+
+// X3DV format tests (Classic VRML)
+TEST_F(utX3DImportExport, importX3DVHelloWorld) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/X3DV/HelloWorld.x3dv", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
+}
+
+// WRL format tests (VRML97)
+TEST_F(utX3DImportExport, importWRLHelloWorld) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/WRL/HelloWorld.wrl", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
+}
+
+TEST_F(utX3DImportExport, importWRLMotionCaptureROM) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/WRL/MotionCaptureROM.WRL", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(24u, scene->mNumMeshes);
+}
+
+TEST_F(utX3DImportExport, importWRLWuson) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/WRL/Wuson.wrl", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
 }

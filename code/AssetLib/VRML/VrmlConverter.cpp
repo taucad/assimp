@@ -46,6 +46,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_X3D_IMPORTER
 
 #include <memory> // std::unique_ptr
+#include <fstream>
+#include <sstream>
+#include <cstdlib> // mbstowcs
 #include "VrmlConverter.hpp"
 
 namespace Assimp {
@@ -75,24 +78,65 @@ bool isFileX3dvClassicVrmlExt(const std::string &pFile) {
 }
 
 #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
-static VrmlTranslator::Scanner createScanner(const std::string &pFile) {
-    std::unique_ptr<wchar_t[]> wide_stringPtr{ new wchar_t[ pFile.length() + 1 ] };
-    std::copy(pFile.begin(), pFile.end(), wide_stringPtr.get());
-    wide_stringPtr[ pFile.length() ] = 0;
-
-    return VrmlTranslator::Scanner(wide_stringPtr.get());
-} // wide_stringPtr auto-deleted when leaving scope
+static VrmlTranslator::Scanner createScanner(const std::string &fileContent) {
+    // Use the buffer constructor, not the filename constructor
+    const unsigned char* buffer = reinterpret_cast<const unsigned char*>(fileContent.c_str());
+    int len = static_cast<int>(fileContent.length());
+    
+    return VrmlTranslator::Scanner(buffer, len);
+}
 #endif // #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
 
-std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile) {
+std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile, IOSystem *pIOHandler) {
     std::stringstream ss;
     if (isFileWrlVrml97Ext(pFile) || isFileX3dvClassicVrmlExt(pFile)) {
 #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
-        VrmlTranslator::Scanner scanner = createScanner(pFile);
-        VrmlTranslator::Parser parser(&scanner);
-        parser.Parse();
-        ss.str("");
-        parser.doc_.save(ss);
+        std::string content;
+        bool fileLoaded = false;
+        
+        // Try to read using IOSystem first (for WASM/Emscripten)
+        if (pIOHandler) {
+            IOStream* pStream = pIOHandler->Open(pFile, "rb");
+            if (pStream) {
+                size_t fileSize = pStream->FileSize();
+                if (fileSize > 0) {
+                    content.resize(fileSize);
+                    size_t bytesRead = pStream->Read(&content[0], 1, fileSize);
+                    if (bytesRead == fileSize) {
+                        fileLoaded = true;
+                    } else {
+                        content.clear();
+                    }
+                }
+                pIOHandler->Close(pStream);
+            }
+        }
+        
+        // Fallback to std::ifstream (for native builds)
+        if (!fileLoaded) {
+            std::ifstream file(pFile, std::ios::in);
+            if (file.is_open()) {
+                std::stringstream fileContent;
+                fileContent << file.rdbuf();
+                file.close();
+                content = fileContent.str();
+                fileLoaded = true;
+            }
+        }
+        
+        if (fileLoaded && content.size() > 0) {
+            try {
+                VrmlTranslator::Scanner scanner = createScanner(content);
+                VrmlTranslator::Parser parser(&scanner);
+                parser.Parse();
+                ss.str("");
+                parser.doc_.save(ss);
+            } catch (const std::exception& e) {
+                // Silent error handling - parsing failed
+            } catch (...) {
+                // Silent error handling - unknown exception
+            }
+        }
 #endif // #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
     }
     return ss;

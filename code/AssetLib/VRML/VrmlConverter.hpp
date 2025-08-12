@@ -43,6 +43,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <sstream>
 #include <string>
+#include <assimp/IOSystem.hpp>
+#include <assimp/IOStream.hpp>
 
 #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
 #include "contrib/meshlab/autoclone/meshlab_repo-src/src/meshlabplugins/io_x3d/vrml/Parser.h"
@@ -53,5 +55,5 @@ namespace Assimp {
 bool isFileWrlVrml97Ext(const std::string &pFile);
 bool isFileX3dvClassicVrmlExt(const std::string &pFile);
 
-std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile);
+std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile, IOSystem *pIOHandler = nullptr);
 } // namespace Assimp
