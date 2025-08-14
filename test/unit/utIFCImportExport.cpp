@@ -2117,8 +2117,8 @@ TEST_F(utIFCImportExport, storeyElevationSorting) {
 
 // Test IFC element name extraction for meshes
     TEST_F(utIFCImportExport, multiMaterialMeshSplitting) {
-        // Test that multi-material elements like windows get properly split
-        // EG-Fenster-1 (Ground Floor Window-1) should be split into 2 meshes:
+        // Test that multi-material elements like windows create proper node hierarchy
+        // EG-Fenster-1 should be a parent node with 2 child nodes:
         // one for the frame material and one for the glass material
         
         Assimp::Importer importer;
@@ -2126,33 +2126,59 @@ TEST_F(utIFCImportExport, storeyElevationSorting) {
         ASSERT_NE(nullptr, scene);
         ASSERT_TRUE(scene->HasMeshes());
         
-        // Look for EG-Fenster-1 meshes (should appear twice with different materials)
-        std::vector<std::string> fensterMeshNames;
-        for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-            std::string meshName(scene->mMeshes[i]->mName.C_Str());
-            if (meshName.find("EG-Fenster-1") != std::string::npos) {
-                fensterMeshNames.push_back(meshName);
+        // Helper function to recursively find a node by name
+        std::function<aiNode*(aiNode*, const std::string&)> findNodeByName = 
+            [&](aiNode* node, const std::string& targetName) -> aiNode* {
+                if (!node) return nullptr;
+                
+                std::string nodeName(node->mName.C_Str());
+                if (nodeName == targetName) {
+                    return node;
+                }
+                
+                // Search children recursively
+                for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+                    aiNode* found = findNodeByName(node->mChildren[i], targetName);
+                    if (found) return found;
+                }
+                return nullptr;
+            };
+        
+        // Find the EG-Fenster-1 parent node
+        aiNode* fensterNode = findNodeByName(scene->mRootNode, "EG-Fenster-1");
+        ASSERT_NE(nullptr, fensterNode) << "EG-Fenster-1 parent node not found";
+        
+        // Debug output
+        std::cout << "Found EG-Fenster-1 parent node with " << fensterNode->mNumChildren << " children" << std::endl;
+        
+        // Should have exactly 2 child nodes for different materials
+        EXPECT_EQ(fensterNode->mNumChildren, 2u);
+        
+        // Verify each child has a mesh with different materials
+        std::set<unsigned int> materialIndices;
+        for (unsigned int i = 0; i < fensterNode->mNumChildren; ++i) {
+            aiNode* childNode = fensterNode->mChildren[i];
+            std::string childName(childNode->mName.C_Str());
+            
+            // Each child should have exactly one mesh
+            EXPECT_EQ(childNode->mNumMeshes, 1u) << "Child node " << childName << " should have exactly 1 mesh";
+            
+            if (childNode->mNumMeshes > 0) {
+                unsigned int meshIndex = childNode->mMeshes[0];
+                unsigned int materialIndex = scene->mMeshes[meshIndex]->mMaterialIndex;
+                materialIndices.insert(materialIndex);
                 
                 // Debug output
-                std::cout << "Found EG-Fenster-1 mesh: '" << meshName << "' with material index: " << scene->mMeshes[i]->mMaterialIndex << std::endl;
+                std::cout << "Child node '" << childName << "' has mesh with material index: " << materialIndex << std::endl;
+                
+                // Child names should contain material suffix
+                EXPECT_TRUE(childName.find("EG-Fenster-1_Material_") != std::string::npos) 
+                    << "Child node name should contain material suffix: " << childName;
             }
         }
         
-        // Should have exactly 2 meshes: one for frame, one for glass
-        EXPECT_EQ(fensterMeshNames.size(), 2u) << "EG-Fenster-1 should be split into 2 meshes (frame + glass)";
-        
-        // Each should have material name appended
-        bool hasFrameMaterial = false;
-        bool hasGlassMaterial = false;
-        for (const auto& name : fensterMeshNames) {
-            if (name.find("_") != std::string::npos) {
-                // Should have material suffix
-                hasFrameMaterial = hasFrameMaterial || (name.find("Frame") != std::string::npos || name.find("Material") != std::string::npos);
-                hasGlassMaterial = hasGlassMaterial || (name.find("Glass") != std::string::npos || name.find("Transparent") != std::string::npos);
-            }
-        }
-        
-        EXPECT_TRUE(hasFrameMaterial || hasGlassMaterial) << "At least one mesh should have a material-specific suffix";
+        // Should have 2 different materials
+        EXPECT_EQ(materialIndices.size(), 2u) << "Should have 2 different materials";
     }
 
     TEST_F(utIFCImportExport, ifcElementNameExtraction) {

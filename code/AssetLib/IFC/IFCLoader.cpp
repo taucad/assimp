@@ -2101,43 +2101,130 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
             storeyNode = node; // Fallback to root
         }
         
-        // Create mesh nodes for this storey
+        // Group meshes by ExpressID to create proper hierarchy for multi-material elements
+        std::unordered_map<uint32_t, std::vector<unsigned int>> expressIDToMeshes;
+        std::unordered_map<uint32_t, IFCMeshMetadata> expressIDToMetadata;
+        
+        // Group meshes by their ExpressID (IFC element)
         for (unsigned int meshIndex : meshIndices) {
-            std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
-            
-            aiNode* meshNode = new aiNode();
-            meshNode->mName = aiString(meshName);
-            meshNode->mParent = storeyNode;
-            
-            // Add IFC metadata to the mesh node
             auto metadataIt = meshToIFCMetadata.find(meshIndex);
             if (metadataIt != meshToIFCMetadata.end()) {
-                const auto& ifcMeta = metadataIt->second;
-                meshNode->mMetaData = aiMetadata::Alloc(2);
-                meshNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
-                meshNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+                uint32_t expressID = metadataIt->second.expressID;
+                expressIDToMeshes[expressID].push_back(meshIndex);
+                expressIDToMetadata[expressID] = metadataIt->second;
+            } else {
+                // Fallback for meshes without metadata - treat as individual elements
+                expressIDToMeshes[0].push_back(meshIndex);
             }
-            
-            meshNode->mNumMeshes = 1;
-            meshNode->mMeshes = new unsigned int[1];
-            meshNode->mMeshes[0] = meshIndex;
-            
-            // Add mesh node as child to the storey
-            unsigned int newChildCount = storeyNode->mNumChildren + 1;
-            aiNode** newChildren = new aiNode*[newChildCount];
-            
-            // Copy existing children
-            for (unsigned int i = 0; i < storeyNode->mNumChildren; ++i) {
-                newChildren[i] = storeyNode->mChildren[i];
+        }
+        
+        // Create nodes for each ExpressID group
+        for (const auto& [expressID, meshIndicesForElement] : expressIDToMeshes) {
+            if (meshIndicesForElement.size() == 1) {
+                // Single mesh - create node directly (existing behavior)
+                unsigned int meshIndex = meshIndicesForElement[0];
+                std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
+                
+                aiNode* meshNode = new aiNode();
+                meshNode->mName = aiString(meshName);
+                meshNode->mParent = storeyNode;
+                
+                // Add IFC metadata to the mesh node
+                auto metadataIt = meshToIFCMetadata.find(meshIndex);
+                if (metadataIt != meshToIFCMetadata.end()) {
+                    const auto& ifcMeta = metadataIt->second;
+                    meshNode->mMetaData = aiMetadata::Alloc(2);
+                    meshNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
+                    meshNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+                }
+                
+                meshNode->mNumMeshes = 1;
+                meshNode->mMeshes = new unsigned int[1];
+                meshNode->mMeshes[0] = meshIndex;
+                
+                // Add mesh node as child to the storey
+                unsigned int newChildCount = storeyNode->mNumChildren + 1;
+                aiNode** newChildren = new aiNode*[newChildCount];
+                
+                // Copy existing children
+                for (unsigned int i = 0; i < storeyNode->mNumChildren; ++i) {
+                    newChildren[i] = storeyNode->mChildren[i];
+                }
+                
+                // Add new mesh node
+                newChildren[storeyNode->mNumChildren] = meshNode;
+                
+                // Update storey node
+                delete[] storeyNode->mChildren;
+                storeyNode->mChildren = newChildren;
+                storeyNode->mNumChildren = newChildCount;
+                
+            } else {
+                // Multi-material element - create parent node with child nodes for each material
+                auto metadataIt = expressIDToMetadata.find(expressID);
+                std::string elementName = "IFC_Element";
+                if (metadataIt != expressIDToMetadata.end() && !metadataIt->second.elementName.empty()) {
+                    elementName = metadataIt->second.elementName;
+                }
+                
+                // Create parent node for the element
+                aiNode* parentNode = new aiNode();
+                parentNode->mName = aiString(elementName);
+                parentNode->mParent = storeyNode;
+                
+                // Add IFC metadata to parent node
+                if (metadataIt != expressIDToMetadata.end()) {
+                    const auto& ifcMeta = metadataIt->second;
+                    parentNode->mMetaData = aiMetadata::Alloc(2);
+                    parentNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
+                    parentNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+                }
+                
+                // Create child nodes for each material mesh
+                parentNode->mNumChildren = static_cast<unsigned int>(meshIndicesForElement.size());
+                parentNode->mChildren = new aiNode*[parentNode->mNumChildren];
+                
+                for (unsigned int i = 0; i < meshIndicesForElement.size(); ++i) {
+                    unsigned int meshIndex = meshIndicesForElement[i];
+                    std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
+                    
+                    aiNode* childNode = new aiNode();
+                    childNode->mName = aiString(meshName);
+                    childNode->mParent = parentNode;
+                    
+                    // Add IFC metadata to child node (same as parent, but represents the material-specific mesh)
+                    auto childMetadataIt = meshToIFCMetadata.find(meshIndex);
+                    if (childMetadataIt != meshToIFCMetadata.end()) {
+                        const auto& ifcMeta = childMetadataIt->second;
+                        childNode->mMetaData = aiMetadata::Alloc(2);
+                        childNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
+                        childNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+                    }
+                    
+                    childNode->mNumMeshes = 1;
+                    childNode->mMeshes = new unsigned int[1];
+                    childNode->mMeshes[0] = meshIndex;
+                    
+                    parentNode->mChildren[i] = childNode;
+                }
+                
+                // Add parent node to the storey
+                unsigned int newChildCount = storeyNode->mNumChildren + 1;
+                aiNode** newChildren = new aiNode*[newChildCount];
+                
+                // Copy existing children
+                for (unsigned int i = 0; i < storeyNode->mNumChildren; ++i) {
+                    newChildren[i] = storeyNode->mChildren[i];
+                }
+                
+                // Add new parent node
+                newChildren[storeyNode->mNumChildren] = parentNode;
+                
+                // Update storey node
+                delete[] storeyNode->mChildren;
+                storeyNode->mChildren = newChildren;
+                storeyNode->mNumChildren = newChildCount;
             }
-            
-            // Add new mesh node
-            newChildren[storeyNode->mNumChildren] = meshNode;
-            
-            // Update storey node
-            delete[] storeyNode->mChildren;
-            storeyNode->mChildren = newChildren;
-            storeyNode->mNumChildren = newChildCount;
         }
         
         if (!DefaultLogger::isNullLogger()) {
