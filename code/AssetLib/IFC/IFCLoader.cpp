@@ -1913,22 +1913,19 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
             buildingNode->mParent = siteNode;
             buildingNodes.push_back(buildingNode);
             
-            // Build Stories under Building
-            std::vector<uint32_t> storeyIDs;
-            for (uint32_t lineID : allLineIDs) {
-                try {
-                    if (ifcLoader->GetLineType(lineID) == IFCBUILDINGSTOREY) {
-                        storeyIDs.push_back(lineID);
-                    }
-                } catch (...) { /* Skip invalid lines */ }
-            }
+            // Build Stories under Building - use elevation sorting for proper hierarchy
+            std::vector<StoreyInfo> sortedStoreys = GetSortedStoreysByElevation(ifcLoader);
             
             std::vector<aiNode*> storeyNodes;
             
-            for (uint32_t storeyID : storeyIDs) {
-                aiNode* storeyNode = CreateNodeFromIFCElement(ifcLoader, storeyID, "IFC_BuildingStorey");
+            for (const StoreyInfo& storeyInfo : sortedStoreys) {
+                aiNode* storeyNode = CreateNodeFromIFCElement(ifcLoader, storeyInfo.expressID, "IFC_BuildingStorey");
                 storeyNode->mParent = buildingNode;
                 storeyNodes.push_back(storeyNode);
+                
+                if (!DefaultLogger::isNullLogger()) {
+                    LogDebug("IFC: Added storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation, " to building hierarchy");
+                }
                 
                 // Build Spaces under Storey (optional)
                 std::vector<uint32_t> spaceIDs;

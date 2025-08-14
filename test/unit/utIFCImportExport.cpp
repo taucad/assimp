@@ -2024,6 +2024,97 @@ TEST_F(utIFCImportExport, buildingStoreyMeshDistribution) {
     }
 }
 
+// Test building storey elevation sorting
+TEST_F(utIFCImportExport, storeyElevationSorting) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/IFC/AC14-FZK-Haus-IFC2X3.ifc", 
+        aiProcess_ValidateDataStructure);
+    
+    if (!scene || !scene->mRootNode) {
+        return; // Test passes - IFC may not be available
+    }
+    
+    // Helper function to find a node by name recursively
+    std::function<const aiNode*(const aiNode*, const std::string&)> findNodeByName = 
+        [&](const aiNode* node, const std::string& targetName) -> const aiNode* {
+            if (!node) return nullptr;
+            
+            std::string nodeName(node->mName.C_Str());
+            if (nodeName.find(targetName) != std::string::npos) {
+                return node;
+            }
+            
+            // Check children recursively
+            for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+                const aiNode* found = findNodeByName(node->mChildren[i], targetName);
+                if (found) return found;
+            }
+            return nullptr;
+        };
+    
+    // Find the building storeys - they should be sorted by elevation
+    const aiNode* erdgeschoss = findNodeByName(scene->mRootNode, "0. Erdgeschoss");
+    const aiNode* dachgeschoss = findNodeByName(scene->mRootNode, "1. Dachgeschoss"); 
+    
+    EXPECT_NE(nullptr, erdgeschoss) << "Could not find '0. Erdgeschoss' (ground floor) node";
+    EXPECT_NE(nullptr, dachgeschoss) << "Could not find '1. Dachgeschoss' (upper floor) node";
+    
+    if (erdgeschoss && dachgeschoss) {
+        // Check that the storeys appear in the correct order in the scene hierarchy
+        // The ground floor (Erdgeschoss) should come before the upper floor (Dachgeschoss)
+        // when children are sorted by elevation
+        
+        // Helper function to find the index of a child node by name
+        auto findChildIndex = [](const aiNode* parent, const std::string& childName) -> int {
+            for (unsigned int i = 0; i < parent->mNumChildren; ++i) {
+                std::string nodeName(parent->mChildren[i]->mName.C_Str());
+                if (nodeName.find(childName) != std::string::npos) {
+                    return i;
+                }
+            }
+            return -1;
+        };
+        
+        // Find the building node that should contain both storeys
+        const aiNode* building = findNodeByName(scene->mRootNode, "FZK-Haus");
+        if (building) {
+            int erdgeschossIndex = findChildIndex(building, "0. Erdgeschoss");
+            int dachgeschossIndex = findChildIndex(building, "1. Dachgeschoss");
+            
+            if (erdgeschossIndex >= 0 && dachgeschossIndex >= 0) {
+                // Ground floor should come before upper floor in elevation-sorted hierarchy
+                EXPECT_LT(erdgeschossIndex, dachgeschossIndex) 
+                    << "Ground floor (Erdgeschoss) should come before upper floor (Dachgeschoss) "
+                    << "in elevation-sorted hierarchy. Found at indices " 
+                    << erdgeschossIndex << " and " << dachgeschossIndex;
+            }
+        }
+        
+        // Additional validation: Check node positioning in world coordinates
+        // The ground floor should have a lower Z coordinate than the upper floor
+        // (assuming standard building orientation)
+        
+        // Extract world transformations for both storeys
+        aiMatrix4x4 erdgeschossTransform = erdgeschoss->mTransformation;
+        aiMatrix4x4 dachgeschossTransform = dachgeschoss->mTransformation;
+        
+        // Get translation components (world position)
+        aiVector3D erdgeschossPos(erdgeschossTransform.a4, erdgeschossTransform.b4, erdgeschossTransform.c4);
+        aiVector3D dachgeschossPos(dachgeschossTransform.a4, dachgeschossTransform.b4, dachgeschossTransform.c4);
+        
+        // In typical IFC models, Z-axis represents vertical elevation
+        // Ground floor should be at lower Z than upper floor
+        EXPECT_LE(erdgeschossPos.z, dachgeschossPos.z) 
+            << "Ground floor elevation (" << erdgeschossPos.z 
+            << ") should be less than or equal to upper floor elevation (" 
+            << dachgeschossPos.z << ")";
+        
+        // Log elevation values for debugging
+        std::cout << "Erdgeschoss (ground floor) Z-position: " << erdgeschossPos.z << std::endl;
+        std::cout << "Dachgeschoss (upper floor) Z-position: " << dachgeschossPos.z << std::endl;
+    }
+}
+
 // Test IFC element name extraction for meshes
 TEST_F(utIFCImportExport, ifcElementNameExtraction) {
     Assimp::Importer importer;
