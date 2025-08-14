@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 // Suppress warnings from Web-IFC third-party headers
 #pragma GCC diagnostic push
@@ -526,9 +527,6 @@ aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flat
     // TODO: Replace with actual UV coordinates when Web-IFC provides them
     GenerateTextureCoordinates(mesh, minBounds, maxBounds);
     
-    // Add vertex colors if available from Web-IFC color data
-    AddVertexColorsFromIFCData(mesh, assimpColor);
-    
     // Set up faces
     mesh->mNumFaces = static_cast<unsigned int>(numFaces);
     mesh->mFaces = new aiFace[numFaces];
@@ -628,17 +626,20 @@ aiMaterial* IFCImporter::CreateMaterialFromColor(const aiColor4D &color, const s
     int shadingModel = aiShadingMode_Phong;
     material->AddProperty(&shadingModel, 1, AI_MATKEY_SHADING_MODEL);
     
+    // Convert sRGB input to linear RGB for both properties
+    aiColor4D linearColor = ConvertSRGBToLinear(aiColor4D(color.r, color.g, color.b, color.a));
+    
     // Set diffuse color (RGB components - note: aiColor3D doesn't support alpha)
-    aiColor3D diffuseColor(color.r, color.g, color.b);
+    // Use linear RGB values for consistency with modern rendering pipelines
+    aiColor3D diffuseColor(linearColor.r, linearColor.g, linearColor.b);
     material->AddProperty(&diffuseColor, 1, AI_MATKEY_COLOR_DIFFUSE);
     
-    // Set diffuse with alpha
-    aiColor4D diffuseColor4D(color.r, color.g, color.b, color.a);
+    // Set diffuse with alpha - using linear RGB values
+    aiColor4D diffuseColor4D(linearColor.r, linearColor.g, linearColor.b, linearColor.a);
     material->AddProperty(&diffuseColor4D, 1, AI_MATKEY_COLOR_DIFFUSE);
     
-    // Set base color with alpha
-    aiColor4D baseColor(color.r, color.g, color.b, color.a);
-    material->AddProperty(&baseColor, 1, AI_MATKEY_BASE_COLOR);
+    // Set base color with alpha - using linear RGB values
+    material->AddProperty(&linearColor, 1, AI_MATKEY_BASE_COLOR);
     
     // Handle transparency from alpha channel
     float opacity = color.a;
@@ -655,6 +656,12 @@ aiMaterial* IFCImporter::CreateMaterialFromColor(const aiColor4D &color, const s
     // Set shininess for Phong reflection
     float shininess = 64.0f; // Higher for more realistic Phong shading
     material->AddProperty(&shininess, 1, AI_MATKEY_SHININESS);
+    
+    // Set explicit PBR properties for better glTF export compatibility
+    float metallicFactor = 0.0f; // IFC materials are typically non-metallic
+    float roughnessFactor = 1.0f; // Default to fully rough for architectural materials
+    material->AddProperty(&metallicFactor, 1, AI_MATKEY_METALLIC_FACTOR);
+    material->AddProperty(&roughnessFactor, 1, AI_MATKEY_ROUGHNESS_FACTOR);
     
     return material;
 }
@@ -778,6 +785,12 @@ void IFCImporter::ExtractMaterialProperties(
     material->AddProperty(&diffuseColor, 1, AI_MATKEY_COLOR_DIFFUSE);
     material->AddProperty(&specularColor, 1, AI_MATKEY_COLOR_SPECULAR);
     material->AddProperty(&shininess, 1, AI_MATKEY_SHININESS);
+    
+    // Set explicit PBR properties for better glTF export compatibility
+    float metallicFactor = 0.0f; // IFC materials are typically non-metallic
+    float roughnessFactor = 1.0f; // Default to fully rough for architectural materials
+    material->AddProperty(&metallicFactor, 1, AI_MATKEY_METALLIC_FACTOR);
+    material->AddProperty(&roughnessFactor, 1, AI_MATKEY_ROUGHNESS_FACTOR);
 }
 
 void IFCImporter::ExtractColorFromRGB(
@@ -914,6 +927,12 @@ void IFCImporter::ProcessSurfaceStyle(
         
         float shininess = 32.0f;
         material->AddProperty(&shininess, 1, AI_MATKEY_SHININESS);
+        
+        // Set explicit PBR properties for better glTF export compatibility
+        float metallicFactor = 0.0f; // IFC materials are typically non-metallic
+        float roughnessFactor = 1.0f; // Default to fully rough for architectural materials
+        material->AddProperty(&metallicFactor, 1, AI_MATKEY_METALLIC_FACTOR);
+        material->AddProperty(&roughnessFactor, 1, AI_MATKEY_ROUGHNESS_FACTOR);
         
         unsigned int materialIndex = static_cast<unsigned int>(materials.size());
         materials.push_back(material.release());
@@ -1277,35 +1296,6 @@ void IFCImporter::GenerateTextureCoordinates(aiMesh* mesh, const aiVector3D& min
 #endif
 }
 
-void IFCImporter::AddVertexColorsFromIFCData(aiMesh* mesh, const aiColor4D& ifcColor) {
-    if (!mesh || !mesh->mVertices) {
-        return;
-    }
-    
-    // Only add vertex colors if the color is meaningful (not default gray)
-    // and has some transparency or distinct color values
-    bool hasDistinctColor = (ifcColor.r != 0.8f || ifcColor.g != 0.8f || ifcColor.b != 0.8f) || 
-                           (ifcColor.a < 1.0f);
-    
-    if (!hasDistinctColor) {
-        return; // Skip vertex colors for default/gray materials
-    }
-    
-    // Allocate vertex colors
-    mesh->mColors[0] = new aiColor4D[mesh->mNumVertices];
-    
-    // Apply the IFC color to all vertices
-    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
-        mesh->mColors[0][i] = ifcColor;
-    }
-    
-#ifdef IFC_LOADER_DEBUG
-    if (!DefaultLogger::isNullLogger()) {
-        LogDebug("Added vertex colors to mesh: RGBA(", ifcColor.r, ", ", ifcColor.g, ", ", ifcColor.b, ", ", ifcColor.a, ")");
-    }
-#endif
-}
-
 aiColor4D IFCImporter::ConvertWebIFCColor(const glm::dvec4& webifcColor) {
     // Convert Web-IFC color directly to aiColor4D (0-1 range)
     return aiColor4D(
@@ -1313,6 +1303,24 @@ aiColor4D IFCImporter::ConvertWebIFCColor(const glm::dvec4& webifcColor) {
         static_cast<float>(webifcColor.g),
         static_cast<float>(webifcColor.b),
         static_cast<float>(webifcColor.a)
+    );
+}
+
+aiColor4D IFCImporter::ConvertSRGBToLinear(const aiColor4D& srgbColor) {
+    // Convert sRGB color values to linear RGB using standard gamma correction
+    auto srgbToLinear = [](float srgb) -> float {
+        if (srgb <= 0.04045f) {
+            return srgb / 12.92f;
+        } else {
+            return std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+        }
+    };
+    
+    return aiColor4D(
+        srgbToLinear(srgbColor.r),
+        srgbToLinear(srgbColor.g),
+        srgbToLinear(srgbColor.b),
+        srgbColor.a  // Alpha channel is not gamma-corrected
     );
 }
 
@@ -1335,7 +1343,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
     std::vector<aiVector3D> vertices;
     // Note: Normals computation disabled. Enable?
     // std::vector<aiVector3D> normals;
-    std::vector<aiColor4D> vertexColors; // Store per-vertex colors for transparency
+
     std::vector<aiFace> faces;
     std::vector<unsigned int> materialIndices;
     
@@ -1387,10 +1395,6 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
                 //     vertexDataVector[offset + 4],
                 //     vertexDataVector[offset + 5]
                 // );
-                
-                // Store vertex color for transparency
-                // This preserves transparency information per vertex
-                vertexColors.emplace_back(geometryColor);
             }
             
             // Determine material index using color-first approach
@@ -1447,14 +1451,6 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
             // if (i < normals.size()) {
             //     mesh->mNormals[i] = normals[i];
             // }
-        }
-        
-        // Set vertex colors for transparency support
-        if (!vertexColors.empty() && vertexColors.size() == vertices.size()) {
-            mesh->mColors[0] = new aiColor4D[vertexColors.size()];
-            for (size_t i = 0; i < vertexColors.size(); ++i) {
-                mesh->mColors[0][i] = vertexColors[i];
-            }
         }
         
         mesh->mNumFaces = static_cast<unsigned int>(faces.size());
@@ -1598,7 +1594,6 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
     webifc::parsing::IfcLoader* ifcLoader,
     uint32_t expressID,
     const std::vector<aiVector3D>& vertices,
-    const std::vector<aiColor4D>& vertexColors,
     const std::vector<aiFace>& faces,
     const std::vector<unsigned int>& materialIndices) {
     
@@ -1634,8 +1629,7 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
         std::vector<aiVector3D> subVertices;
         // Note: Normals computation disabled. Enable?
         // std::vector<aiVector3D> subNormals;
-        std::vector<aiColor4D> subVertexColors;
-        
+
         // Process faces for this material
         std::vector<aiFace> subFaces;
         subFaces.reserve(faceIndices.size());
@@ -1661,10 +1655,7 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
                     // if (originalVertexIndex < normals.size()) {
                     //     subNormals.push_back(normals[originalVertexIndex]);
                     // }
-                    if (originalVertexIndex < vertexColors.size()) {
-                        subVertexColors.push_back(vertexColors[originalVertexIndex]);
-                    }
-                    
+
                     newFace.mIndices[i] = newVertexIndex;
                 } else {
                     // Reuse existing vertex
@@ -1689,13 +1680,6 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
         //         subMesh->mNormals[i] = subNormals[i];
         //     }
         // }
-        
-        if (!subVertexColors.empty() && subVertexColors.size() == subVertices.size()) {
-            subMesh->mColors[0] = new aiColor4D[subVertexColors.size()];
-            for (size_t i = 0; i < subVertexColors.size(); ++i) {
-                subMesh->mColors[0][i] = subVertexColors[i];
-            }
-        }
         
         subMesh->mNumFaces = static_cast<unsigned int>(subFaces.size());
         subMesh->mFaces = new aiFace[subFaces.size()];
@@ -1747,7 +1731,7 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
     std::vector<aiVector3D> vertices;
     // Note: Normals computation disabled. Enable?
     // std::vector<aiVector3D> normals;
-    std::vector<aiColor4D> vertexColors;
+
     std::vector<aiFace> faces;
     std::vector<unsigned int> materialIndices;
     
@@ -1790,9 +1774,6 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
                 // );
                 // glm::vec3 normalizedNormal = glm::normalize(glm::vec3(normal));
                 // normals.emplace_back(normalizedNormal.x, normalizedNormal.y, normalizedNormal.z);
-                
-                // Store vertex color for transparency support
-                vertexColors.push_back(geometryColor);
             }
             
             // Determine material index for this geometry
@@ -1831,7 +1812,7 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
         }
         
         // Now split by materials using our splitting function
-        return SplitMeshByMaterials(ifcLoader, expressID, vertices, vertexColors, faces, materialIndices);
+        return SplitMeshByMaterials(ifcLoader, expressID, vertices, faces, materialIndices);
         
     } catch (const std::exception &e) {
         if (!DefaultLogger::isNullLogger()) {

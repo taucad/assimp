@@ -1500,31 +1500,25 @@ TEST_F(utIFCImportExport, roofColorAccuracy) {
             if (nameStr == "E0661CFF") {
                 foundRoofColor = true;
                 
-                // Verify the material color matches the name
+                // Verify the material color matches the expected linear RGB values
                 aiColor4D baseColor;
                 if (scene->mMaterials[i]->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS) {
-                    // Convert back to hex to verify (using rounding to match implementation)
-                    auto toHex = [](float value) -> int {
-                        return static_cast<int>(std::round(std::min(std::max(value * 255.0f, 0.0f), 255.0f)));
-                    };
-                    
-                    int r = toHex(baseColor.r);
-                    int g = toHex(baseColor.g); 
-                    int b = toHex(baseColor.b);
-                    int a = toHex(baseColor.a);
-                    
-                    // Expected values for E0661CFF: 224, 102, 28, 255
-                    // Check that the rounded values match the hex name
-                    EXPECT_EQ(224, r) << "Red component should be 0xE0 (224) - baseColorFactor.r should be " << (224.0f/255.0f);
-                    EXPECT_EQ(102, g) << "Green component should be 0x66 (102) - baseColorFactor.g should be " << (102.0f/255.0f);
-                    EXPECT_EQ(28, b) << "Blue component should be 0x1C (28) - baseColorFactor.b should be " << (28.0f/255.0f);
-                    EXPECT_EQ(255, a) << "Alpha component should be 0xFF (255)";
-                    
-                    // Also verify the actual float values are correctly rounded
-                    EXPECT_FLOAT_EQ(224.0f/255.0f, baseColor.r) << "baseColorFactor.r should be 224/255 = " << (224.0f/255.0f);
-                    EXPECT_FLOAT_EQ(102.0f/255.0f, baseColor.g) << "baseColorFactor.g should be 102/255 = " << (102.0f/255.0f);
-                    EXPECT_FLOAT_EQ(28.0f/255.0f, baseColor.b) << "baseColorFactor.b should be 28/255 = " << (28.0f/255.0f);
+                    // Expected linear RGB values for E0661CFF (converted from sRGB to linear)
+                    // sRGB: E0661CFF (224, 102, 28, 255) -> Linear RGB: (0.7454, 0.1329, 0.0116, 1.0)
+                    EXPECT_FLOAT_EQ(0.7454042095350284f, baseColor.r) << "baseColorFactor.r should be linear RGB value 0.7454042095350284";
+                    EXPECT_FLOAT_EQ(0.13286832154414627f, baseColor.g) << "baseColorFactor.g should be linear RGB value 0.13286832154414627";
+                    EXPECT_FLOAT_EQ(0.011612245176281512f, baseColor.b) << "baseColorFactor.b should be linear RGB value 0.011612245176281512";
                     EXPECT_FLOAT_EQ(1.0f, baseColor.a) << "baseColorFactor.a should be 1.0";
+                }
+                
+                // Also verify diffuse color now uses linear RGB values for consistency
+                aiColor4D diffuseColor;
+                if (scene->mMaterials[i]->Get(AI_MATKEY_COLOR_DIFFUSE, diffuseColor) == AI_SUCCESS) {
+                    // Both base and diffuse should now have the same linear RGB values
+                    EXPECT_FLOAT_EQ(0.7454042095350284f, diffuseColor.r) << "diffuse color should also be linear RGB value 0.7454042095350284";
+                    EXPECT_FLOAT_EQ(0.13286832154414627f, diffuseColor.g) << "diffuse color should also be linear RGB value 0.13286832154414627";
+                    EXPECT_FLOAT_EQ(0.011612245176281512f, diffuseColor.b) << "diffuse color should also be linear RGB value 0.011612245176281512";
+                    EXPECT_FLOAT_EQ(1.0f, diffuseColor.a) << "diffuse color alpha should be 1.0";
                 }
                 break;
             }

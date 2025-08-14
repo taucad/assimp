@@ -148,7 +148,6 @@ private:
         webifc::parsing::IfcLoader* ifcLoader,
         uint32_t expressID,
         const std::vector<aiVector3D>& vertices,
-        const std::vector<aiColor4D>& vertexColors,
         const std::vector<aiFace>& faces,
         const std::vector<unsigned int>& materialIndices);
         
@@ -218,11 +217,14 @@ private:
     
     aiColor4D ConvertWebIFCColor(const glm::dvec4& webifcColor);
     
+    // sRGB to linear RGB conversion for proper color handling
+    aiColor4D ConvertSRGBToLinear(const aiColor4D& srgbColor);
+    
     // Texture coordinate generation
     void GenerateTextureCoordinates(aiMesh* mesh, const aiVector3D& minBounds, const aiVector3D& maxBounds);
     
     // Vertex color support
-    void AddVertexColorsFromIFCData(aiMesh* mesh, const aiColor4D& ifcColor);
+
     
     // Property extraction
     void ExtractElementProperties(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, aiNode* node);
