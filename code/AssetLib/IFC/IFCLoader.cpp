@@ -1831,12 +1831,6 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
 }
 
 void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiScene* pScene) {
-    // IFC Type constants (from Web-IFC schema)
-    const uint32_t IFCPROJECT = 103090709;
-    const uint32_t IFCSITE = 4097777520;
-    const uint32_t IFCBUILDING = 4031249490;
-    const uint32_t IFCBUILDINGSTOREY = 3124254112;
-    const uint32_t IFCSPACE = 3856911033;
     
     // Find and build the spatial hierarchy starting from IfcProject
     // Use a simple approach for now - Web-IFC API may not have GetExpressIDsWithType
@@ -1847,7 +1841,7 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
     for (uint32_t lineID : allLineIDs) {
         try {
             uint32_t elementType = ifcLoader->GetLineType(lineID);
-            if (elementType == IFCPROJECT) {
+            if (elementType == webifc::schema::IFCPROJECT) {
                 projectIDs.push_back(lineID);
             }
         } catch (...) {
@@ -1883,7 +1877,7 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
     std::vector<uint32_t> siteIDs;
     for (uint32_t lineID : allLineIDs) {
         try {
-            if (ifcLoader->GetLineType(lineID) == IFCSITE) {
+            if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCSITE) {
                 siteIDs.push_back(lineID);
             }
         } catch (...) { /* Skip invalid lines */ }
@@ -1900,7 +1894,7 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
         std::vector<uint32_t> buildingIDs;
         for (uint32_t lineID : allLineIDs) {
             try {
-                if (ifcLoader->GetLineType(lineID) == IFCBUILDING) {
+                if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCBUILDING) {
                     buildingIDs.push_back(lineID);
                 }
             } catch (...) { /* Skip invalid lines */ }
@@ -1931,13 +1925,11 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
                 std::vector<uint32_t> spaceIDs;
                 for (uint32_t lineID : allLineIDs) {
                     try {
-                        if (ifcLoader->GetLineType(lineID) == IFCSPACE) {
+                        if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCSPACE) {
                             spaceIDs.push_back(lineID);
                         }
                     } catch (...) { /* Skip invalid lines */ }
                 }
-                
-
                 
                 std::vector<aiNode*> spaceNodes;
                 
@@ -1945,8 +1937,6 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
                     aiNode* spaceNode = CreateNodeFromIFCElement(ifcLoader, spaceID, "IFC_Space");
                     spaceNode->mParent = storeyNode;
                     spaceNodes.push_back(spaceNode);
-                    
-
                 }
                 
                 // Assign space children to storey
@@ -2007,7 +1997,7 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
         bool useSpecialExtraction = false;
         int nameArgumentIndex = 2; // Default to argument 2 (Name)
         
-        if (elementType == 3856911033) { // IFCSPACE
+        if (elementType == webifc::schema::IFCSPACE) { // IFCSPACE
             nameArgumentIndex = 7; // Use argument 7 (LongName) for IFCSPACE
             useSpecialExtraction = true;
         }
@@ -2065,9 +2055,6 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
     
     // Set identity transformation matrix (can be enhanced with actual IFC placement later)
     node->mTransformation = aiMatrix4x4();
-    
-    // Extract and store properties as metadata (experimental)
-    ExtractElementProperties(ifcLoader, expressID, node);
     
     return node;
 }
@@ -2406,110 +2393,6 @@ aiNode* IFCImporter::FindBestMeshParent(aiNode* rootNode) {
         LogDebug("IFC: Using root node for mesh assignment (no spatial hierarchy found)");
     }
     return rootNode;
-}
-
-void IFCImporter::ExtractElementProperties(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, aiNode* node) {
-    try {
-        // Get the element type for context
-        uint32_t elementType = ifcLoader->GetLineType(expressID);
-        
-        // Try to extract basic properties from the IFC element
-        // Most IFC elements have: GlobalId (0), OwnerHistory (1), Name (2), Description (3), etc.
-        
-        // Extract GlobalId (argument 0) if present
-        try {
-            ifcLoader->MoveToLineArgument(expressID, 0);
-            if (ifcLoader->GetTokenType() == webifc::parsing::IfcTokenType::STRING) {
-                std::string globalId = ifcLoader->GetDecodedStringArgument();
-                if (!globalId.empty()) {
-                    // Store as metadata in node name if not already named
-                    if (node->mName.length == 0 || std::string(node->mName.C_Str()).find("_" + std::to_string(expressID)) != std::string::npos) {
-                        // Decode GlobalId including any IFC escape sequences and use first 8 chars
-                        std::string decodedGlobalId = DecodeIFCString(globalId);
-                        node->mName = aiString("IFC_" + std::to_string(elementType) + "_" + decodedGlobalId.substr(0, 8));
-                    }
-                }
-            }
-        } catch (...) {
-            // GlobalId extraction failed, continue
-        }
-        
-        // Extract Description (argument 3) if present and store in transformation matrix's unused component
-        try {
-            ifcLoader->MoveToLineArgument(expressID, 3);
-            if (ifcLoader->GetTokenType() == webifc::parsing::IfcTokenType::STRING) {
-                std::string description = ifcLoader->GetDecodedStringArgument();
-                if (!description.empty() && description.length() < 32) {
-                    // Decode description including German umlauts for logging
-                    std::string decodedDescription = DecodeIFCString(description);
-                    if (!DefaultLogger::isNullLogger()) {
-                        LogDebug("Element ", expressID, " description: ", decodedDescription);
-                    }
-                }
-            }
-        } catch (...) {
-            // Description extraction failed, continue
-        }
-        
-        // Extract additional type-specific properties
-        ExtractTypeSpecificProperties(ifcLoader, expressID, elementType);
-        
-    } catch (const std::exception &e) {
-        if (!DefaultLogger::isNullLogger()) {
-            LogDebug("Failed to extract properties for element ", expressID, ": ", e.what());
-        }
-    }
-}
-
-void IFCImporter::ExtractTypeSpecificProperties(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, uint32_t elementType) {
-    // IFC Type constants
-    const uint32_t IFCWALL = 2391406946;
-    const uint32_t IFCDOOR = 395920057;
-    const uint32_t IFCWINDOW = 3304561284;
-    const uint32_t IFCSLAB = 1529196076;
-    const uint32_t IFCBUILDINGSTOREY = 3124254112;
-    
-    try {
-        switch (elementType) {
-            case IFCWALL:
-                // Walls might have additional properties at different argument positions
-                // This is just demonstration - real property extraction would be more complex
-                break;
-                
-            case IFCDOOR:
-            case IFCWINDOW:
-                // Doors and windows might have width/height properties
-                break;
-                
-            case IFCSLAB:
-                // Slabs might have thickness properties
-                break;
-                
-            case IFCBUILDINGSTOREY:
-                // Building storeys have elevation properties (usually argument 8)
-                try {
-                    ifcLoader->MoveToLineArgument(expressID, 8);
-                    if (ifcLoader->GetTokenType() == webifc::parsing::IfcTokenType::REAL) {
-                        double elevation = ifcLoader->GetDoubleArgument();
-                        if (!DefaultLogger::isNullLogger()) {
-                            LogDebug("Building storey ", expressID, " elevation: ", elevation);
-                        }
-                    }
-                } catch (...) {
-                    // Elevation extraction failed
-                }
-                break;
-                
-            default:
-                // Generic element, no specific properties to extract
-                break;
-        }
-        
-    } catch (const std::exception &e) {
-        if (!DefaultLogger::isNullLogger()) {
-            LogDebug("Failed to extract type-specific properties for element ", expressID, " of type ", elementType, ": ", e.what());
-        }
-    }
 }
 
 #endif // !! ASSIMP_BUILD_NO_IFC_IMPORTER

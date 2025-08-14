@@ -54,6 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <algorithm>
 #include <cmath>
+#include "web-ifc/schema/IfcSchemaManager.h"
 
 using namespace Assimp;
 
@@ -714,7 +715,7 @@ TEST_F(utIFCImportExport, spatialHierarchyAdvanced) {
     EXPECT_TRUE(rootName.find("Project") != std::string::npos || 
                rootName.find("IFCPROJECT") != std::string::npos ||
                rootName.find("Projekt") != std::string::npos || // German for project
-               rootName.find("103090709") != std::string::npos); // IFC type ID
+               rootName.find(std::to_string(webifc::schema::IFCPROJECT)) != std::string::npos); // IFC type ID
     
     // Count depth of hierarchy 
     int maxDepth = 0;
@@ -749,10 +750,10 @@ TEST_F(utIFCImportExport, spatialHierarchyAdvanced) {
             nodeName.find("SPACE") != std::string::npos ||
             nodeName.find("HAUS") != std::string::npos ||      // German for house/building
             nodeName.find("GESCHOSS") != std::string::npos ||  // German for floor/storey
-            nodeName.find("4097777520") != std::string::npos || // IFCSITE
-            nodeName.find("4031249490") != std::string::npos || // IFCBUILDING
-            nodeName.find("3124254112") != std::string::npos || // IFCBUILDINGSTOREY
-            nodeName.find("3856911033") != std::string::npos) { // IFCSPACE
+            nodeName.find(std::to_string(webifc::schema::IFCSITE)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCBUILDING)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCBUILDINGSTOREY)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCSPACE)) != std::string::npos) {
             foundSpatialElement = true;
         }
         
@@ -898,12 +899,12 @@ TEST_F(utIFCImportExport, elementNamingAdvanced) {
                 type.find("SITE") != std::string::npos ||
                 type.find("PROJECT") != std::string::npos ||
                 // Type IDs
-                type.find("2391406946") != std::string::npos || // IFCWALL
-                type.find("395920057") != std::string::npos ||  // IFCDOOR
-                type.find("3304561284") != std::string::npos || // IFCWINDOW
-                type.find("1529196076") != std::string::npos || // IFCSLAB
-                type.find("843113511") != std::string::npos ||  // IFCCOLUMN
-                type.find("753842376") != std::string::npos) {  // IFCBEAM
+                type.find(std::to_string(webifc::schema::IFCWALL)) != std::string::npos ||
+                type.find(std::to_string(webifc::schema::IFCDOOR)) != std::string::npos ||
+                type.find(std::to_string(webifc::schema::IFCWINDOW)) != std::string::npos ||
+                type.find(std::to_string(webifc::schema::IFCSLAB)) != std::string::npos ||
+                type.find(std::to_string(webifc::schema::IFCCOLUMN)) != std::string::npos ||
+                type.find(std::to_string(webifc::schema::IFCBEAM)) != std::string::npos) { 
                 foundBuildingElements = true;
                 break;
             }
@@ -991,10 +992,10 @@ TEST_F(utIFCImportExport, propertyMetadataExtraction) {
         }
         
         // Check for type information in names
-        if (nodeName.find("103090709") != std::string::npos || // IFCPROJECT
-            nodeName.find("4097777520") != std::string::npos || // IFCSITE
-            nodeName.find("4031249490") != std::string::npos || // IFCBUILDING
-            nodeName.find("3124254112") != std::string::npos) { // IFCBUILDINGSTOREY
+        if (nodeName.find(std::to_string(webifc::schema::IFCPROJECT)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCSITE)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCBUILDING)) != std::string::npos ||
+            nodeName.find(std::to_string(webifc::schema::IFCBUILDINGSTOREY)) != std::string::npos) {
             foundPropertyData = true;
         }
         
