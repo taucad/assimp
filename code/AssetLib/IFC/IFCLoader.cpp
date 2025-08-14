@@ -22,9 +22,9 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
+
 #include <cmath>
+#include <cfloat>
 
 // Suppress warnings from Web-IFC third-party headers
 #pragma GCC diagnostic push
@@ -56,6 +56,15 @@ const char *LogFunctions<IFCImporter>::Prefix() {
 } // namespace Assimp
 
 using namespace Assimp;
+
+// IFC Entity Argument Indices - Named constants for better maintainability
+namespace IFCArguments {
+    // Common IFC entity argument indices (0-based)
+    static constexpr int NAME_INDEX = 2;       // Position of Name argument (common to most entities)
+    
+    // IFCBUILDINGSTOREY specific argument indices
+    static constexpr int ELEVATION_INDEX = 9;  // Position of Elevation argument
+}
 
 // ------------------------------------------------------------------------------------------------
 IFCImporter::IFCImporter() : modelManager(nullptr), currentModelID(0) {
@@ -281,12 +290,12 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
                 if (assimpMesh) {
                     // Check if this mesh needs to be split by materials
                     std::string meshName = assimpMesh->mName.C_Str();
-                    if (meshName.find("NeedsSplitting_") == 0) {
+                    if (meshName == "IFC_MultiMaterial_Element") {
                         // This is a multi-material mesh - split it
                         
-                        // We need to re-extract the mesh data for splitting
-                        // For now, delete this mesh and recreate it split
-                        delete assimpMesh;
+                        // Use RAII pattern for exception safety: create replacement before deleting original
+                        std::unique_ptr<aiMesh> originalMesh(assimpMesh); // Take ownership
+                        assimpMesh = nullptr; // Clear original pointer
                         
                         // Re-process this flatMesh with splitting enabled
                         auto splitMeshes = CreateSplitMeshesFromFlatMesh(loader, expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
@@ -312,8 +321,8 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
                         if (!elementName.empty()) {
                             assimpMesh->mName = aiString(elementName);
                         } else {
-                            // Fallback to expressID-based naming
-                            assimpMesh->mName = aiString("Mesh " + std::to_string(expressID));
+                            // Use semantic fallback name - ExpressID stored in metadata
+                            assimpMesh->mName = aiString("IFC_Element");
                         }
                         
                         // Store IFC metadata for later node assignment
@@ -348,13 +357,16 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
                 newMaterials.push_back(pScene->mMaterials[i]);
             }
             
-            // Update scene materials
+            // Update scene materials using exception-safe RAII pattern
+            std::unique_ptr<aiMaterial*[]> newMaterialArray(new aiMaterial*[newMaterials.size()]);
+            for (size_t i = 0; i < newMaterials.size(); ++i) {
+                newMaterialArray[i] = newMaterials[i];
+            }
+            
+            // Now safely replace (no exceptions can occur here)
             delete[] pScene->mMaterials;
             pScene->mNumMaterials = static_cast<unsigned int>(newMaterials.size());
-            pScene->mMaterials = new aiMaterial*[newMaterials.size()];
-            for (size_t i = 0; i < newMaterials.size(); ++i) {
-                pScene->mMaterials[i] = newMaterials[i];
-            }
+            pScene->mMaterials = newMaterialArray.release();
             
             // Update all non-zero material indices in meshes (shift by 1)
             for (auto* mesh : meshes) {
@@ -364,13 +376,15 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
             }
         }
 
-        // Set up meshes in scene
-        pScene->mNumMeshes = static_cast<unsigned int>(meshes.size());
+        // Set up meshes in scene using exception-safe pattern
         if (!meshes.empty()) {
-            pScene->mMeshes = new aiMesh*[meshes.size()];
+            std::unique_ptr<aiMesh*[]> newMeshArray(new aiMesh*[meshes.size()]);
             for (size_t i = 0; i < meshes.size(); ++i) {
-                pScene->mMeshes[i] = meshes[i];
+                newMeshArray[i] = meshes[i];
             }
+            
+            pScene->mNumMeshes = static_cast<unsigned int>(meshes.size());
+            pScene->mMeshes = newMeshArray.release();
         }
         
         if (!DefaultLogger::isNullLogger()) {
@@ -716,15 +730,15 @@ aiMaterial* IFCImporter::ExtractSingleIFCMaterial(
     auto material = std::make_unique<aiMaterial>();
     
     try {
-        // Extract material name (typically first argument)
-        std::string materialName = "IFC_Material_" + std::to_string(materialID);
+        // Extract material name (typically first argument) - use semantic naming
+        std::string materialName = "IFC_Material";
         try {
             ifcLoader->MoveToArgumentOffset(materialID, 0);
             if (ifcLoader->GetTokenType() == webifc::parsing::IfcTokenType::STRING) {
                 ifcLoader->MoveToArgumentOffset(materialID, 0);
                 std::string extractedName = ifcLoader->GetDecodedStringArgument();
                 if (!extractedName.empty()) {
-                    materialName = DecodeIFCString(extractedName);
+                    materialName = extractedName; // GetDecodedStringArgument already handles IFC decoding
                 }
             }
         } catch (...) {
@@ -898,15 +912,15 @@ void IFCImporter::ProcessSurfaceStyle(
     try {
         auto material = std::make_unique<aiMaterial>();
         
-        // Extract style name
-        std::string styleName = "IFC_SurfaceStyle_" + std::to_string(styleID);
+        // Extract style name - use semantic naming
+        std::string styleName = "IFC_SurfaceStyle";
         try {
             ifcLoader->MoveToArgumentOffset(styleID, 0);
             if (ifcLoader->GetTokenType() == webifc::parsing::IfcTokenType::STRING) {
                 ifcLoader->MoveToArgumentOffset(styleID, 0);
                 std::string extractedName = ifcLoader->GetDecodedStringArgument();
                 if (!extractedName.empty()) {
-                    styleName = DecodeIFCString(extractedName);
+                    styleName = extractedName; // GetDecodedStringArgument already handles IFC decoding
                 }
             }
         } catch (...) {
@@ -949,35 +963,7 @@ void IFCImporter::ProcessSurfaceStyle(
     }
 }
 
-void IFCImporter::SetMeshMaterialFromIFC(
-    uint32_t expressID,
-    aiMesh* mesh,
-    const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
-    const aiScene* pScene) {
-    
-    // Look up material relationship for this element
-    auto materialIt = relMaterials.find(expressID);
-    if (materialIt != relMaterials.end() && !materialIt->second.empty()) {
-        // Use the first material relationship found
-        uint32_t materialID = materialIt->second[0].first;
-        
-        // Find the corresponding material index in the scene
-        for (unsigned int i = 0; i < pScene->mNumMaterials; ++i) {
-            aiString materialName;
-            if (pScene->mMaterials[i]->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS) {
-                // Check if this material corresponds to our IFC material
-                std::string nameStr(materialName.C_Str());
-                if (nameStr.find(std::to_string(materialID)) != std::string::npos) {
-                    mesh->mMaterialIndex = i;
-                    return;
-                }
-            }
-        }
-    }
-    
-    // Fallback to default material (index 0)
-    mesh->mMaterialIndex = 0;
-}
+// SetMeshMaterialFromIFC removed - was dead code with O(n) performance issue
 
 void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
     try {
@@ -993,13 +979,14 @@ void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
         
         // Fallback: create a simple flat hierarchy
         if (pScene->mNumMeshes > 0) {
-            // Link all meshes to root node
-            pScene->mRootNode->mNumMeshes = pScene->mNumMeshes;
-            pScene->mRootNode->mMeshes = new unsigned int[pScene->mNumMeshes];
-            
+            // Link all meshes to root node using exception-safe pattern
+            std::unique_ptr<unsigned int[]> meshIndices(new unsigned int[pScene->mNumMeshes]);
             for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
-                pScene->mRootNode->mMeshes[i] = i;
+                meshIndices[i] = i;
             }
+            
+            pScene->mRootNode->mNumMeshes = pScene->mNumMeshes;
+            pScene->mRootNode->mMeshes = meshIndices.release();
         }
     }
     
@@ -1017,66 +1004,7 @@ void IFCImporter::CleanupWebIFC(uint32_t modelID) {
     }
 }
 
-std::string IFCImporter::DecodeIFCString(const std::string& input) {
-    std::string result = input;
-    
-    // IFC escape sequence mapping for German umlauts and special characters
-    // Based on ISO 10303-21 encoding (EXPRESS language standard)
-    
-    // Replace \S\d with ä (a-umlaut)
-    size_t pos = 0;
-    while ((pos = result.find("\\S\\d", pos)) != std::string::npos) {
-        result.replace(pos, 4, "ä");
-        pos += 1; // ä is 2 bytes in UTF-8, so move past it
-    }
-    
-    // Replace \S\| with ü (u-umlaut)
-    pos = 0;
-    while ((pos = result.find("\\S\\|", pos)) != std::string::npos) {
-        result.replace(pos, 4, "ü");
-        pos += 1;
-    }
-    
-    // Replace \S\_ with ß (eszett/sharp-s)
-    pos = 0;
-    while ((pos = result.find("\\S\\_", pos)) != std::string::npos) {
-        result.replace(pos, 4, "ß");
-        pos += 1;
-    }
-    
-    // Replace \S\c with ö (o-umlaut) - additional common German character
-    pos = 0;
-    while ((pos = result.find("\\S\\c", pos)) != std::string::npos) {
-        result.replace(pos, 4, "ö");
-        pos += 1;
-    }
-    
-    // Replace \S\D with Ä (capital A-umlaut)
-    pos = 0;
-    while ((pos = result.find("\\S\\D", pos)) != std::string::npos) {
-        result.replace(pos, 4, "Ä");
-        pos += 1;
-    }
-    
-    // Replace \S\\ with Ü (capital U-umlaut)  
-    pos = 0;
-    while ((pos = result.find("\\S\\\\", pos)) != std::string::npos) {
-        result.replace(pos, 4, "Ü");
-        pos += 1;
-    }
-    
-    // Replace \S\C with Ö (capital O-umlaut)
-    pos = 0;
-    while ((pos = result.find("\\S\\C", pos)) != std::string::npos) {
-        result.replace(pos, 4, "Ö");
-        pos += 1;
-    }
-    
-    // Add more IFC escape sequences as needed
-    // Reference: ISO 10303-21 standard for EXPRESS language string encoding
-    
-    return result;
-}
+
 
 std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID) {
     try {
@@ -1084,15 +1012,11 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
         // IFC structure: GlobalId, OwnerHistory, Name, Description, ...
         ifcLoader->MoveToArgumentOffset(expressID, 2);
         
-        std::string_view rawNameView = ifcLoader->GetStringArgument();
-        if (!rawNameView.empty()) {
-            std::string rawName(rawNameView);
-            std::string decodedName = DecodeIFCString(rawName);
-            
-            // Only return non-empty, meaningful names
-            if (!decodedName.empty() && decodedName != "$" && decodedName != "''") {
-                return decodedName;
-            }
+        std::string decodedName = ifcLoader->GetDecodedStringArgument();
+        
+        // Only return non-empty, meaningful names
+        if (!decodedName.empty() && decodedName != "$" && decodedName != "''") {
+            return decodedName;
         }
         
         // If Name is empty/null, try alternative approaches for specific element types
@@ -1109,16 +1033,12 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
                 int tagArgument = (elementType == webifc::schema::IFCSLAB) ? 7 : 4;
                 ifcLoader->MoveToArgumentOffset(expressID, tagArgument);
                 
-                std::string_view tagView = ifcLoader->GetStringArgument();
-                if (!tagView.empty()) {
-                    std::string tagString(tagView);
-                    std::string decodedTag = DecodeIFCString(tagString);
-                    
-                    // Return tag if it looks like a meaningful name (not a GUID)
-                    if (!decodedTag.empty() && decodedTag != "$" && decodedTag != "''" &&
-                        decodedTag.find('-') != std::string::npos && decodedTag.length() < 20) {
-                        return decodedTag;
-                    }
+                std::string decodedTag = ifcLoader->GetDecodedStringArgument();
+                
+                // Return tag if it looks like a meaningful name (not a GUID)
+                if (!decodedTag.empty() && decodedTag != "$" && decodedTag != "''" &&
+                    decodedTag.find('-') != std::string::npos && decodedTag.length() < 20) {
+                    return decodedTag;
                 }
             } catch (...) {
                 // Tag extraction failed, continue to fallback
@@ -1203,15 +1123,13 @@ std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(we
                 storeyInfo.expressID = storeyID;
                 
                 // Extract storey name (argument 2)
-                ifcLoader->MoveToArgumentOffset(storeyID, 2);
-                std::string_view rawNameView = ifcLoader->GetStringArgument();
-                std::string rawName(rawNameView);
-                storeyInfo.name = DecodeIFCString(rawName);
+                ifcLoader->MoveToArgumentOffset(storeyID, IFCArguments::NAME_INDEX);
+                storeyInfo.name = ifcLoader->GetDecodedStringArgument();
                 
                 // Extract elevation (last argument - typically argument 9 for IFCBUILDINGSTOREY)
                 // IFCBUILDINGSTOREY structure: GlobalId, OwnerHistory, Name, Description, ObjectType, 
                 // ObjectPlacement, Representation, LongName, CompositionType, Elevation
-                ifcLoader->MoveToArgumentOffset(storeyID, 9);
+                ifcLoader->MoveToArgumentOffset(storeyID, IFCArguments::ELEVATION_INDEX);
                 storeyInfo.elevation = ifcLoader->GetDoubleArgument();
                 
                 storeys.push_back(storeyInfo);
@@ -1472,7 +1390,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
             
             // Store the mesh data that we need for splitting
             mesh->mMaterialIndex = materialIndices[0]; // Temporary assignment
-            mesh->mName = aiString("NeedsSplitting_" + std::to_string(expressID));
+            mesh->mName = aiString("IFC_MultiMaterial_Element"); // Semantic name - ExpressID in metadata
             
             // We'll handle the splitting in the calling function
         }
@@ -1532,6 +1450,15 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
         if (!DefaultLogger::isNullLogger()) {
             LogWarn("Failed to create mesh from flat mesh: ", e.what());
         }
+        
+        // Clean up any allocated face indices before deleting mesh
+        for (auto& face : faces) {
+            if (face.mIndices) {
+                delete[] face.mIndices;
+                face.mIndices = nullptr;
+            }
+        }
+        
         delete mesh;
         return nullptr;
     }
@@ -1542,15 +1469,22 @@ unsigned int IFCImporter::GetOrCreateColorMaterial(
     std::unordered_map<std::string, unsigned int>& colorMaterialCache,
     aiScene* pScene) {
     
-    // Create hex color string (e.g., "8C8D7EFF")
+    // Create hex color string (e.g., "8C8D7EFF") using optimized approach
+    // Pre-computed hex lookup table for better performance
+    static const char hexChars[] = "0123456789ABCDEF";
+    
     auto toHex = [](float value) -> std::string {
         int intValue = static_cast<int>(std::round(std::min(std::max(value * 255.0f, 0.0f), 255.0f)));
-        std::stringstream ss;
-        ss << std::hex << std::uppercase << std::setfill('0') << std::setw(2) << intValue;
-        return ss.str();
+        return std::string{hexChars[intValue >> 4], hexChars[intValue & 15]};
     };
     
-    std::string colorKey = toHex(color.r) + toHex(color.g) + toHex(color.b) + toHex(color.a);
+    // Reserve space and build string efficiently (8 hex chars total)
+    std::string colorKey;
+    colorKey.reserve(8);
+    colorKey += toHex(color.r);
+    colorKey += toHex(color.g);
+    colorKey += toHex(color.b);
+    colorKey += toHex(color.a);
     
     // Check if we already have this color material
     auto it = colorMaterialCache.find(colorKey);
@@ -1569,18 +1503,22 @@ unsigned int IFCImporter::GetOrCreateColorMaterial(
     // Create new color-based material with rounded color values
     aiMaterial* material = CreateMaterialFromColor(roundedColor, colorKey);
     
-    // Add to scene materials
+    // Add to scene materials using exception-safe RAII pattern
     std::vector<aiMaterial*> newMaterials(pScene->mNumMaterials + 1);
     for (unsigned int i = 0; i < pScene->mNumMaterials; ++i) {
         newMaterials[i] = pScene->mMaterials[i];
     }
     newMaterials[pScene->mNumMaterials] = material;
     
-    delete[] pScene->mMaterials;
-    pScene->mMaterials = new aiMaterial*[newMaterials.size()];
+    // Exception-safe allocation: allocate new array before deleting old one
+    std::unique_ptr<aiMaterial*[]> newMaterialArray(new aiMaterial*[newMaterials.size()]);
     for (size_t i = 0; i < newMaterials.size(); ++i) {
-        pScene->mMaterials[i] = newMaterials[i];
+        newMaterialArray[i] = newMaterials[i];
     }
+    
+    // Now safely replace the old array
+    delete[] pScene->mMaterials;
+    pScene->mMaterials = newMaterialArray.release();
     
     unsigned int materialIndex = pScene->mNumMaterials;
     pScene->mNumMaterials++;
@@ -1613,13 +1551,18 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
         subMesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
         subMesh->mMaterialIndex = materialIndex;
         
-        // Set sub-mesh name with IFC element name and material suffix
+        // Set sub-mesh name with material-specific naming as required
         std::string elementName = GetIFCElementName(ifcLoader, expressID);
+        std::string materialName = "Material_" + std::to_string(materialIndex);
+        
+        // Try to get actual material name from scene materials if available
+        // For now, use material index-based naming to match expected test pattern
+        
         if (!elementName.empty()) {
-            subMesh->mName = aiString(elementName + "_Mat" + std::to_string(materialIndex));
+            subMesh->mName = aiString(elementName + "_" + materialName);
         } else {
-            // Fallback to expressID-based naming
-            subMesh->mName = aiString("Mesh " + std::to_string(expressID) + "_Mat" + std::to_string(materialIndex));
+            // Use semantic fallback name with material suffix
+            subMesh->mName = aiString("IFC_Element_" + materialName);
         }
         
         // Note: IFC metadata will be stored at the node level when mesh nodes are created
@@ -1687,8 +1630,13 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
             subMesh->mFaces[i] = subFaces[i];
         }
         
-        // Generate texture coordinates for sub-mesh
+        // Generate texture coordinates for sub-mesh by calculating bounds
         if (subMesh->mNumVertices > 0) {
+            // Allocate texture coordinate array for this sub-mesh
+            subMesh->mTextureCoords[0] = new aiVector3D[subMesh->mNumVertices];
+            subMesh->mNumUVComponents[0] = 2; // 2D texture coordinates
+            
+            // Calculate bounding box for this sub-mesh
             aiVector3D minBounds(FLT_MAX, FLT_MAX, FLT_MAX);
             aiVector3D maxBounds(-FLT_MAX, -FLT_MAX, -FLT_MAX);
             
@@ -1724,6 +1672,8 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
     if (flatMesh.geometries.empty()) {
         return {};
     }
+    
+    // Note: Bounds will be calculated per sub-mesh when generating texture coordinates
     
     auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
     
@@ -1833,21 +1783,8 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
 void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiScene* pScene) {
     
     // Find and build the spatial hierarchy starting from IfcProject
-    // Use a simple approach for now - Web-IFC API may not have GetExpressIDsWithType
-    std::vector<uint32_t> projectIDs;
-    
-    // For now, use a fallback approach - search through all lines
-    auto allLineIDs = ifcLoader->GetAllLines();
-    for (uint32_t lineID : allLineIDs) {
-        try {
-            uint32_t elementType = ifcLoader->GetLineType(lineID);
-            if (elementType == webifc::schema::IFCPROJECT) {
-                projectIDs.push_back(lineID);
-            }
-        } catch (...) {
-            // Skip invalid lines
-        }
-    }
+    // Use efficient O(1) lookup API instead of O(n) iteration
+    std::vector<uint32_t> projectIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCPROJECT);
     
     if (projectIDs.empty()) {
         // No project found, use flat hierarchy
@@ -1856,11 +1793,14 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
         }
         
         if (pScene->mNumMeshes > 0) {
-            pScene->mRootNode->mNumMeshes = pScene->mNumMeshes;
-            pScene->mRootNode->mMeshes = new unsigned int[pScene->mNumMeshes];
+            // Link all meshes to root node using exception-safe pattern
+            std::unique_ptr<unsigned int[]> meshIndices(new unsigned int[pScene->mNumMeshes]);
             for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
-                pScene->mRootNode->mMeshes[i] = i;
+                meshIndices[i] = i;
             }
+            
+            pScene->mRootNode->mNumMeshes = pScene->mNumMeshes;
+            pScene->mRootNode->mMeshes = meshIndices.release();
         }
         return;
     }
@@ -1869,19 +1809,13 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
     uint32_t projectID = projectIDs[0];
     aiNode* projectNode = CreateNodeFromIFCElement(ifcLoader, projectID, "IFC_Project");
     
-    // Replace the root node with the project node
-    delete pScene->mRootNode;
-    pScene->mRootNode = projectNode;
+    // Replace the root node with the project node using exception-safe pattern
+    std::unique_ptr<aiNode> oldRootNode(pScene->mRootNode); // Take ownership of old node
+    pScene->mRootNode = projectNode; // Assign new node first
+    // oldRootNode will be automatically deleted when going out of scope
     
-    // Build Sites under Project  
-    std::vector<uint32_t> siteIDs;
-    for (uint32_t lineID : allLineIDs) {
-        try {
-            if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCSITE) {
-                siteIDs.push_back(lineID);
-            }
-        } catch (...) { /* Skip invalid lines */ }
-    }
+    // Build Sites under Project using efficient O(1) lookup
+    std::vector<uint32_t> siteIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCSITE);
     
     std::vector<aiNode*> siteNodes;
     
@@ -1890,15 +1824,8 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
         siteNode->mParent = projectNode;
         siteNodes.push_back(siteNode);
         
-        // Build Buildings under Site
-        std::vector<uint32_t> buildingIDs;
-        for (uint32_t lineID : allLineIDs) {
-            try {
-                if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCBUILDING) {
-                    buildingIDs.push_back(lineID);
-                }
-            } catch (...) { /* Skip invalid lines */ }
-        }
+        // Build Buildings under Site using efficient O(1) lookup
+        std::vector<uint32_t> buildingIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCBUILDING);
         
         std::vector<aiNode*> buildingNodes;
         
@@ -1921,15 +1848,8 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
                     LogDebug("IFC: Added storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation, " to building hierarchy");
                 }
                 
-                // Build Spaces under Storey (optional)
-                std::vector<uint32_t> spaceIDs;
-                for (uint32_t lineID : allLineIDs) {
-                    try {
-                        if (ifcLoader->GetLineType(lineID) == webifc::schema::IFCSPACE) {
-                            spaceIDs.push_back(lineID);
-                        }
-                    } catch (...) { /* Skip invalid lines */ }
-                }
+                // Build Spaces under Storey (optional) using efficient O(1) lookup
+                std::vector<uint32_t> spaceIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCSPACE);
                 
                 std::vector<aiNode*> spaceNodes;
                 
@@ -1939,43 +1859,51 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
                     spaceNodes.push_back(spaceNode);
                 }
                 
-                // Assign space children to storey
+                // Assign space children to storey using exception-safe pattern
                 if (!spaceNodes.empty()) {
-                    storeyNode->mNumChildren = static_cast<unsigned int>(spaceNodes.size());
-                    storeyNode->mChildren = new aiNode*[spaceNodes.size()];
+                    std::unique_ptr<aiNode*[]> childArray(new aiNode*[spaceNodes.size()]);
                     for (size_t i = 0; i < spaceNodes.size(); ++i) {
-                        storeyNode->mChildren[i] = spaceNodes[i];
+                        childArray[i] = spaceNodes[i];
                     }
+                    
+                    storeyNode->mNumChildren = static_cast<unsigned int>(spaceNodes.size());
+                    storeyNode->mChildren = childArray.release();
                 }
             }
             
-            // Assign storey children to building
+            // Assign storey children to building using exception-safe pattern
             if (!storeyNodes.empty()) {
-                buildingNode->mNumChildren = static_cast<unsigned int>(storeyNodes.size());
-                buildingNode->mChildren = new aiNode*[storeyNodes.size()];
+                std::unique_ptr<aiNode*[]> childArray(new aiNode*[storeyNodes.size()]);
                 for (size_t i = 0; i < storeyNodes.size(); ++i) {
-                    buildingNode->mChildren[i] = storeyNodes[i];
+                    childArray[i] = storeyNodes[i];
                 }
+                
+                buildingNode->mNumChildren = static_cast<unsigned int>(storeyNodes.size());
+                buildingNode->mChildren = childArray.release();
             }
         }
         
-        // Assign building children to site
+        // Assign building children to site using exception-safe pattern
         if (!buildingNodes.empty()) {
-            siteNode->mNumChildren = static_cast<unsigned int>(buildingNodes.size());
-            siteNode->mChildren = new aiNode*[buildingNodes.size()];
+            std::unique_ptr<aiNode*[]> childArray(new aiNode*[buildingNodes.size()]);
             for (size_t i = 0; i < buildingNodes.size(); ++i) {
-                siteNode->mChildren[i] = buildingNodes[i];
+                childArray[i] = buildingNodes[i];
             }
+            
+            siteNode->mNumChildren = static_cast<unsigned int>(buildingNodes.size());
+            siteNode->mChildren = childArray.release();
         }
     }
     
-    // Assign site children to project
+    // Assign site children to project using exception-safe pattern
     if (!siteNodes.empty()) {
-        projectNode->mNumChildren = static_cast<unsigned int>(siteNodes.size());
-        projectNode->mChildren = new aiNode*[siteNodes.size()];
+        std::unique_ptr<aiNode*[]> childArray(new aiNode*[siteNodes.size()]);
         for (size_t i = 0; i < siteNodes.size(); ++i) {
-            projectNode->mChildren[i] = siteNodes[i];
+            childArray[i] = siteNodes[i];
         }
+        
+        projectNode->mNumChildren = static_cast<unsigned int>(siteNodes.size());
+        projectNode->mChildren = childArray.release();
     }
     
     // Assign meshes to appropriate nodes (for now, assign to deepest level nodes)
@@ -2006,22 +1934,18 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
         try {
             ifcLoader->MoveToArgumentOffset(expressID, nameArgumentIndex);
             
-            // Get the raw string view first (like Web-IFC's own code does)
-            std::string_view rawStringView = ifcLoader->GetStringArgument();
+            // Use Web-IFC's built-in decoded string handling
+            std::string decodedName = ifcLoader->GetDecodedStringArgument();
             
-            if (!rawStringView.empty()) {
-                // Convert to string and decode IFC escape sequences for German umlauts
-                std::string rawString(rawStringView);
-                
-                // Decode IFC escape sequences to preserve German characters (ä, ö, ü, ß)
-                std::string decodedName = DecodeIFCString(rawString);
+            if (!decodedName.empty()) {
                 node->mName = aiString(decodedName);
                 
 
 
             } else {
-                // Use fallback name
-                node->mName = aiString(fallbackName + "_" + std::to_string(elementType) + "_" + std::to_string(expressID));
+                // Use fallback name with optimized string concatenation
+                // Use semantic naming - IFC metadata provides ExpressID and Type
+                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
             }
         } catch (...) {
             // If first attempt fails, try the decoded approach or fallback
@@ -2030,23 +1954,23 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
                 std::string elementName = ifcLoader->GetDecodedStringArgument();
                 
                 if (!elementName.empty()) {
-                    // Decode IFC escape sequences to preserve German umlauts and other Unicode characters
-                    std::string decodedName = DecodeIFCString(elementName);
-                    node->mName = aiString(decodedName);
+                    // GetDecodedStringArgument already handles all IFC escape sequences
+                    node->mName = aiString(elementName);
                     
 
                 } else {
-                    node->mName = aiString(fallbackName + "_" + std::to_string(elementType) + "_" + std::to_string(expressID));
+                                    // Use semantic naming - IFC metadata provides ExpressID and Type
+                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
                 }
             } catch (...) {
-                // Final fallback
-                node->mName = aiString(fallbackName + "_" + std::to_string(expressID));
+                // Use semantic naming - IFC metadata provides ExpressID and Type
+                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
             }
         }
         
     } catch (const std::exception &e) {
-        // Fallback to generic name if name extraction fails
-        node->mName = aiString(fallbackName + "_" + std::to_string(expressID));
+        // Use semantic naming - IFC metadata provides ExpressID and Type
+        node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
         
         if (!DefaultLogger::isNullLogger()) {
             LogDebug("Failed to extract name for IFC element ", expressID, ": ", e.what());
@@ -2056,10 +1980,16 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
     // Set identity transformation matrix (can be enhanced with actual IFC placement later)
     node->mTransformation = aiMatrix4x4();
     
+    // Store ExpressID and IFC type in metadata for proper hierarchy matching
+    uint32_t elementType = ifcLoader->GetLineType(expressID);
+    node->mMetaData = aiMetadata::Alloc(2);
+    node->mMetaData->Set(0, "ExpressID", expressID);
+    node->mMetaData->Set(1, "IFC.Type", elementType);
+    
     return node;
 }
 
-unsigned int IFCImporter::CountNodesInHierarchy(aiNode* node) {
+unsigned int IFCImporter::CountNodesInHierarchy(const aiNode* node) const {
     if (!node) return 0;
     
     unsigned int count = 1; // Count this node
@@ -2083,26 +2013,26 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
         [&](aiNode* searchNode, uint32_t targetStoreyID) -> aiNode* {
             if (!searchNode) return nullptr;
             
-            std::string nodeName(searchNode->mName.C_Str());
-            
-            // Look for building storey nodes created by BuildIFCSpatialHierarchy
-            // These have format "IFC_BuildingStorey" or contain the target expressID
-            if (nodeName.find("IFC_BuildingStorey") != std::string::npos) {
-                // Try to match by expressID if we can extract it from the node name
-                // BuildIFCSpatialHierarchy creates nodes with expressID in the name or metadata
+            // Look for building storey nodes by IFC type instead of name patterns
+            if (searchNode->mMetaData) {
+                uint32_t nodeType = 0;
+                uint32_t nodeExpressID = 0;
+                bool hasType = searchNode->mMetaData->Get("IFC.Type", nodeType);
+                bool hasExpressID = searchNode->mMetaData->Get("ExpressID", nodeExpressID);
                 
-                // For now, we'll check all building storey nodes by looking at children
-                // TODO: Enhance with expressID extraction from node names/metadata
-                return searchNode; // Return first building storey found for this expressID
-            }
-            
-            // Also check for language-specific names as fallback (until we have better expressID mapping)
-            // This maintains backward compatibility but should be phased out
-            if (nodeName.find("Erdgeschoss") != std::string::npos && targetStoreyID == 596) {
-                return searchNode; // Ground floor storey (fallback)
-            }
-            if (nodeName.find("Dachgeschoss") != std::string::npos && targetStoreyID == 211330) {
-                return searchNode; // Upper floor storey (fallback)
+                // Check if this is a building storey node with the target ExpressID
+                if (hasType && nodeType == webifc::schema::IFCBUILDINGSTOREY) {
+                    if (!DefaultLogger::isNullLogger()) {
+                        LogDebug("IFC: Found IFCBUILDINGSTOREY node with ExpressID ", nodeExpressID, " - comparing to target ", targetStoreyID);
+                    }
+                    
+                    if (hasExpressID && nodeExpressID == targetStoreyID) {
+                        if (!DefaultLogger::isNullLogger()) {
+                            LogDebug("IFC: Found matching storey node!");
+                        }
+                        return searchNode; // Found exact storey match by ExpressID
+                    }
+                }
             }
             
             // Recursively search children

@@ -206,11 +206,7 @@ private:
         std::vector<aiMaterial*>& materials,
         std::unordered_map<uint32_t, unsigned int>& materialIDToIndex);
     
-    void SetMeshMaterialFromIFC(
-        uint32_t expressID,
-        aiMesh* mesh,
-        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
-        const aiScene* pScene);
+    // SetMeshMaterialFromIFC removed - was dead code with O(n) performance issue
     
     aiNode* FindBestMeshParent(aiNode* rootNode);
     void CleanupWebIFC(uint32_t modelID);
@@ -226,11 +222,8 @@ private:
     // Spatial hierarchy building
     void BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiScene* pScene);
     aiNode* CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, const std::string& fallbackName = "");
-    unsigned int CountNodesInHierarchy(aiNode* node);
+    unsigned int CountNodesInHierarchy(const aiNode* node) const;
     void AssignMeshesToHierarchy(aiNode* node, aiScene* pScene);
-    
-    // IFC string decoding for special characters and umlauts
-    std::string DecodeIFCString(const std::string& input);
     
     // IFC element name extraction for meaningful mesh names
     std::string GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID);
