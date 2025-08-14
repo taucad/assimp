@@ -223,9 +223,6 @@ private:
     // Texture coordinate generation
     void GenerateTextureCoordinates(aiMesh* mesh, const aiVector3D& minBounds, const aiVector3D& maxBounds);
     
-    // Vertex color support
-
-    
     // Property extraction
     void ExtractElementProperties(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, aiNode* node);
     void ExtractTypeSpecificProperties(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, uint32_t elementType);
