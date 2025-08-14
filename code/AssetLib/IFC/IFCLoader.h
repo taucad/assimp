@@ -145,6 +145,7 @@ private:
         
     // Split a multi-material mesh into separate meshes by material
     std::vector<aiMesh*> SplitMeshByMaterials(
+        webifc::parsing::IfcLoader* ifcLoader,
         uint32_t expressID,
         const std::vector<aiVector3D>& vertices,
         const std::vector<aiColor4D>& vertexColors,
@@ -153,6 +154,7 @@ private:
         
     // Create split meshes directly from flat mesh (for multi-material meshes)
     std::vector<aiMesh*> CreateSplitMeshesFromFlatMesh(
+        webifc::parsing::IfcLoader* ifcLoader,
         uint32_t expressID,
         const webifc::geometry::IfcFlatMesh& flatMesh,
         const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
@@ -231,6 +233,34 @@ private:
     aiNode* CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, const std::string& fallbackName = "");
     unsigned int CountNodesInHierarchy(aiNode* node);
     void AssignMeshesToHierarchy(aiNode* node, aiScene* pScene);
+    
+    // IFC string decoding for special characters and umlauts
+    std::string DecodeIFCString(const std::string& input);
+    
+    // IFC element name extraction for meaningful mesh names
+    std::string GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID);
+    
+    // IFC mesh metadata storage
+    struct IFCMeshMetadata {
+        uint32_t expressID;
+        std::string ifcType;
+        std::string elementName;
+    };
+    std::unordered_map<unsigned int, IFCMeshMetadata> meshToIFCMetadata; // meshIndex -> IFC metadata
+    
+    // Spatial containment mapping for correct storey assignment
+    std::unordered_map<uint32_t, uint32_t> PopulateSpatialContainmentMap(webifc::parsing::IfcLoader* ifcLoader);
+    std::unordered_map<uint32_t, uint32_t> elementToStoreyMap; // expressID -> storeyID mapping
+    
+    // Storey elevation mapping and sorting for semantic hierarchy
+    struct StoreyInfo {
+        uint32_t expressID;
+        double elevation;
+        std::string name;
+    };
+    std::vector<StoreyInfo> GetSortedStoreysByElevation(webifc::parsing::IfcLoader* ifcLoader);
+    aiNode* FindSemanticParentForUnassignedItems(aiNode* rootNode);
+    aiNode* FindNodeByIFCEntityType(aiNode* rootNode, const std::string& entityPrefix);
     
 
 
