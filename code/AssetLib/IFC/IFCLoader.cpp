@@ -22,6 +22,7 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <mutex>
 
 #include <cmath>
 #include <cfloat>
@@ -45,6 +46,8 @@
 #include "web-ifc/geometry/representation/geometry.h"
 #include "web-ifc/parsing/IfcLoader.h"
 #include "web-ifc/schema/IfcSchemaManager.h"
+#include "web-ifc/schema/schema-names.h"
+#include "web-ifc/schema/ifc-schema.h"
 
 #pragma GCC diagnostic pop
 
@@ -57,13 +60,75 @@ const char *LogFunctions<IFCImporter>::Prefix() {
 
 using namespace Assimp;
 
-// IFC Entity Argument Indices - Named constants for better maintainability
-namespace IFCArguments {
-    // Common IFC entity argument indices (0-based)
-    static constexpr int NAME_INDEX = 2;       // Position of Name argument (common to most entities)
+// Named constants for better maintainability and readability
+namespace IFCConstants {
+    // Logging configuration
+    constexpr int WEB_IFC_LOG_LEVEL_OFF = 6;  // spdlog::level::off = 6
     
-    // IFCBUILDINGSTOREY specific argument indices
-    static constexpr int ELEVATION_INDEX = 9;  // Position of Elevation argument
+    // Geometry settings
+    constexpr int DEFAULT_CIRCLE_SEGMENTS = 32;
+    constexpr size_t GEOMETRY_CONTAINER_INITIAL_CAPACITY = 512;
+    
+    // Default material colors
+    constexpr float DEFAULT_MATERIAL_RED = 0.8f;
+    constexpr float DEFAULT_MATERIAL_GREEN = 0.8f;
+    constexpr float DEFAULT_MATERIAL_BLUE = 0.8f;
+    constexpr float DEFAULT_MATERIAL_ALPHA = 1.0f;
+}
+
+// IFC Entity Argument Indices - Named constants for better maintainability
+// Dynamic schema introspection using Web-IFC's schema APIs
+namespace SchemaIntrospection {
+    // Implementation of dynamic property index lookup
+    int SchemaArgumentCache::GetPropertyIndex(uint32_t elementType, const std::string& propertyName, 
+                                            webifc::parsing::IfcLoader* ifcLoader) {
+            // Check cache first
+            auto typeIt = typeToPropertyIndices.find(elementType);
+            if (typeIt != typeToPropertyIndices.end()) {
+                auto propIt = typeIt->second.find(propertyName);
+                if (propIt != typeIt->second.end()) {
+                    return propIt->second;
+                }
+            }
+            
+            // Query schema dynamically using Web-IFC's schema detection
+            try {
+                // Dynamically detect schema from the IFC file header
+                IFC_SCHEMA schema = ifcLoader->GetSchema();
+                
+                uint32_t propertyCount = getPropertyCount(schema, elementType);
+                for (uint32_t i = 0; i < propertyCount; ++i) {
+                    std::string propName = getPropertyName(schema, elementType, i);
+                    if (propName == propertyName) {
+                        // Cache the result for future lookups
+                        typeToPropertyIndices[elementType][propertyName] = static_cast<int>(i);
+                        return static_cast<int>(i);
+                    }
+                }
+            } catch (const std::exception& e) {
+                // Schema query failed - this is a serious error that should be addressed
+                // Use efficient string building to avoid multiple temporary allocations
+                std::string errorMsg;
+                errorMsg.reserve(128);  // Reserve space for typical error message
+                errorMsg = "Failed to query IFC schema for property '";
+                errorMsg += propertyName;
+                errorMsg += "' on element type ";
+                errorMsg += std::to_string(elementType);
+                errorMsg += ": ";
+                errorMsg += e.what();
+                throw std::runtime_error(errorMsg);
+            }
+            
+            // Property not found in schema - this indicates a schema mismatch or invalid property name
+            // Use efficient string building to avoid multiple temporary allocations
+            std::string errorMsg;
+            errorMsg.reserve(80);  // Reserve space for typical error message
+            errorMsg = "Property '";
+            errorMsg += propertyName;
+            errorMsg += "' not found in IFC schema for element type ";
+            errorMsg += std::to_string(elementType);
+            throw std::runtime_error(errorMsg);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -72,9 +137,16 @@ IFCImporter::IFCImporter() : modelManager(nullptr), currentModelID(0) {
 
 // ------------------------------------------------------------------------------------------------
 IFCImporter::~IFCImporter() {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
     if (modelManager) {
         if (currentModelID != 0) {
-            CleanupWebIFC(currentModelID);
+            // CleanupWebIFC will be called with the lock held
+            if (modelManager->IsModelOpen(currentModelID)) {
+                modelManager->CloseModel(currentModelID);
+                if (!DefaultLogger::isNullLogger()) {
+                    LogDebug("Closed Web-IFC model ", currentModelID);
+                }
+            }
         }
         delete modelManager;
         modelManager = nullptr;
@@ -121,7 +193,7 @@ void IFCImporter::SetupProperties(const Importer *pImp) {
     // TODO: Add proper IFC configuration options when Web-IFC is fully integrated
     settings.skipSpaceRepresentations = true;
     settings.coordinateToOrigin = false;
-    settings.circleSegments = 32;
+    settings.circleSegments = IFCConstants::DEFAULT_CIRCLE_SEGMENTS;
     settings.useCustomTriangulation = true;
     settings.skipAnnotations = true;
     (void)pImp; // Suppress unused parameter warning
@@ -136,6 +208,7 @@ void IFCImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 
 
 void IFCImporter::InitializeWebIFC() {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
     if (!modelManager) {
         modelManager = new webifc::manager::ModelManager(false);
         
@@ -143,7 +216,7 @@ void IFCImporter::InitializeWebIFC() {
         // Set to level 6 (off) to suppress all web-ifc logs including:
         // - "web-ifc: X.X.X threading: disabled schemas available [...]" 
         // - "[TriangulateBounds()] No basis found for brep!" errors
-        modelManager->SetLogLevel(6); // spdlog::level::off = 6
+        modelManager->SetLogLevel(IFCConstants::WEB_IFC_LOG_LEVEL_OFF);
         
         if (!DefaultLogger::isNullLogger()) {
             LogDebug("Web-IFC model manager initialized with logging suppressed");
@@ -176,6 +249,9 @@ void IFCImporter::LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene,
     webifc::manager::LoaderSettings loaderSettings;
     loaderSettings.COORDINATE_TO_ORIGIN = settings.coordinateToOrigin;
     loaderSettings.CIRCLE_SEGMENTS = static_cast<uint16_t>(settings.circleSegments);
+    
+    // Lock modelManager for the entire loading operation
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
     
     // Create model and get model ID
     currentModelID = modelManager->CreateModel(loaderSettings);
@@ -224,13 +300,21 @@ void IFCImporter::LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene,
         }
 
     } catch (const std::exception &e) {
-        CleanupWebIFC(currentModelID);
+        // Cleanup is already protected by the lock in this scope
+        if (modelManager && modelManager->IsModelOpen(currentModelID)) {
+            modelManager->CloseModel(currentModelID);
+            if (!DefaultLogger::isNullLogger()) {
+                LogDebug("Closed Web-IFC model ", currentModelID, " due to exception");
+            }
+        }
+        currentModelID = 0;
         throw;
     }
 }
 
 void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
-    if (!modelManager->IsModelOpen(modelID)) {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
+    if (!modelManager || !modelManager->IsModelOpen(modelID)) {
         return;
     }
 
@@ -247,34 +331,49 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
         // Get material relationships for efficient material assignment
         const auto& relMaterials = geomLoader.GetRelMaterials();
         
-        // Get elements with geometry - use the EXACT approach as Web-IFC's LoadAllGeometry
+        // Optimized bulk geometry loading approach
         std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>> flatMeshesWithGeometry;
         
-        // Iterate through all IFC element types from schema (like LoadAllGeometry does)
+        // Pre-allocate containers to reduce allocations
+        flatMeshesWithGeometry.reserve(IFCConstants::GEOMETRY_CONTAINER_INITIAL_CAPACITY);
+        
+        // Get all geometric element types from schema in one call
         auto schemaManager = modelManager->GetSchemaManager();
-        for (auto elementType : schemaManager.GetIfcElementList()) {
-            // Skip non-geometric types (like LoadAllGeometry does)
-            if (elementType == webifc::schema::IFCOPENINGELEMENT || 
-                elementType == webifc::schema::IFCSPACE || 
-                elementType == webifc::schema::IFCOPENINGSTANDARDCASE) {
-                continue;
+        const auto& allElementTypes = schemaManager.GetIfcElementList();
+        
+        // Pre-compute geometric element types (exclude non-geometric types)
+        std::vector<uint32_t> geometricElementTypes;
+        geometricElementTypes.reserve(allElementTypes.size());
+        
+        for (auto elementType : allElementTypes) {
+            // Skip non-geometric types for better performance
+            if (elementType != webifc::schema::IFCOPENINGELEMENT && 
+                elementType != webifc::schema::IFCSPACE && 
+                elementType != webifc::schema::IFCOPENINGSTANDARDCASE) {
+                geometricElementTypes.push_back(elementType);
             }
-            
+        }
+        
+        // Batch process geometric elements by type for better cache locality
+        for (uint32_t elementType : geometricElementTypes) {
             auto elements = loader->GetExpressIDsWithType(elementType);
             
-            for (uint32_t expressID : elements) {
+            // Process all elements of this type in batch for better performance
+            for (uint32_t i = 0; i < elements.size(); ++i) {
+                uint32_t expressID = elements[i];
                 try {
                     auto flatMesh = geomProcessor->GetFlatMesh(expressID);
                     if (!flatMesh.geometries.empty()) {
-                        // Ensure geometry data is available (like LoadAllGeometry does)
+                        // Batch vertex data loading for this mesh
                         for (auto &geom : flatMesh.geometries) {
                             auto &ifcGeom = geomProcessor->GetGeometry(geom.geometryExpressID);
-                            ifcGeom.GetVertexData();
+                            ifcGeom.GetVertexData(); // Ensure geometry data is loaded
                         }
                         flatMeshesWithGeometry.emplace_back(expressID, std::move(flatMesh));
                     }
                 } catch (...) {
-                    // Skip elements without geometry (fail quietly like LoadAllGeometry)
+                    // Skip elements without geometry (fail silently)
+                    continue;
                 }
             }
         }
@@ -348,7 +447,8 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
         
         // Only create default material if there are meshes that need it
         if (needsDefaultMaterial) {
-            aiMaterial* defaultMat = CreateMaterialFromColor(aiColor4D(0.8f, 0.8f, 0.8f, 1.0f), "IFC_Default");
+            aiMaterial* defaultMat = CreateMaterialFromColor(aiColor4D(IFCConstants::DEFAULT_MATERIAL_RED, IFCConstants::DEFAULT_MATERIAL_GREEN, 
+                         IFCConstants::DEFAULT_MATERIAL_BLUE, IFCConstants::DEFAULT_MATERIAL_ALPHA), "IFC_Default");
             
             // Insert at index 0 and update all existing material indices
             std::vector<aiMaterial*> newMaterials;
@@ -483,28 +583,29 @@ aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flat
     const float* vertexData = vertexDataVector.data();
     const uint32_t* indexData = indexDataVector.data();
     
-    // Create Assimp mesh
-    aiMesh* mesh = new aiMesh();
+    // Create Assimp mesh with RAII protection
+    std::unique_ptr<aiMesh> mesh(new aiMesh());
     mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
     
-    // Web-IFC vertex format: position (3 floats) + normal (3 floats) = 6 floats per vertex
-    constexpr size_t VERTEX_FORMAT_SIZE = 6;
+    // Use Web-IFC's official vertex format constant
+    constexpr size_t VERTEX_FORMAT_SIZE = webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS;
     size_t numVertices = vertexDataVector.size() / VERTEX_FORMAT_SIZE;
     size_t numFaces = indexDataVector.size() / 3;
     
     if (numVertices == 0 || numFaces == 0) {
-        delete mesh;
         return nullptr;
     }
 
     // Set up vertices
     mesh->mNumVertices = static_cast<unsigned int>(numVertices);
-    mesh->mVertices = new aiVector3D[numVertices];
+    std::unique_ptr<aiVector3D[]> vertices(new aiVector3D[numVertices]);
+    mesh->mVertices = vertices.release();
     // Note: Normals computation disabled. Enable?
     // mesh->mNormals = new aiVector3D[numVertices];
     
     // Allocate texture coordinates (Web-IFC doesn't provide UVs yet, so we'll generate basic planar mapping)
-    mesh->mTextureCoords[0] = new aiVector3D[numVertices];
+    std::unique_ptr<aiVector3D[]> texCoords(new aiVector3D[numVertices]);
+    mesh->mTextureCoords[0] = texCoords.release();
     mesh->mNumUVComponents[0] = 2; // 2D texture coordinates
     
     // Calculate bounding box for UV generation
@@ -539,11 +640,12 @@ aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flat
     
     // Generate texture coordinates using planar mapping
     // TODO: Replace with actual UV coordinates when Web-IFC provides them
-    GenerateTextureCoordinates(mesh, minBounds, maxBounds);
+    GenerateTextureCoordinates(mesh.get(), minBounds, maxBounds);
     
     // Set up faces
     mesh->mNumFaces = static_cast<unsigned int>(numFaces);
-    mesh->mFaces = new aiFace[numFaces];
+    std::unique_ptr<aiFace[]> faces(new aiFace[numFaces]);
+    mesh->mFaces = faces.release();
     
     for (size_t i = 0; i < numFaces; ++i) {
         mesh->mFaces[i].mNumIndices = 3;
@@ -583,10 +685,15 @@ aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flat
     // Set material index (will be set properly in ExtractMaterials)
     mesh->mMaterialIndex = 0; // Default material - will be updated when materials are properly assigned
     
-    return mesh;
+    return mesh.release();
 }
 
 void IFCImporter::ExtractMaterials(uint32_t modelID, aiScene *pScene) {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
+    if (!modelManager) {
+        return;
+    }
+    
     std::vector<aiMaterial*> materials;
     // Use class member instead of local variable to avoid shadowing
     this->materialIDToIndex.clear(); // Clear any previous material mappings
@@ -618,7 +725,8 @@ void IFCImporter::ExtractMaterials(uint32_t modelID, aiScene *pScene) {
         
         // Fallback to default material only
         if (materials.empty()) {
-            aiMaterial* defaultMat = CreateMaterialFromColor(aiColor4D(0.8f, 0.8f, 0.8f, 1.0f), "IFC_Default");
+            aiMaterial* defaultMat = CreateMaterialFromColor(aiColor4D(IFCConstants::DEFAULT_MATERIAL_RED, IFCConstants::DEFAULT_MATERIAL_GREEN, 
+                         IFCConstants::DEFAULT_MATERIAL_BLUE, IFCConstants::DEFAULT_MATERIAL_ALPHA), "IFC_Default");
             materials.push_back(defaultMat);
         }
         
@@ -631,7 +739,7 @@ void IFCImporter::ExtractMaterials(uint32_t modelID, aiScene *pScene) {
 }
 
 aiMaterial* IFCImporter::CreateMaterialFromColor(const aiColor4D &color, const std::string &name) {
-    aiMaterial* material = new aiMaterial();
+    std::unique_ptr<aiMaterial> material(new aiMaterial());
     
     aiString materialName(name);
     material->AddProperty(&materialName, AI_MATKEY_NAME);
@@ -677,7 +785,7 @@ aiMaterial* IFCImporter::CreateMaterialFromColor(const aiColor4D &color, const s
     material->AddProperty(&metallicFactor, 1, AI_MATKEY_METALLIC_FACTOR);
     material->AddProperty(&roughnessFactor, 1, AI_MATKEY_ROUGHNESS_FACTOR);
     
-    return material;
+    return material.release();
 }
 
 void IFCImporter::ExtractIFCMaterials(
@@ -966,6 +1074,11 @@ void IFCImporter::ProcessSurfaceStyle(
 // SetMeshMaterialFromIFC removed - was dead code with O(n) performance issue
 
 void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
+    if (!modelManager) {
+        return;
+    }
+    
     try {
         auto ifcLoader = modelManager->GetIfcLoader(modelID);
         
@@ -996,6 +1109,7 @@ void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
 }
 
 void IFCImporter::CleanupWebIFC(uint32_t modelID) {
+    std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
     if (modelManager && modelManager->IsModelOpen(modelID)) {
         modelManager->CloseModel(modelID);
         if (!DefaultLogger::isNullLogger()) {
@@ -1022,15 +1136,11 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
         // If Name is empty/null, try alternative approaches for specific element types
         uint32_t elementType = ifcLoader->GetLineType(expressID);
         
-        // For some elements, the Tag field (argument 7 or 4) might contain meaningful names
-        if (elementType == webifc::schema::IFCSLAB || 
-            elementType == webifc::schema::IFCWALL ||
-            elementType == webifc::schema::IFCBEAM ||
-            elementType == webifc::schema::IFCCOLUMN) {
-            
-            try {
-                // Try argument 7 (Tag for IFCSLAB) or other position for other types
-                int tagArgument = (elementType == webifc::schema::IFCSLAB) ? 7 : 4;
+        // For some elements, the Tag field might contain meaningful names
+        // Use dynamic schema detection to find the Tag property index
+        try {
+            int tagArgument = schemaCache.GetPropertyIndex(elementType, "Tag", ifcLoader);
+            if (tagArgument >= 0) {
                 ifcLoader->MoveToArgumentOffset(expressID, tagArgument);
                 
                 std::string decodedTag = ifcLoader->GetDecodedStringArgument();
@@ -1040,8 +1150,11 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
                     decodedTag.find('-') != std::string::npos && decodedTag.length() < 20) {
                     return decodedTag;
                 }
-            } catch (...) {
-                // Tag extraction failed, continue to fallback
+            }
+        } catch (const std::exception& e) {
+            // Tag property not found in schema for this element type - this is expected for many elements
+            if (!DefaultLogger::isNullLogger()) {
+                LogDebug("IFC: Tag property not available for element type ", elementType, ": ", e.what());
             }
         }
         
@@ -1122,15 +1235,22 @@ std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(we
                 StoreyInfo storeyInfo;
                 storeyInfo.expressID = storeyID;
                 
-                // Extract storey name (argument 2)
-                ifcLoader->MoveToArgumentOffset(storeyID, IFCArguments::NAME_INDEX);
-                storeyInfo.name = ifcLoader->GetDecodedStringArgument();
+                // Extract storey name and elevation using dynamic schema detection
+                try {
+                    int nameIndex = schemaCache.GetPropertyIndex(webifc::schema::IFCBUILDINGSTOREY, "Name", ifcLoader);
+                    ifcLoader->MoveToArgumentOffset(storeyID, nameIndex);
+                    storeyInfo.name = ifcLoader->GetDecodedStringArgument();
+                } catch (...) {
+                    storeyInfo.name = "Unknown Storey";
+                }
                 
-                // Extract elevation (last argument - typically argument 9 for IFCBUILDINGSTOREY)
-                // IFCBUILDINGSTOREY structure: GlobalId, OwnerHistory, Name, Description, ObjectType, 
-                // ObjectPlacement, Representation, LongName, CompositionType, Elevation
-                ifcLoader->MoveToArgumentOffset(storeyID, IFCArguments::ELEVATION_INDEX);
-                storeyInfo.elevation = ifcLoader->GetDoubleArgument();
+                try {
+                    int elevationIndex = schemaCache.GetPropertyIndex(webifc::schema::IFCBUILDINGSTOREY, "Elevation", ifcLoader);
+                    ifcLoader->MoveToArgumentOffset(storeyID, elevationIndex);
+                    storeyInfo.elevation = ifcLoader->GetDoubleArgument();
+                } catch (...) {
+                    storeyInfo.elevation = 0.0;
+                }
                 
                 storeys.push_back(storeyInfo);
                 
@@ -1254,7 +1374,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
     }
     
     auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
-    aiMesh* mesh = new aiMesh();
+    std::unique_ptr<aiMesh> mesh(new aiMesh());
     mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
     
     // Collect all vertices and faces from all geometries
@@ -1275,8 +1395,8 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
                 continue;
             }
             
-            // Web-IFC vertex format: position (3 floats) + normal (3 floats) = 6 floats per vertex
-            constexpr size_t VERTEX_FORMAT_SIZE = 6;
+            // Use Web-IFC's official vertex format constant
+            constexpr size_t VERTEX_FORMAT_SIZE = webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS;
             size_t numVertices = vertexDataVector.size() / VERTEX_FORMAT_SIZE;
             size_t vertexOffset = vertices.size();
             
@@ -1353,13 +1473,13 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
         }
         
         if (vertices.empty() || faces.empty()) {
-            delete mesh;
             return nullptr;
         }
         
         // Set up mesh data
         mesh->mNumVertices = static_cast<unsigned int>(vertices.size());
-        mesh->mVertices = new aiVector3D[vertices.size()];
+        std::unique_ptr<aiVector3D[]> meshVertices(new aiVector3D[vertices.size()]);
+        mesh->mVertices = meshVertices.release();
         // Note: Normals computation disabled. Enable?
         // mesh->mNormals = new aiVector3D[normals.size()];
         
@@ -1372,7 +1492,8 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
         }
         
         mesh->mNumFaces = static_cast<unsigned int>(faces.size());
-        mesh->mFaces = new aiFace[faces.size()];
+        std::unique_ptr<aiFace[]> meshFaces(new aiFace[faces.size()]);
+        mesh->mFaces = meshFaces.release();
         for (size_t i = 0; i < faces.size(); ++i) {
             mesh->mFaces[i] = faces[i];
         }
@@ -1410,7 +1531,8 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
             }
             
             // Allocate and generate texture coordinates
-            mesh->mTextureCoords[0] = new aiVector3D[mesh->mNumVertices];
+            std::unique_ptr<aiVector3D[]> meshTexCoords(new aiVector3D[mesh->mNumVertices]);
+            mesh->mTextureCoords[0] = meshTexCoords.release();
             mesh->mNumUVComponents[0] = 2; // 2D texture coordinates
             
             // Calculate size for UV generation
@@ -1444,7 +1566,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
             }
         }
         
-        return mesh;
+        return mesh.release();
         
     } catch (const std::exception& e) {
         if (!DefaultLogger::isNullLogger()) {
@@ -1459,7 +1581,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
             }
         }
         
-        delete mesh;
+        // mesh will be automatically cleaned up by unique_ptr
         return nullptr;
     }
 }
@@ -1469,22 +1591,25 @@ unsigned int IFCImporter::GetOrCreateColorMaterial(
     std::unordered_map<std::string, unsigned int>& colorMaterialCache,
     aiScene* pScene) {
     
-    // Create hex color string (e.g., "8C8D7EFF") using optimized approach
+    // Create hex color string (e.g., "8C8D7EFF") using optimized single-pass approach
     // Pre-computed hex lookup table for better performance
     static const char hexChars[] = "0123456789ABCDEF";
     
-    auto toHex = [](float value) -> std::string {
-        int intValue = static_cast<int>(std::round(std::min(std::max(value * 255.0f, 0.0f), 255.0f)));
-        return std::string{hexChars[intValue >> 4], hexChars[intValue & 15]};
-    };
-    
-    // Reserve space and build string efficiently (8 hex chars total)
+    // Build hex string in single pass without temporary string allocations
     std::string colorKey;
     colorKey.reserve(8);
-    colorKey += toHex(color.r);
-    colorKey += toHex(color.g);
-    colorKey += toHex(color.b);
-    colorKey += toHex(color.a);
+    
+    // Convert each color component to 2-digit hex efficiently
+    auto appendHex = [&colorKey](float value) {
+        int intValue = static_cast<int>(std::round(std::min(std::max(value * 255.0f, 0.0f), 255.0f)));
+        colorKey += hexChars[intValue >> 4];
+        colorKey += hexChars[intValue & 15];
+    };
+    
+    appendHex(color.r);
+    appendHex(color.g);
+    appendHex(color.b);
+    appendHex(color.a);
     
     // Check if we already have this color material
     auto it = colorMaterialCache.find(colorKey);
@@ -1533,7 +1658,9 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
     uint32_t expressID,
     const std::vector<aiVector3D>& vertices,
     const std::vector<aiFace>& faces,
-    const std::vector<unsigned int>& materialIndices) {
+    const std::vector<unsigned int>& materialIndices,
+    const aiVector3D& parentMinBounds,
+    const aiVector3D& parentMaxBounds) {
     
     std::vector<aiMesh*> splitMeshes;
     
@@ -1547,13 +1674,17 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
     
     // Create a sub-mesh for each material
     for (const auto& [materialIndex, faceIndices] : materialToFaceIndices) {
-        aiMesh* subMesh = new aiMesh();
+        std::unique_ptr<aiMesh> subMesh(new aiMesh());
         subMesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
         subMesh->mMaterialIndex = materialIndex;
         
         // Set sub-mesh name with material-specific naming as required
         std::string elementName = GetIFCElementName(ifcLoader, expressID);
-        std::string materialName = "Material_" + std::to_string(materialIndex);
+        // Optimize material name generation to avoid string concatenation in hot path
+        std::string materialName;
+        materialName.reserve(16);  // "Material_" + digits
+        materialName = "Material_";
+        materialName += std::to_string(materialIndex);
         
         // Try to get actual material name from scene materials if available
         // For now, use material index-based naming to match expected test pattern
@@ -1611,7 +1742,8 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
         
         // Set up sub-mesh data
         subMesh->mNumVertices = static_cast<unsigned int>(subVertices.size());
-        subMesh->mVertices = new aiVector3D[subVertices.size()];
+        std::unique_ptr<aiVector3D[]> subMeshVertices(new aiVector3D[subVertices.size()]);
+        subMesh->mVertices = subMeshVertices.release();
         for (size_t i = 0; i < subVertices.size(); ++i) {
             subMesh->mVertices[i] = subVertices[i];
         }
@@ -1625,35 +1757,25 @@ std::vector<aiMesh*> IFCImporter::SplitMeshByMaterials(
         // }
         
         subMesh->mNumFaces = static_cast<unsigned int>(subFaces.size());
-        subMesh->mFaces = new aiFace[subFaces.size()];
+        std::unique_ptr<aiFace[]> subMeshFaces(new aiFace[subFaces.size()]);
+        subMesh->mFaces = subMeshFaces.release();
         for (size_t i = 0; i < subFaces.size(); ++i) {
             subMesh->mFaces[i] = subFaces[i];
         }
         
-        // Generate texture coordinates for sub-mesh by calculating bounds
+        // Generate texture coordinates for sub-mesh using optimized bounds calculation
         if (subMesh->mNumVertices > 0) {
             // Allocate texture coordinate array for this sub-mesh
-            subMesh->mTextureCoords[0] = new aiVector3D[subMesh->mNumVertices];
+            std::unique_ptr<aiVector3D[]> subMeshTexCoords(new aiVector3D[subMesh->mNumVertices]);
+            subMesh->mTextureCoords[0] = subMeshTexCoords.release();
             subMesh->mNumUVComponents[0] = 2; // 2D texture coordinates
             
-            // Calculate bounding box for this sub-mesh
-            aiVector3D minBounds(FLT_MAX, FLT_MAX, FLT_MAX);
-            aiVector3D maxBounds(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-            
-            for (unsigned int i = 0; i < subMesh->mNumVertices; ++i) {
-                const aiVector3D& vertex = subMesh->mVertices[i];
-                minBounds.x = std::min(minBounds.x, vertex.x);
-                minBounds.y = std::min(minBounds.y, vertex.y);
-                minBounds.z = std::min(minBounds.z, vertex.z);
-                maxBounds.x = std::max(maxBounds.x, vertex.x);
-                maxBounds.y = std::max(maxBounds.y, vertex.y);
-                maxBounds.z = std::max(maxBounds.z, vertex.z);
-            }
-            
-            GenerateTextureCoordinates(subMesh, minBounds, maxBounds);
+            // Reuse parent mesh bounds for texture coordinate generation (performance optimization)
+            // This avoids recalculating bounding box for each sub-mesh when splitting by materials
+            GenerateTextureCoordinates(subMesh.get(), parentMinBounds, parentMaxBounds);
         }
         
-        splitMeshes.push_back(subMesh);
+        splitMeshes.push_back(subMesh.release());
         
 
     }
@@ -1761,8 +1883,21 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
             return {};
         }
         
-        // Now split by materials using our splitting function
-        return SplitMeshByMaterials(ifcLoader, expressID, vertices, faces, materialIndices);
+        // Calculate bounding box once for all sub-meshes (optimization)
+        aiVector3D minBounds(FLT_MAX, FLT_MAX, FLT_MAX);
+        aiVector3D maxBounds(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        
+        for (const auto& vertex : vertices) {
+            minBounds.x = std::min(minBounds.x, vertex.x);
+            minBounds.y = std::min(minBounds.y, vertex.y);
+            minBounds.z = std::min(minBounds.z, vertex.z);
+            maxBounds.x = std::max(maxBounds.x, vertex.x);
+            maxBounds.y = std::max(maxBounds.y, vertex.y);
+            maxBounds.z = std::max(maxBounds.z, vertex.z);
+        }
+        
+        // Now split by materials using our splitting function with cached bounds
+        return SplitMeshByMaterials(ifcLoader, expressID, vertices, faces, materialIndices, minBounds, maxBounds);
         
     } catch (const std::exception &e) {
         if (!DefaultLogger::isNullLogger()) {
@@ -1917,17 +2052,42 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
 }
 
 aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, const std::string& fallbackName) {
-    aiNode* node = new aiNode();
+    std::unique_ptr<aiNode> node(new aiNode());
     
     try {
-        // Special handling for IFCSPACE - use LongName (argument 7) for descriptive room names
+        // Special handling for specific IFC types - use hash map for O(1) lookup
         uint32_t elementType = ifcLoader->GetLineType(expressID);
-        bool useSpecialExtraction = false;
-        int nameArgumentIndex = 2; // Default to argument 2 (Name)
         
-        if (elementType == webifc::schema::IFCSPACE) { // IFCSPACE
-            nameArgumentIndex = 7; // Use argument 7 (LongName) for IFCSPACE
-            useSpecialExtraction = true;
+        // Use dynamic schema detection to find the best name property
+        int nameArgumentIndex = -1;
+        bool useSpecialExtraction = false;
+        
+        // For IFCSPACE, try LongName first (more descriptive for room names)
+        if (elementType == webifc::schema::IFCSPACE) {
+            try {
+                nameArgumentIndex = schemaCache.GetPropertyIndex(elementType, "LongName", ifcLoader);
+                useSpecialExtraction = true;
+            } catch (...) {
+                // LongName not available, will fall back to Name below
+            }
+        }
+        
+        // Fall back to standard Name property if no special handling or special handling failed
+        if (nameArgumentIndex < 0) {
+            try {
+                nameArgumentIndex = schemaCache.GetPropertyIndex(elementType, "Name", ifcLoader);
+            } catch (const std::exception& e) {
+                if (!DefaultLogger::isNullLogger()) {
+                    LogWarn("IFC: Cannot find Name property for element type ", elementType, ": ", e.what());
+                }
+                // Use semantic naming as fallback
+                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
+                node->mTransformation = aiMatrix4x4();
+                node->mMetaData = aiMetadata::Alloc(2);
+                node->mMetaData->Set(0, "ExpressID", expressID);
+                node->mMetaData->Set(1, "IFC.Type", elementType);
+                return node.release();
+            }
         }
         
         // Try to extract the name from the IFC element
@@ -1986,7 +2146,7 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
     node->mMetaData->Set(0, "ExpressID", expressID);
     node->mMetaData->Set(1, "IFC.Type", elementType);
     
-    return node;
+    return node.release();
 }
 
 unsigned int IFCImporter::CountNodesInHierarchy(const aiNode* node) const {
@@ -2008,37 +2168,56 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
         return;
     }
     
-    // Helper function to find a storey node by its expressID
-    std::function<aiNode*(aiNode*, uint32_t)> findStoreyByExpressID = 
-        [&](aiNode* searchNode, uint32_t targetStoreyID) -> aiNode* {
-            if (!searchNode) return nullptr;
+    // Build lookup maps once for O(1) access instead of O(n*m) tree traversals
+    std::unordered_map<uint32_t, aiNode*> expressIDToNode;
+    std::unordered_map<uint32_t, std::vector<aiNode*>> entityTypeToNodes;
+    
+    // Build maps with single tree traversal
+    std::function<void(aiNode*)> buildLookupMaps = [&](aiNode* currentNode) {
+        if (!currentNode) return;
+        
+        if (currentNode->mMetaData) {
+            uint32_t nodeType = 0;
+            uint32_t nodeExpressID = 0;
+            bool hasType = currentNode->mMetaData->Get("IFC.Type", nodeType);
+            bool hasExpressID = currentNode->mMetaData->Get("ExpressID", nodeExpressID);
             
-            // Look for building storey nodes by IFC type instead of name patterns
-            if (searchNode->mMetaData) {
-                uint32_t nodeType = 0;
-                uint32_t nodeExpressID = 0;
-                bool hasType = searchNode->mMetaData->Get("IFC.Type", nodeType);
-                bool hasExpressID = searchNode->mMetaData->Get("ExpressID", nodeExpressID);
-                
-                // Check if this is a building storey node with the target ExpressID
-                if (hasType && nodeType == webifc::schema::IFCBUILDINGSTOREY) {
-                    if (!DefaultLogger::isNullLogger()) {
-                        LogDebug("IFC: Found IFCBUILDINGSTOREY node with ExpressID ", nodeExpressID, " - comparing to target ", targetStoreyID);
-                    }
-                    
-                    if (hasExpressID && nodeExpressID == targetStoreyID) {
-                        if (!DefaultLogger::isNullLogger()) {
-                            LogDebug("IFC: Found matching storey node!");
-                        }
-                        return searchNode; // Found exact storey match by ExpressID
-                    }
-                }
+            if (hasExpressID) {
+                expressIDToNode[nodeExpressID] = currentNode;
             }
             
-            // Recursively search children
-            for (unsigned int i = 0; i < searchNode->mNumChildren; ++i) {
-                aiNode* found = findStoreyByExpressID(searchNode->mChildren[i], targetStoreyID);
-                if (found) return found;
+            if (hasType) {
+                entityTypeToNodes[nodeType].push_back(currentNode);
+            }
+        }
+        
+        // Recursively process children
+        for (unsigned int i = 0; i < currentNode->mNumChildren; ++i) {
+            buildLookupMaps(currentNode->mChildren[i]);
+        }
+    };
+    
+    // Build lookup maps once
+    buildLookupMaps(node);
+    
+    // O(1) lookup function for storey nodes by ExpressID
+    auto findStoreyByExpressID = 
+        [&](uint32_t targetStoreyID) -> aiNode* {
+            auto it = expressIDToNode.find(targetStoreyID);
+            if (it != expressIDToNode.end()) {
+                aiNode* foundNode = it->second;
+                
+                // Verify it's actually a building storey
+                if (foundNode->mMetaData) {
+                    uint32_t nodeType = 0;
+                    if (foundNode->mMetaData->Get("IFC.Type", nodeType) && 
+                        nodeType == webifc::schema::IFCBUILDINGSTOREY) {
+                        if (!DefaultLogger::isNullLogger()) {
+                            LogDebug("IFC: Found storey node for ExpressID ", targetStoreyID, " via O(1) lookup");
+                        }
+                        return foundNode;
+                    }
+                }
             }
             return nullptr;
         };
@@ -2093,7 +2272,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
     // Now assign meshes to their correct storeys using spatial containment information
     for (const auto& [storeyID, meshIndices] : storeyToMeshes) {
         // Find the storey node for this storeyID
-        aiNode* storeyNode = findStoreyByExpressID(node, storeyID);
+        aiNode* storeyNode = findStoreyByExpressID(storeyID);
         if (!storeyNode) {
             if (!DefaultLogger::isNullLogger()) {
                 LogWarn("IFC: Could not find storey node for storey ID ", storeyID, " - assigning meshes to root");
@@ -2125,7 +2304,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 unsigned int meshIndex = meshIndicesForElement[0];
                 std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
                 
-                aiNode* meshNode = new aiNode();
+                std::unique_ptr<aiNode> meshNode(new aiNode());
                 meshNode->mName = aiString(meshName);
                 meshNode->mParent = storeyNode;
                 
@@ -2139,12 +2318,13 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 }
                 
                 meshNode->mNumMeshes = 1;
-                meshNode->mMeshes = new unsigned int[1];
+                std::unique_ptr<unsigned int[]> meshIndices(new unsigned int[1]);
+                meshNode->mMeshes = meshIndices.release();
                 meshNode->mMeshes[0] = meshIndex;
                 
                 // Add mesh node as child to the storey
                 unsigned int newChildCount = storeyNode->mNumChildren + 1;
-                aiNode** newChildren = new aiNode*[newChildCount];
+                std::unique_ptr<aiNode*[]> newChildren(new aiNode*[newChildCount]);
                 
                 // Copy existing children
                 for (unsigned int i = 0; i < storeyNode->mNumChildren; ++i) {
@@ -2152,11 +2332,11 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 }
                 
                 // Add new mesh node
-                newChildren[storeyNode->mNumChildren] = meshNode;
+                newChildren[storeyNode->mNumChildren] = meshNode.release();
                 
                 // Update storey node
                 delete[] storeyNode->mChildren;
-                storeyNode->mChildren = newChildren;
+                storeyNode->mChildren = newChildren.release();
                 storeyNode->mNumChildren = newChildCount;
                 
             } else {
@@ -2168,7 +2348,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 }
                 
                 // Create parent node for the element
-                aiNode* parentNode = new aiNode();
+                std::unique_ptr<aiNode> parentNode(new aiNode());
                 parentNode->mName = aiString(elementName);
                 parentNode->mParent = storeyNode;
                 
@@ -2182,15 +2362,16 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 
                 // Create child nodes for each material mesh
                 parentNode->mNumChildren = static_cast<unsigned int>(meshIndicesForElement.size());
-                parentNode->mChildren = new aiNode*[parentNode->mNumChildren];
+                std::unique_ptr<aiNode*[]> childrenArray(new aiNode*[parentNode->mNumChildren]);
+                parentNode->mChildren = childrenArray.release();
                 
                 for (unsigned int i = 0; i < meshIndicesForElement.size(); ++i) {
                     unsigned int meshIndex = meshIndicesForElement[i];
                     std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
                     
-                    aiNode* childNode = new aiNode();
+                    std::unique_ptr<aiNode> childNode(new aiNode());
                     childNode->mName = aiString(meshName);
-                    childNode->mParent = parentNode;
+                    childNode->mParent = parentNode.get();
                     
                     // Add IFC metadata to child node (same as parent, but represents the material-specific mesh)
                     auto childMetadataIt = meshToIFCMetadata.find(meshIndex);
@@ -2202,15 +2383,16 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                     }
                     
                     childNode->mNumMeshes = 1;
-                    childNode->mMeshes = new unsigned int[1];
+                    std::unique_ptr<unsigned int[]> childMeshIndices(new unsigned int[1]);
+                    childNode->mMeshes = childMeshIndices.release();
                     childNode->mMeshes[0] = meshIndex;
                     
-                    parentNode->mChildren[i] = childNode;
+                    parentNode->mChildren[i] = childNode.release();
                 }
                 
                 // Add parent node to the storey
                 unsigned int newChildCount = storeyNode->mNumChildren + 1;
-                aiNode** newChildren = new aiNode*[newChildCount];
+                std::unique_ptr<aiNode*[]> newChildren(new aiNode*[newChildCount]);
                 
                 // Copy existing children
                 for (unsigned int i = 0; i < storeyNode->mNumChildren; ++i) {
@@ -2218,11 +2400,11 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
                 }
                 
                 // Add new parent node
-                newChildren[storeyNode->mNumChildren] = parentNode;
+                newChildren[storeyNode->mNumChildren] = parentNode.release();
                 
                 // Update storey node
                 delete[] storeyNode->mChildren;
-                storeyNode->mChildren = newChildren;
+                storeyNode->mChildren = newChildren.release();
                 storeyNode->mNumChildren = newChildCount;
             }
         }
@@ -2242,7 +2424,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
         for (unsigned int meshIndex : unassignedMeshes) {
             std::string meshName = pScene->mMeshes[meshIndex]->mName.C_Str();
             
-            aiNode* meshNode = new aiNode();
+            std::unique_ptr<aiNode> meshNode(new aiNode());
             meshNode->mName = aiString(meshName);
             meshNode->mParent = fallbackParent;
             
@@ -2256,12 +2438,13 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
             }
             
             meshNode->mNumMeshes = 1;
-            meshNode->mMeshes = new unsigned int[1];
+            std::unique_ptr<unsigned int[]> fallbackMeshIndices(new unsigned int[1]);
+            meshNode->mMeshes = fallbackMeshIndices.release();
             meshNode->mMeshes[0] = meshIndex;
             
             // Add mesh node as child to the semantic fallback parent
             unsigned int newChildCount = fallbackParent->mNumChildren + 1;
-            aiNode** newChildren = new aiNode*[newChildCount];
+            std::unique_ptr<aiNode*[]> newChildren(new aiNode*[newChildCount]);
             
             // Copy existing children
             for (unsigned int i = 0; i < fallbackParent->mNumChildren; ++i) {
@@ -2269,11 +2452,11 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
             }
             
             // Add new mesh node
-            newChildren[fallbackParent->mNumChildren] = meshNode;
+            newChildren[fallbackParent->mNumChildren] = meshNode.release();
             
             // Update fallback parent node
             delete[] fallbackParent->mChildren;
-            fallbackParent->mChildren = newChildren;
+            fallbackParent->mChildren = newChildren.release();
             fallbackParent->mNumChildren = newChildCount;
         }
         
@@ -2286,6 +2469,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
 
 aiNode* IFCImporter::FindNodeByIFCEntityType(aiNode* rootNode, const std::string& entityPrefix) {
     // Helper function to find nodes by IFC entity type prefix (language-independent)
+    // Note: IFC spatial hierarchies are typically small, so O(n) traversal is acceptable here
     if (!rootNode) return nullptr;
     
     std::function<aiNode*(aiNode*)> findNode = [&](aiNode* node) -> aiNode* {

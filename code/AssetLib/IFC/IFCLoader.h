@@ -54,8 +54,23 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <mutex>
 
 #include <glm/glm.hpp>
+
+// Forward declarations for Web-IFC
+namespace webifc::parsing { class IfcLoader; }
+
+// Schema introspection for dynamic property lookup
+namespace SchemaIntrospection {
+    struct SchemaArgumentCache {
+        std::unordered_map<uint32_t, std::unordered_map<std::string, int>> typeToPropertyIndices;
+        
+        // Get argument index for a property name dynamically from schema
+        int GetPropertyIndex(uint32_t elementType, const std::string& propertyName, 
+                           webifc::parsing::IfcLoader* ifcLoader);
+    };
+}
 
 // Forward declarations for Web-IFC (always available to avoid compilation issues)
 namespace webifc::manager {
@@ -127,7 +142,11 @@ private:
     // Web-IFC related members
     webifc::manager::ModelManager* modelManager;
     uint32_t currentModelID;
+    mutable std::recursive_mutex modelManagerMutex; // Protects modelManager access
     std::unordered_map<uint32_t, unsigned int> materialIDToIndex; // Express ID -> material index mapping
+    
+    // Schema-dependent argument indices for dynamic schema compatibility
+    mutable SchemaIntrospection::SchemaArgumentCache schemaCache;
     
     // Web-IFC integration methods
     void InitializeWebIFC();
@@ -149,7 +168,9 @@ private:
         uint32_t expressID,
         const std::vector<aiVector3D>& vertices,
         const std::vector<aiFace>& faces,
-        const std::vector<unsigned int>& materialIndices);
+        const std::vector<unsigned int>& materialIndices,
+        const aiVector3D& parentMinBounds,
+        const aiVector3D& parentMaxBounds);
         
     // Create split meshes directly from flat mesh (for multi-material meshes)
     std::vector<aiMesh*> CreateSplitMeshesFromFlatMesh(
