@@ -61,16 +61,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Forward declarations for Web-IFC
 namespace webifc::parsing { class IfcLoader; }
 
-// Schema introspection for dynamic property lookup
-namespace SchemaIntrospection {
-    struct SchemaArgumentCache {
-        std::unordered_map<uint32_t, std::unordered_map<std::string, int>> typeToPropertyIndices;
-        
-        // Get argument index for a property name dynamically from schema
-        int GetPropertyIndex(uint32_t elementType, const std::string& propertyName, 
-                           webifc::parsing::IfcLoader* ifcLoader);
-    };
-}
+// Forward declaration for schema cache class
+class SchemaArgumentCache;
 
 // Forward declarations for Web-IFC (always available to avoid compilation issues)
 namespace webifc::manager {
@@ -105,7 +97,10 @@ public:
                 conicSamplingAngle(10.f), 
                 cylindricalTessellation(32),
                 coordinateToOrigin(false),
-                circleSegments(12) {}
+                circleSegments(12),
+                skipOpeningElements(true),
+                skipSpaceGeometry(true),
+                skipOpeningStandardCase(true) {}
 
         bool skipSpaceRepresentations;
         bool useCustomTriangulation;
@@ -114,6 +109,11 @@ public:
         int cylindricalTessellation;
         bool coordinateToOrigin;
         int circleSegments;
+        
+        // Configurable geometry exclusion settings for better flexibility
+        bool skipOpeningElements;      // Skip IFCOPENINGELEMENT (typically voids)
+        bool skipSpaceGeometry;        // Skip IFCSPACE geometry (rooms/spaces)
+        bool skipOpeningStandardCase;  // Skip IFCOPENINGSTANDARDCASE (standard voids)
     };
 
     IFCImporter();
@@ -137,22 +137,151 @@ protected:
             IOSystem *pIOHandler) override;
 
 private:
+    
+    // Schema argument cache for efficient property lookups
+    class SchemaArgumentCache {
+    private:
+        std::unordered_map<uint32_t, std::unordered_map<std::string, int>> typeToPropertyIndices;
+        
+    public:
+        // Get argument index for a property name dynamically from schema
+        int GetPropertyIndex(uint32_t elementType, const std::string& propertyName, 
+                           webifc::parsing::IfcLoader* ifcLoader);
+        
+        // Clear all cached data (useful for cleanup)
+        void Clear() { typeToPropertyIndices.clear(); }
+        
+        // Get number of cached element types (for debugging/monitoring)
+        size_t GetCachedTypeCount() const { return typeToPropertyIndices.size(); }
+    };
+    
     Settings settings;
 
-    // Web-IFC related members
-    webifc::manager::ModelManager* modelManager;
+    // Web-IFC related members with thread safety
+    std::unique_ptr<webifc::manager::ModelManager> modelManager;
     uint32_t currentModelID;
-    mutable std::recursive_mutex modelManagerMutex; // Protects modelManager access
+    
+    /** 
+     * Thread Safety Documentation for Web-IFC Operations:
+     * 
+     * CRITICAL: Web-IFC's ModelManager is NOT thread-safe by design. All operations
+     * that access modelManager MUST be protected by modelManagerMutex.
+     * 
+     * Protected Operations:
+     * - modelManager initialization (InitializeWebIFC)
+     * - Model creation/loading (LoadModelWithWebIFC) 
+     * - Geometry extraction (ExtractGeometry)
+     * - Material extraction (ExtractMaterials)
+     * - Scene graph building (BuildSceneGraph)
+     * - Model cleanup (CleanupWebIFC, destructor)
+     * 
+     * Mutex Type: std::recursive_mutex is used because some protected methods
+     * may call other protected methods (e.g., BuildSceneGraph -> AssignMeshesToHierarchy).
+     * 
+     * Verified Thread Safety Invariants:
+     * 1. modelManager is never accessed without holding the mutex
+     * 2. currentModelID modifications are atomic under mutex protection
+     * 3. Model lifecycle (create -> use -> destroy) is serialized
+     * 4. Multiple imports in different threads are safely serialized
+     * 
+     * Performance Note: While this serializes IFC imports, Web-IFC's underlying
+     * C++ implementation with WASM bindings requires this protection level.
+     */
+    mutable std::recursive_mutex modelManagerMutex; 
+    
     std::unordered_map<uint32_t, unsigned int> materialIDToIndex; // Express ID -> material index mapping
     
     // Schema-dependent argument indices for dynamic schema compatibility
-    mutable SchemaIntrospection::SchemaArgumentCache schemaCache;
+    mutable SchemaArgumentCache schemaCache;
     
     // Web-IFC integration methods
     void InitializeWebIFC();
     void LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler);
     void ExtractGeometry(uint32_t modelID, aiScene *pScene);
     void ExtractMaterials(uint32_t modelID, aiScene *pScene);
+    
+    // ExtractGeometry helper methods for better maintainability
+    std::vector<uint32_t> FilterGeometricElementTypes(const std::unordered_set<uint32_t>& allElementTypes);
+    std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>> CollectFlatMeshes(
+        webifc::parsing::IfcLoader* loader,
+        const std::vector<uint32_t>& geometricElementTypes);
+    void ProcessMeshesFromFlatMeshes(
+        const std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>>& flatMeshesWithGeometry,
+        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+        webifc::parsing::IfcLoader* loader,
+        std::vector<aiMesh*>& meshes,
+        std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+        bool& needsDefaultMaterial,
+        aiScene* pScene);
+    void SetupSceneMeshes(std::vector<aiMesh*>& meshes, bool needsDefaultMaterial, aiScene* pScene);
+    
+    // CreateMeshFromFlatMesh helper methods for better maintainability
+    struct GeometryData {
+        std::vector<aiVector3D> vertices;
+        std::vector<aiFace> faces;
+        std::vector<unsigned int> materialIndices;
+    };
+    
+    GeometryData CollectGeometryData(
+        uint32_t expressID,
+        const webifc::geometry::IfcFlatMesh& flatMesh,
+        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+        std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+        aiScene* pScene);
+    void SetupMeshDataStructures(aiMesh* mesh, const GeometryData& geomData);
+    void HandleMeshMaterials(aiMesh* mesh, const std::vector<unsigned int>& materialIndices);
+    void GenerateTextureCoordinatesForMesh(
+        aiMesh* mesh, 
+        const aiVector3D* preCalcMinBounds = nullptr,
+        const aiVector3D* preCalcMaxBounds = nullptr);
+    
+    // Forward declarations and data structures
+    struct IFCMeshMetadata {
+        uint32_t expressID;
+        std::string ifcType;
+        std::string elementName;
+    };
+    
+    // AssignMeshesToHierarchy helper methods for better maintainability
+    struct NodeLookupMaps {
+        std::unordered_map<uint32_t, aiNode*> expressIDToNode;
+        std::unordered_map<uint32_t, std::vector<aiNode*>> entityTypeToNodes;
+    };
+    
+    struct MeshGrouping {
+        std::unordered_map<uint32_t, std::vector<unsigned int>> storeyToMeshes;
+        std::vector<unsigned int> unassignedMeshes;
+    };
+    
+    NodeLookupMaps BuildNodeLookupMaps(aiNode* rootNode);
+    MeshGrouping GroupMeshesByStorey(aiScene* pScene);
+    void CreateNodesForStoreyMeshes(
+        const std::unordered_map<uint32_t, std::vector<unsigned int>>& storeyToMeshes,
+        const NodeLookupMaps& lookupMaps,
+        aiNode* rootNode,
+        aiScene* pScene);
+    void HandleUnassignedMeshes(
+        const std::vector<unsigned int>& unassignedMeshes,
+        const NodeLookupMaps& lookupMaps,
+        aiNode* rootNode,
+        aiScene* pScene);
+    aiNode* CreateSingleMeshNode(unsigned int meshIndex, aiNode* parent, aiScene* pScene);
+    aiNode* CreateMultiMaterialElementNode(
+        const std::vector<unsigned int>& meshIndices,
+        uint32_t expressID,
+        const IFCMeshMetadata& metadata,
+        aiNode* parent,
+        aiScene* pScene);
+    
+    // BuildIFCSpatialHierarchy helper methods for better maintainability
+    void HandleMissingProject(aiScene* pScene);
+    aiNode* CreateProjectNode(webifc::parsing::IfcLoader* ifcLoader);
+    std::vector<aiNode*> BuildSiteHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiNode* projectNode);
+    std::vector<aiNode*> BuildBuildingHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiNode* siteNode);
+    std::vector<aiNode*> BuildStoreyHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiNode* buildingNode);
+    std::vector<aiNode*> BuildSpaceHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiNode* storeyNode);
+    void AssignChildrenToParent(aiNode* parent, const std::vector<aiNode*>& children);
+        
     void BuildSceneGraph(uint32_t modelID, aiScene *pScene);
     aiMesh* ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flatMesh, uint32_t geometryIndex);
     aiMesh* CreateMeshFromFlatMesh(
@@ -160,7 +289,9 @@ private:
         const webifc::geometry::IfcFlatMesh& flatMesh,
         const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
         std::unordered_map<std::string, unsigned int>& colorMaterialCache,
-        aiScene* pScene);
+        aiScene* pScene,
+        const aiVector3D* preCalcMinBounds = nullptr,
+        const aiVector3D* preCalcMaxBounds = nullptr);
         
     // Split a multi-material mesh into separate meshes by material
     std::vector<aiMesh*> SplitMeshByMaterials(
@@ -170,7 +301,8 @@ private:
         const std::vector<aiFace>& faces,
         const std::vector<unsigned int>& materialIndices,
         const aiVector3D& parentMinBounds,
-        const aiVector3D& parentMaxBounds);
+        const aiVector3D& parentMaxBounds,
+        aiScene* pScene);
         
     // Create split meshes directly from flat mesh (for multi-material meshes)
     std::vector<aiMesh*> CreateSplitMeshesFromFlatMesh(
@@ -214,6 +346,11 @@ private:
         aiColor4D& specularColor,
         float& shininess);
     
+    void ExtractMaterialLayerProperties(
+        webifc::parsing::IfcLoader* ifcLoader,
+        uint32_t layerID,
+        aiMaterial* material);
+    
     void ProcessStyledItems(
         webifc::parsing::IfcLoader* ifcLoader,
         const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& styledItems,
@@ -229,7 +366,7 @@ private:
     
     // SetMeshMaterialFromIFC removed - was dead code with O(n) performance issue
     
-    aiNode* FindBestMeshParent(aiNode* rootNode);
+
     void CleanupWebIFC(uint32_t modelID);
     
     aiColor4D ConvertWebIFCColor(const glm::dvec4& webifcColor);
@@ -248,13 +385,9 @@ private:
     
     // IFC element name extraction for meaningful mesh names
     std::string GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID);
+    std::string GetSemanticMaterialName(aiScene* pScene, unsigned int materialIndex);
     
     // IFC mesh metadata storage
-    struct IFCMeshMetadata {
-        uint32_t expressID;
-        std::string ifcType;
-        std::string elementName;
-    };
     std::unordered_map<unsigned int, IFCMeshMetadata> meshToIFCMetadata; // meshIndex -> IFC metadata
     
     // Spatial containment mapping for correct storey assignment
@@ -268,7 +401,9 @@ private:
         std::string name;
     };
     std::vector<StoreyInfo> GetSortedStoreysByElevation(webifc::parsing::IfcLoader* ifcLoader);
-    aiNode* FindSemanticParentForUnassignedItems(aiNode* rootNode);
+    aiNode* FindSemanticParentForUnassignedItems(
+        aiNode* rootNode, 
+        const std::unordered_map<uint32_t, std::vector<aiNode*>>& entityTypeToNodes);
     aiNode* FindNodeByIFCEntityType(aiNode* rootNode, const std::string& entityPrefix);
     
 
