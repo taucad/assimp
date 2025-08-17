@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cfloat>
 #include <cassert>
+#include <limits>
 
 // Suppress warnings from Web-IFC third-party headers
 #pragma GCC diagnostic push
@@ -2365,7 +2366,8 @@ void IFCImporter::CreateNodesForStoreyMeshes(
     const std::unordered_map<uint32_t, std::vector<unsigned int>>& storeyToMeshes,
     const NodeLookupMaps& lookupMaps,
     aiNode* rootNode,
-    aiScene* pScene) {
+    aiScene* pScene,
+    std::vector<unsigned int>& orphanedMeshes) {
     
     // O(1) lookup function for storey nodes by ExpressID
     auto findStoreyByExpressID = [&](uint32_t targetStoreyID) -> aiNode* {
@@ -2391,8 +2393,23 @@ void IFCImporter::CreateNodesForStoreyMeshes(
         // Find the storey node for this storeyID
         aiNode* storeyNode = findStoreyByExpressID(storeyID);
         if (!storeyNode) {
-            LogWarn("IFC: Could not find storey node for storey ", storeyID, " - assigning meshes to root");
-            storeyNode = rootNode; // Fallback to root
+            LogDebug("IFC: Could not find storey node for storey ", storeyID, " - ", meshIndices.size(), " meshes will be handled by coordinate-based assignment");
+            
+            // Add comprehensive debug logging for orphaned meshes
+            for (unsigned int meshIndex : meshIndices) {
+                aiMesh* mesh = pScene->mMeshes[meshIndex];
+                if (mesh && mesh->mNumVertices > 0) {
+                    double meshCenterY = CalculateMeshCenterY(mesh);
+                    auto bbox = CalculateMeshBoundingBox(mesh);
+                    LogDebug("IFC: Orphaned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+                            ", BBox: [", bbox.first.x, ",", bbox.first.y, ",", bbox.first.z, "] to [", 
+                            bbox.second.x, ",", bbox.second.y, ",", bbox.second.z, "], Target storeyID: ", storeyID);
+                }
+            }
+            
+            // Add these meshes to orphaned list for coordinate-based assignment
+            orphanedMeshes.insert(orphanedMeshes.end(), meshIndices.begin(), meshIndices.end());
+            continue;
         }
         
         // Group meshes by ExpressID to create proper hierarchy for multi-material elements
@@ -2466,6 +2483,230 @@ void IFCImporter::CreateNodesForStoreyMeshes(
     }
 }
 
+bool IFCImporter::TryCoordinateBasedStoreyAssignment(
+    const std::vector<unsigned int>& unassignedMeshes,
+    const NodeLookupMaps& lookupMaps,
+    aiScene* pScene,
+    std::vector<unsigned int>& remainingUnassignedMeshes) {
+    
+    remainingUnassignedMeshes.clear();
+    
+    // Find all building storey nodes with their elevations
+    auto storeyIt = lookupMaps.entityTypeToNodes.find(webifc::schema::IFCBUILDINGSTOREY);
+    if (storeyIt == lookupMaps.entityTypeToNodes.end() || storeyIt->second.empty()) {
+        LogDebug("IFC: No building storeys found for coordinate-based assignment");
+        remainingUnassignedMeshes = unassignedMeshes;
+        return false;
+    }
+    
+    // Collect storey information with elevations
+    struct StoreyWithElevation {
+        aiNode* node;
+        double elevation;
+        uint32_t expressID;
+    };
+    
+    std::vector<StoreyWithElevation> storeysWithElevations;
+    
+    for (aiNode* storeyNode : storeyIt->second) {
+        if (!storeyNode || !storeyNode->mMetaData) continue;
+        
+        uint32_t storeyExpressID = 0;
+        if (!storeyNode->mMetaData->Get("ExpressID", storeyExpressID)) continue;
+        
+        // Get elevation from the sorted storeys list (more reliable than re-parsing)
+        auto sortedStoreys = GetSortedStoreysByElevation(modelManager->GetIfcLoader(currentModelID));
+        
+        for (const auto& storeyInfo : sortedStoreys) {
+            if (storeyInfo.expressID == storeyExpressID) {
+                storeysWithElevations.push_back({storeyNode, storeyInfo.elevation, storeyExpressID});
+                break;
+            }
+        }
+    }
+    
+    if (storeysWithElevations.empty()) {
+        LogDebug("IFC: No storeys with valid elevations found for coordinate-based assignment");
+        remainingUnassignedMeshes = unassignedMeshes;
+        return false;
+    }
+    
+    // Sort storeys by elevation for efficient assignment
+    std::sort(storeysWithElevations.begin(), storeysWithElevations.end(),
+        [](const StoreyWithElevation& a, const StoreyWithElevation& b) {
+            return a.elevation < b.elevation;
+        });
+    
+    LogInfo("IFC: Found ", storeysWithElevations.size(), " storeys for coordinate-based assignment");
+    for (const auto& storey : storeysWithElevations) {
+        LogDebug("IFC: Storey '", storey.node->mName.C_Str(), "' at elevation ", storey.elevation);
+    }
+    
+    // Calculate estimated storey Y-ranges based on elevations and typical heights (IFC Y-up)
+    std::vector<std::pair<StoreyWithElevation, std::pair<double, double>>> storeysWithYRanges;
+    
+    for (size_t i = 0; i < storeysWithElevations.size(); ++i) {
+        const auto& storey = storeysWithElevations[i];
+        
+        // Estimate storey height based on distance to next storey or use default
+        double storeyHeight = 3.0; // Default storey height in meters
+        
+        if (i < storeysWithElevations.size() - 1) {
+            // Height is distance to next storey
+            double nextElevation = storeysWithElevations[i + 1].elevation;
+            storeyHeight = nextElevation - storey.elevation;
+            
+            // Sanity check - ensure reasonable storey height
+            if (storeyHeight < 0.5 || storeyHeight > 10.0) {
+                storeyHeight = 3.0; // Use default if unreasonable
+            }
+        }
+        
+        // Calculate Y-range for this storey (IFC Y-up coordinate system)
+        double minY = storey.elevation;
+        double maxY = storey.elevation + storeyHeight;
+        
+        storeysWithYRanges.push_back({storey, {minY, maxY}});
+        
+        LogDebug("IFC: Storey '", storey.node->mName.C_Str(), "' (ID: ", storey.expressID, ") elevation: ", storey.elevation, ", Y-range: [", minY, ", ", maxY, "] (height: ", storeyHeight, ")");
+    }
+    
+    // Log all storey Y-ranges for debugging stair mesh assignment
+    LogInfo("🔍 STOREY DEBUG: All storey Y-ranges for coordinate-based assignment:");
+    for (const auto& [storeyWithElevation, yRange] : storeysWithYRanges) {
+        double quarterY = yRange.first + (yRange.second - yRange.first) * 0.25;
+        LogInfo("🔍 STOREY DEBUG: '", storeyWithElevation.node->mName.C_Str(), 
+               "' elevation: ", storeyWithElevation.elevation, 
+               ", Y-range: [", yRange.first, ", ", yRange.second, "], quarterY: ", quarterY);
+    }
+    
+    // Assign each unassigned mesh based on center Y coordinate closest to storey quarter Y-point
+    unsigned int assignedCount = 0;
+    
+    for (unsigned int meshIndex : unassignedMeshes) {
+        aiMesh* mesh = pScene->mMeshes[meshIndex];
+        if (!mesh || mesh->mNumVertices == 0) {
+            remainingUnassignedMeshes.push_back(meshIndex);
+            continue;
+        }
+        
+                // Calculate mesh center Y coordinate (representative elevation of the item in IFC Y-up system)
+        double meshCenterY = CalculateMeshCenterY(mesh);
+        auto meshBBox = CalculateMeshBoundingBox(mesh);
+        
+        LogDebug("IFC: Analyzing mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+                ", BBox: [", meshBBox.first.x, ",", meshBBox.first.y, ",", meshBBox.first.z, "] to [", 
+                meshBBox.second.x, ",", meshBBox.second.y, ",", meshBBox.second.z, "]");
+        
+        // Find the storey whose quarter Y elevation is closest to the mesh's center Y
+        aiNode* targetStorey = nullptr;
+        std::string targetStoreyName;
+        double closestDistance = std::numeric_limits<double>::max();
+        uint32_t closestStoreyID = 0;
+        
+        for (const auto& [storeyWithElevation, yRange] : storeysWithYRanges) {
+            double storeyMinY = yRange.first;
+            double storeyMaxY = yRange.second;
+            double storeyQuarterY = storeyMinY + (storeyMaxY - storeyMinY) * 0.25;
+            double distance = std::abs(meshCenterY - storeyQuarterY);
+            
+            LogDebug("IFC: Checking storey '", storeyWithElevation.node->mName.C_Str(), "' (ID: ", storeyWithElevation.expressID, 
+                    ") quarterY: ", storeyQuarterY, " (range [", storeyMinY, ", ", storeyMaxY, "]) - distance to mesh centerY ", meshCenterY, " = ", distance);
+            
+            // Check if this storey is closer than the previous closest
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                targetStorey = storeyWithElevation.node;
+                targetStoreyName = storeyWithElevation.node->mName.C_Str();
+                closestStoreyID = storeyWithElevation.expressID;
+                
+                LogDebug("IFC: NEW CLOSEST! Storey '", targetStoreyName, "' with distance ", distance);
+            }
+        }
+        
+        if (targetStorey) {
+            LogDebug("IFC: FINAL ASSIGNMENT: Mesh centerY ", meshCenterY, " assigned to closest storey '", 
+                        targetStoreyName, "' (ID: ", closestStoreyID, ") with distance ", closestDistance);
+        } else {
+            LogDebug("IFC: NO STOREY found for mesh ", meshIndex, " with centerY ", meshCenterY, " - will remain unassigned");
+        }
+        
+        if (targetStorey) {
+            // Create mesh node and assign to target storey
+            aiNode* meshNode = CreateSingleMeshNode(meshIndex, targetStorey, pScene);
+            
+            // Add mesh node as child to the target storey
+            unsigned int newChildCount = targetStorey->mNumChildren + 1;
+                std::unique_ptr<aiNode*[]> newChildren(new aiNode*[newChildCount]);
+                
+                // Copy existing children
+            for (unsigned int i = 0; i < targetStorey->mNumChildren; ++i) {
+                newChildren[i] = targetStorey->mChildren[i];
+                }
+                
+                // Add new mesh node
+            newChildren[targetStorey->mNumChildren] = meshNode;
+            
+            // Update target storey node
+            delete[] targetStorey->mChildren;
+            targetStorey->mChildren = newChildren.release();
+            targetStorey->mNumChildren = newChildCount;
+            
+            assignedCount++;
+            
+            LogInfo("IFC: Assigned mesh '", mesh->mName.C_Str(), "' (center Y ", meshCenterY, 
+                   ") to storey '", targetStoreyName, "'");
+        } else {
+            remainingUnassignedMeshes.push_back(meshIndex);
+        }
+    }
+    
+    LogInfo("IFC: Coordinate-based assignment: ", assignedCount, " meshes assigned, ", 
+           remainingUnassignedMeshes.size(), " still unassigned");
+    
+    return assignedCount > 0;
+}
+
+std::pair<aiVector3D, aiVector3D> IFCImporter::CalculateMeshBoundingBox(aiMesh* mesh) {
+    if (!mesh || mesh->mNumVertices == 0) {
+        return {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    }
+    
+    aiVector3D minBounds = mesh->mVertices[0];
+    aiVector3D maxBounds = mesh->mVertices[0];
+    
+    // Calculate bounding box
+    for (unsigned int i = 1; i < mesh->mNumVertices; ++i) {
+        const aiVector3D& vertex = mesh->mVertices[i];
+        
+        minBounds.x = std::min(minBounds.x, vertex.x);
+        minBounds.y = std::min(minBounds.y, vertex.y);
+        minBounds.z = std::min(minBounds.z, vertex.z);
+        
+        maxBounds.x = std::max(maxBounds.x, vertex.x);
+        maxBounds.y = std::max(maxBounds.y, vertex.y);
+        maxBounds.z = std::max(maxBounds.z, vertex.z);
+    }
+    
+    return {minBounds, maxBounds};
+}
+
+aiVector3D IFCImporter::CalculateMeshBoundingBoxCenter(aiMesh* mesh) {
+    auto [minBounds, maxBounds] = CalculateMeshBoundingBox(mesh);
+    
+    // Return center point
+    return aiVector3D(
+        (minBounds.x + maxBounds.x) * 0.5f,
+        (minBounds.y + maxBounds.y) * 0.5f,
+        (minBounds.z + maxBounds.z) * 0.5f
+    );
+}
+
+double IFCImporter::CalculateMeshCenterY(aiMesh* mesh) {
+    auto [minBounds, maxBounds] = CalculateMeshBoundingBox(mesh);
+    return static_cast<double>((minBounds.y + maxBounds.y) * 0.5);  // IFC uses Y-up coordinate system
+}
+
 void IFCImporter::HandleUnassignedMeshes(
     const std::vector<unsigned int>& unassignedMeshes,
     const NodeLookupMaps& lookupMaps,
@@ -2476,34 +2717,41 @@ void IFCImporter::HandleUnassignedMeshes(
         return;
     }
     
-    aiNode* fallbackParent = FindSemanticParentForUnassignedItems(rootNode, lookupMaps.entityTypeToNodes);
-    if (!fallbackParent) {
-        fallbackParent = rootNode; // Final fallback to root
+    // Try coordinate-based assignment to storeys first
+    std::vector<unsigned int> stillUnassignedMeshes;
+    unsigned int coordinateAssignedCount = 0;
+    
+    if (TryCoordinateBasedStoreyAssignment(unassignedMeshes, lookupMaps, pScene, stillUnassignedMeshes)) {
+        coordinateAssignedCount = unassignedMeshes.size() - stillUnassignedMeshes.size();
+        LogInfo("IFC: Coordinate-based assignment: ", coordinateAssignedCount, " meshes assigned to storeys by elevation");
+    } else {
+        // If coordinate-based assignment fails, all meshes remain unassigned
+        stillUnassignedMeshes = unassignedMeshes;
+        LogDebug("IFC: Coordinate-based assignment failed, using semantic fallback");
     }
     
-    for (unsigned int meshIndex : unassignedMeshes) {
-        aiNode* meshNode = CreateSingleMeshNode(meshIndex, fallbackParent, pScene);
+    // Handle remaining unassigned meshes - all assignment methods have failed
+    if (!stillUnassignedMeshes.empty()) {
+        LogError("IFC: Failed to assign ", stillUnassignedMeshes.size(), " meshes to any storey after both spatial containment and coordinate-based assignment attempts");
         
-        // Add mesh node as child to the semantic fallback parent
-        unsigned int newChildCount = fallbackParent->mNumChildren + 1;
-        std::unique_ptr<aiNode*[]> newChildren(new aiNode*[newChildCount]);
-        
-        // Copy existing children
-        for (unsigned int i = 0; i < fallbackParent->mNumChildren; ++i) {
-            newChildren[i] = fallbackParent->mChildren[i];
+        // Log detailed information about failed meshes for debugging
+        for (unsigned int meshIndex : stillUnassignedMeshes) {
+            aiMesh* mesh = pScene->mMeshes[meshIndex];
+            if (mesh && mesh->mNumVertices > 0) {
+                double meshCenterY = CalculateMeshCenterY(mesh);
+                auto meshBBox = CalculateMeshBoundingBox(mesh);
+                LogError("IFC: Unassigned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+                        ", BBox: [", meshBBox.first.x, ",", meshBBox.first.y, ",", meshBBox.first.z, "] to [", 
+                        meshBBox.second.x, ",", meshBBox.second.y, ",", meshBBox.second.z, "]");
+            }
         }
         
-        // Add new mesh node
-        newChildren[fallbackParent->mNumChildren] = meshNode;
-        
-        // Update fallback parent node
-        delete[] fallbackParent->mChildren;
-        fallbackParent->mChildren = newChildren.release();
-        fallbackParent->mNumChildren = newChildCount;
+        throw DeadlyImportError("IFC: Unable to assign ", stillUnassignedMeshes.size(), 
+                              " meshes to building storeys. This indicates a coordinate system mismatch or missing storey information in the IFC file.");
     }
     
-    std::string parentName = fallbackParent->mName.C_Str();
-    LogInfo("IFC: Assigned ", unassignedMeshes.size(), " unassigned meshes to semantic parent: ", parentName);
+    LogInfo("IFC: Total assignment summary - Coordinate-based: ", coordinateAssignedCount, 
+           ", Failed assignments: ", stillUnassignedMeshes.size());
 }
 
 aiNode* IFCImporter::CreateSingleMeshNode(unsigned int meshIndex, aiNode* parent, aiScene* pScene) {
@@ -2601,10 +2849,21 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
     MeshGrouping meshGrouping = GroupMeshesByStorey(pScene);
     
     // 3. Create nodes for assigned meshes in their respective storeys
-    CreateNodesForStoreyMeshes(meshGrouping.storeyToMeshes, lookupMaps, node, pScene);
+    std::vector<unsigned int> orphanedMeshes;
+    CreateNodesForStoreyMeshes(meshGrouping.storeyToMeshes, lookupMaps, node, pScene, orphanedMeshes);
     
-    // 4. Handle unassigned meshes with semantic fallback
-    HandleUnassignedMeshes(meshGrouping.unassignedMeshes, lookupMaps, node, pScene);
+    // 4. Combine unassigned meshes with orphaned meshes for coordinate-based assignment
+    std::vector<unsigned int> allUnassignedMeshes = meshGrouping.unassignedMeshes;
+    allUnassignedMeshes.insert(allUnassignedMeshes.end(), orphanedMeshes.begin(), orphanedMeshes.end());
+    
+    LogInfo("IFC: Assignment summary - Spatially assigned: ", 
+           (pScene->mNumMeshes - allUnassignedMeshes.size()), 
+           ", Unassigned (will use coordinate-based): ", allUnassignedMeshes.size(),
+           " (original unassigned: ", meshGrouping.unassignedMeshes.size(), 
+           ", orphaned: ", orphanedMeshes.size(), ")");
+    
+    // 5. Handle all unassigned meshes with coordinate-based assignment and semantic fallback
+    HandleUnassignedMeshes(allUnassignedMeshes, lookupMaps, node, pScene);
 }
 
 aiNode* IFCImporter::FindNodeByIFCEntityType(aiNode* rootNode, const std::string& entityPrefix) {
@@ -2635,12 +2894,21 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
     aiNode* rootNode, 
     const std::unordered_map<uint32_t, std::vector<aiNode*>>& entityTypeToNodes) {
     // Find appropriate parent for unassigned items using semantic spatial hierarchy
-    // Priority: Site → Project → Root
+    // Priority: Building → Site → Project (avoid putting meshes at project level)
     // Use O(1) lookup maps instead of expensive O(n³) tree traversals
     
     if (!rootNode) return nullptr;
     
-    // Priority 1: Look for site nodes using O(1) lookup
+    // Priority 1: Look for building nodes using O(1) lookup (preferred for unassigned items)
+    auto buildingIt = entityTypeToNodes.find(webifc::schema::IFCBUILDING);
+    if (buildingIt != entityTypeToNodes.end() && !buildingIt->second.empty()) {
+        // Use the first available building node
+        aiNode* buildingNode = buildingIt->second[0];
+        LogDebug("IFC: Using building node for unassigned items: ", buildingNode->mName.C_Str());
+        return buildingNode;
+    }
+    
+    // Priority 2: Look for site nodes using O(1) lookup
     auto siteIt = entityTypeToNodes.find(webifc::schema::IFCSITE);
     if (siteIt != entityTypeToNodes.end() && !siteIt->second.empty()) {
         // Use the first available site node
@@ -2649,7 +2917,7 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
         return siteNode;
     }
     
-    // Priority 2: Look for project nodes using O(1) lookup
+    // Priority 3: Look for project nodes using O(1) lookup (avoid this level for meshes)
     auto projectIt = entityTypeToNodes.find(webifc::schema::IFCPROJECT);
     if (projectIt != entityTypeToNodes.end() && !projectIt->second.empty()) {
         // Use the first available project node
@@ -2658,7 +2926,7 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
         return projectNode;
     }
     
-    // Priority 3: Final fallback to root node
+    // Priority 4: Final fallback to root node
     LogDebug("IFC: Using root node for unassigned items: ", rootNode->mName.C_Str());
     return rootNode;
 }

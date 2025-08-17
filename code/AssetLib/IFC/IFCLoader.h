@@ -259,12 +259,21 @@ private:
         const std::unordered_map<uint32_t, std::vector<unsigned int>>& storeyToMeshes,
         const NodeLookupMaps& lookupMaps,
         aiNode* rootNode,
-        aiScene* pScene);
+        aiScene* pScene,
+        std::vector<unsigned int>& orphanedMeshes);
     void HandleUnassignedMeshes(
         const std::vector<unsigned int>& unassignedMeshes,
         const NodeLookupMaps& lookupMaps,
         aiNode* rootNode,
         aiScene* pScene);
+    bool TryCoordinateBasedStoreyAssignment(
+        const std::vector<unsigned int>& unassignedMeshes,
+        const NodeLookupMaps& lookupMaps,
+        aiScene* pScene,
+        std::vector<unsigned int>& remainingUnassignedMeshes);
+    std::pair<aiVector3D, aiVector3D> CalculateMeshBoundingBox(aiMesh* mesh);
+    aiVector3D CalculateMeshBoundingBoxCenter(aiMesh* mesh);
+    double CalculateMeshCenterY(aiMesh* mesh);
     aiNode* CreateSingleMeshNode(unsigned int meshIndex, aiNode* parent, aiScene* pScene);
     aiNode* CreateMultiMaterialElementNode(
         const std::vector<unsigned int>& meshIndices,
