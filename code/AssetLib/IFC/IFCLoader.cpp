@@ -380,11 +380,11 @@ void IFCImporter::ProcessSingleMesh(
                 
                 // Add all split meshes and store their metadata
                 std::string elementName = GetIFCElementName(loader, expressID);
-                std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
+                uint32_t ifcTypeCode = loader->GetLineType(expressID);
                 
                 for (auto* splitMesh : splitMeshes) {
                     unsigned int meshIndex = static_cast<unsigned int>(meshes.size());
-                    meshToIFCMetadata[meshIndex] = {expressID, ifcTypeName, elementName.empty() ? "" : elementName};
+                    meshToIFCMetadata[meshIndex] = {expressID, ifcTypeCode, elementName.empty() ? "" : elementName};
                     
                     meshes.push_back(splitMesh);
                     
@@ -394,19 +394,14 @@ void IFCImporter::ProcessSingleMesh(
                     }
                 }
             } else {
-                // Single material mesh - add with IFC element name
+                // Single material mesh - add with IFC element name (GetIFCElementName now returns "Unnamed" for unnamed entities)
                 std::string elementName = GetIFCElementName(loader, expressID);
-                if (!elementName.empty()) {
-                    assimpMesh->mName = aiString(elementName);
-                } else {
-                    // Use semantic fallback name - ExpressID stored in metadata
-                    assimpMesh->mName = aiString("IFC_Element");
-                }
+                assimpMesh->mName = aiString(elementName);
                 
                 // Store IFC metadata for later node assignment
                 unsigned int meshIndex = static_cast<unsigned int>(meshes.size());
-                std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
-                meshToIFCMetadata[meshIndex] = {expressID, ifcTypeName, elementName.empty() ? "" : elementName};
+                uint32_t ifcTypeCode = loader->GetLineType(expressID);
+                meshToIFCMetadata[meshIndex] = {expressID, ifcTypeCode, elementName};
                 
                 meshes.push_back(assimpMesh);
                 
@@ -576,35 +571,49 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
     
     // Clear and prepare IFC metadata storage
     meshToIFCMetadata.clear();
-    std::vector<aiMesh*> meshes;
 
     try {
-        // Get material relationships for efficient material assignment
+        // SCENE-FIRST ARCHITECTURE (Option 1) - WASM-safe streaming
+        LogDebug("Starting Scene-First architecture for WASM-safe streaming");
+        
+        // Extract materials first (same as original workflow)
+        LogDebug("Extracting materials...");
+        ExtractMaterials(modelID, pScene);
+        LogDebug("Material extraction complete - ", pScene->mNumMaterials, " materials");
+        
+        // Phase 1: Metadata-only scan (lightweight)
+        LogDebug("Phase 1: Scanning IFC metadata...");
+        IFCMetadata metadata = ScanIFCMetadata(loader);
+        LogDebug("Metadata scan complete - found ", metadata.geometricElements.size(), 
+               " geometric elements, estimated ", metadata.totalMeshCount, " total meshes");
+        
+        // Phase 2: Pre-allocate scene structure
+        LogDebug("Phase 2: Pre-allocating scene structure...");
+        PreAllocateScene(metadata, pScene);
+        LogDebug("Scene pre-allocation complete - allocated ", pScene->mNumMeshes, " mesh slots");
+        
+        // Phase 3: Stream geometry into pre-allocated slots
+        LogDebug("Phase 3: Streaming geometry into slots...");
         const auto& relMaterials = geomLoader.GetRelMaterials();
+        StreamGeometryIntoSlots(metadata, relMaterials, loader, pScene);
         
-        // 1. Filter geometric element types
-        auto schemaManager = modelManager->GetSchemaManager();
-        const auto& allElementTypes = schemaManager.GetIfcElementList();
-        auto geometricElementTypes = FilterGeometricElementTypes(allElementTypes);
+        // Phase 4: Build scene graph (same as original workflow)
+        LogDebug("Building scene graph...");
+        BuildSceneGraph(modelID, pScene);
         
-        // 2. STREAMING APPROACH: Process meshes one at a time to avoid large memory usage
-        std::unordered_map<std::string, unsigned int> colorMaterialCache;
-        bool needsDefaultMaterial = false;
-        ProcessMeshesStreaming(geometricElementTypes, relMaterials, loader,
-                             meshes, colorMaterialCache, needsDefaultMaterial, pScene);
-        
-        // 4. Setup scene with processed meshes
-        SetupSceneMeshes(meshes, needsDefaultMaterial, pScene);
-        
-        LogDebug("Extracted ", meshes.size(), " meshes from IFC file");
+        LogDebug("Scene-First architecture complete - ", pScene->mNumMeshes, " meshes, ", pScene->mNumMaterials, " materials processed");
 
     } catch (const std::exception &e) {
-        LogError("Failed to extract geometry from Web-IFC: ", e.what());
+        LogError("Failed to extract geometry using Scene-First architecture: ", e.what());
         
-        // Clean up partial results
-        for (auto* mesh : meshes) {
-            delete mesh;
+        // Clean up partial results - meshes are now owned by scene
+        if (pScene->mMeshes) {
+            for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
+                delete pScene->mMeshes[i];
+                pScene->mMeshes[i] = nullptr;
+            }
         }
+        throw;
     }
 }
 
@@ -1256,20 +1265,53 @@ void IFCImporter::CleanupWebIFC(uint32_t modelID) {
 
 
 std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID) {
+    uint32_t elementType = ifcLoader->GetLineType(expressID);
+    
     try {
         // Extract the Name attribute (argument 2) from IFC elements
         // IFC structure: GlobalId, OwnerHistory, Name, Description, ...
         ifcLoader->MoveToArgumentOffset(expressID, 2);
         
+        // Use GetDecodedStringArgument which properly handles Unicode (including German umlauts)
         std::string decodedName = ifcLoader->GetDecodedStringArgument();
         
-        // Only return non-empty, meaningful names
+        // Check if the decoded name is valid and usable
+        bool nameIsValid = false;
         if (!decodedName.empty() && decodedName != "$" && decodedName != "''") {
-            return decodedName;
+            // Check for various forms of invalid/corrupted data:
+            // 1. Unicode replacement character (UTF-8: 0xEF 0xBF 0xBD)
+            // 2. Control characters (codes 0-31 except tab, newline, carriage return)
+            // 3. High-bit characters that might indicate encoding corruption
+            
+            bool hasInvalidData = false;
+            const std::string replacementChar = "\xEF\xBF\xBD";
+            
+            if (decodedName.find(replacementChar) != std::string::npos) {
+                hasInvalidData = true; // Unicode replacement character found
+            } else {
+                // Check for control characters or suspicious byte patterns
+                for (unsigned char c : decodedName) {
+                    if (c < 32 && c != 9 && c != 10 && c != 13) { // Control chars except tab, LF, CR
+                        hasInvalidData = true;
+                        break;
+                    }
+                    if (c >= 128 && c < 160) { // C1 control characters or invalid UTF-8 starts
+                        hasInvalidData = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!hasInvalidData) {
+                nameIsValid = true;
+            }
+        }
+        
+        if (nameIsValid) {
+            return decodedName;  // Return as-is, trusting GetDecodedStringArgument for proper Unicode handling
         }
         
         // If Name is empty/null, try alternative approaches for specific element types
-        uint32_t elementType = ifcLoader->GetLineType(expressID);
         
         // For some elements, the Tag field might contain meaningful names
         // Use dynamic schema detection to find the Tag property index
@@ -1281,6 +1323,7 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
                 std::string decodedTag = ifcLoader->GetDecodedStringArgument();
                 
                 // Return tag if it looks like a meaningful name (not a GUID)
+                // Check against IFC null indicators only, preserve all other Unicode characters
                 if (!decodedTag.empty() && decodedTag != "$" && decodedTag != "''" &&
                     decodedTag.find('-') != std::string::npos && decodedTag.length() < 20) {
                     return decodedTag;
@@ -1295,8 +1338,8 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
         LogDebug("Failed to extract name for element ", expressID, ": ", e.what());
     }
     
-    // Return empty string to indicate fallback to expressID should be used
-    return "";
+    // Return the configurable unnamed name for entities without valid names
+    return settings.unnamedNodeName;
 }
 
 std::string IFCImporter::GetSemanticMaterialName(aiScene* pScene, unsigned int materialIndex) {
@@ -2335,12 +2378,16 @@ void IFCImporter::BuildLazySceneGraphFromMeshes(webifc::parsing::IfcLoader* ifcL
     try {
         // Try to get actual IFC building
         auto buildingIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCBUILDING);
+        LogDebug("Found ", buildingIDs.size(), " building IDs in IFC file");
         if (!buildingIDs.empty()) {
             buildingNode = CreateNodeFromIFCElement(ifcLoader, buildingIDs[0], "IFC_Building");
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        LogWarn("Exception creating building node: ", e.what());
+    }
     
     if (!buildingNode) {
+        LogDebug("No building node created from IFC, using fallback");
         buildingNode = new aiNode("IFC_Building");
     }
     buildingNode->mParent = siteNode;
@@ -2536,7 +2583,7 @@ void IFCImporter::CreateElementNodesUnderStorey(aiNode* storeyNode, const std::v
             // Multi-material element - create parent node with child nodes for each material
             auto metadataIt = expressIDToMetadata.find(expressID);
             const IFCMeshMetadata& metadata = (metadataIt != expressIDToMetadata.end()) ? 
-                                              metadataIt->second : IFCMeshMetadata{0, "", ""};
+                                              metadataIt->second : IFCMeshMetadata{0, 0, ""};
             
             aiNode* parentNode = CreateMultiMaterialElementNode(meshIndicesForElement, expressID, metadata, storeyNode, pScene);
             elementNodes.push_back(parentNode);
@@ -2590,59 +2637,11 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
             }
         }
         
-        // Fall back to standard Name property if no special handling or special handling failed
-        if (nameArgumentIndex < 0) {
-            try {
-                nameArgumentIndex = schemaCache.GetPropertyIndex(elementType, "Name", ifcLoader);
-            } catch (const std::exception& e) {
-                LogWarn("Cannot find Name property for element type ", elementType, ": ", e.what());
-                // Use semantic naming as fallback
-                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
-                node->mTransformation = aiMatrix4x4();
-                node->mMetaData = aiMetadata::Alloc(2);
-                node->mMetaData->Set(0, "ExpressID", expressID);
-                node->mMetaData->Set(1, "IFC.Type", elementType);
-                return node.release();
-            }
-        }
+        // Use the centralized GetIFCElementName function for consistent naming behavior
+        std::string extractedName = GetIFCElementName(ifcLoader, expressID);
         
-        // Try to extract the name from the IFC element
-        try {
-            ifcLoader->MoveToArgumentOffset(expressID, nameArgumentIndex);
-            
-            // Use Web-IFC's built-in decoded string handling
-            std::string decodedName = ifcLoader->GetDecodedStringArgument();
-            
-            if (!decodedName.empty()) {
-                node->mName = aiString(decodedName);
-                
-
-
-            } else {
-                // Use fallback name with optimized string concatenation
-                // Use semantic naming - IFC metadata provides ExpressID and Type
-                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
-            }
-        } catch (...) {
-            // If first attempt fails, try the decoded approach or fallback
-            try {
-                ifcLoader->MoveToLineArgument(expressID, nameArgumentIndex);
-                std::string elementName = ifcLoader->GetDecodedStringArgument();
-                
-                if (!elementName.empty()) {
-                    // GetDecodedStringArgument already handles all IFC escape sequences
-                    node->mName = aiString(elementName);
-                    
-
-                } else {
-                                    // Use semantic naming - IFC metadata provides ExpressID and Type
-                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
-                }
-            } catch (...) {
-                // Use semantic naming - IFC metadata provides ExpressID and Type
-                node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
-            }
-        }
+        // GetIFCElementName should always return a valid name (never empty) since it falls back to unnamedNodeName
+        node->mName = aiString(extractedName.empty() ? settings.unnamedNodeName : extractedName);
         
     } catch (const std::exception &e) {
         // Use semantic naming - IFC metadata provides ExpressID and Type
@@ -2850,7 +2849,7 @@ void IFCImporter::CreateNodesForStoreyMeshes(
                 // Multi-material element - create parent node with child nodes for each material
                 auto metadataIt = expressIDToMetadata.find(expressID);
                 const IFCMeshMetadata& metadata = (metadataIt != expressIDToMetadata.end()) ? 
-                                                  metadataIt->second : IFCMeshMetadata{0, "", ""};
+                                                  metadataIt->second : IFCMeshMetadata{0, 0, ""};
                 
                 aiNode* parentNode = CreateMultiMaterialElementNode(meshIndicesForElement, expressID, metadata, storeyNode, pScene);
                 
@@ -3161,7 +3160,7 @@ aiNode* IFCImporter::CreateSingleMeshNode(unsigned int meshIndex, aiNode* parent
         const auto& ifcMeta = metadataIt->second;
         meshNode->mMetaData = aiMetadata::Alloc(2);
         meshNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
-        meshNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+        meshNode->mMetaData->Set(1, "IFC.Type", ifcMeta.ifcType);
     }
     
     meshNode->mNumMeshes = 1;
@@ -3193,7 +3192,7 @@ aiNode* IFCImporter::CreateMultiMaterialElementNode(
     if (expressID != 0) {
         parentNode->mMetaData = aiMetadata::Alloc(2);
         parentNode->mMetaData->Set(0, "IFC.ExpressID", expressID);
-        parentNode->mMetaData->Set(1, "IFC.Type", aiString(metadata.ifcType.c_str()));
+        parentNode->mMetaData->Set(1, "IFC.Type", metadata.ifcType);
     }
     
     // Create child nodes for each material mesh
@@ -3215,7 +3214,7 @@ aiNode* IFCImporter::CreateMultiMaterialElementNode(
             const auto& ifcMeta = childMetadataIt->second;
             childNode->mMetaData = aiMetadata::Alloc(2);
             childNode->mMetaData->Set(0, "IFC.ExpressID", ifcMeta.expressID);
-            childNode->mMetaData->Set(1, "IFC.Type", aiString(ifcMeta.ifcType.c_str()));
+            childNode->mMetaData->Set(1, "IFC.Type", ifcMeta.ifcType);
         }
         
         childNode->mNumMeshes = 1;
@@ -3323,6 +3322,323 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
     // Priority 4: Final fallback to root node
     LogDebug("Using root node for unassigned items: ", rootNode->mName.C_Str());
     return rootNode;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Scene-First Architecture (Option 1) - WASM-safe streaming implementation
+
+IFCImporter::IFCMetadata IFCImporter::ScanIFCMetadata(webifc::parsing::IfcLoader* loader) {
+    IFCMetadata metadata;
+    metadata.totalMeshCount = 0;
+    metadata.totalMaterialCount = 0;
+    
+    try {
+        LogDebug("Starting metadata scan of IFC structure");
+        
+        // Get all geometric element types
+        auto schemaManager = modelManager->GetSchemaManager();
+        const auto& allElementTypes = schemaManager.GetIfcElementList();
+        auto geometricElementTypes = FilterGeometricElementTypes(allElementTypes);
+        
+        LogDebug("Found ", geometricElementTypes.size(), " geometric element types to scan");
+        
+        // Scan each element type for metadata
+        for (uint32_t elementType : geometricElementTypes) {
+            auto elements = loader->GetExpressIDsWithType(elementType);
+            LogDebug("Scanning ", elements.size(), " elements of type ", elementType);
+            
+            for (uint32_t expressID : elements) {
+                try {
+                    IFCMetadata::ElementInfo elementInfo;
+                    elementInfo.expressID = expressID;
+                    elementInfo.elementType = elementType;
+                    elementInfo.elementName = GetIFCElementName(loader, expressID);
+                    // More accurate estimate: check if element has multiple materials
+                    try {
+                        auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
+                        auto geomLoader = geomProcessor->GetLoader();
+                        const auto& relMaterials = geomLoader.GetRelMaterials();
+                        
+                        auto materialIt = relMaterials.find(expressID);
+                        if (materialIt != relMaterials.end() && materialIt->second.size() > 1) {
+                            // Multi-material element - estimate based on material count
+                            elementInfo.estimatedMeshCount = std::min(static_cast<uint32_t>(materialIt->second.size()), 8u);
+                        } else {
+                            // Single material element
+                            elementInfo.estimatedMeshCount = 1;
+                        }
+                    } catch (...) {
+                        // Fallback to conservative estimate
+                        elementInfo.estimatedMeshCount = 2;
+                    }
+                    
+                    // Find storey assignment using existing spatial hierarchy
+                    auto spatialContainer = GetElementSpatialContainer(expressID, loader);
+                    if (spatialContainer.has_value()) {
+                        uint32_t containerID = spatialContainer.value();
+                        try {
+                            uint32_t containerType = loader->GetLineType(containerID);
+                            if (containerType == webifc::schema::IFCBUILDINGSTOREY) {
+                                elementInfo.storeyID = containerID;
+                            } else {
+                                // Container is a space/room, find its storey
+                                auto storeyContainer = GetElementSpatialContainer(containerID, loader);
+                                elementInfo.storeyID = storeyContainer.has_value() ? storeyContainer.value() : 0;
+                            }
+                        } catch (...) {
+                            elementInfo.storeyID = 0; // Unassigned
+                        }
+                    } else {
+                        elementInfo.storeyID = 0; // Unassigned
+                    }
+                    
+                    metadata.geometricElements.push_back(elementInfo);
+                    metadata.storeyToElements[elementInfo.storeyID].push_back(expressID);
+                    metadata.totalMeshCount += elementInfo.estimatedMeshCount;
+                    
+                } catch (const std::exception& e) {
+                    LogDebug("Failed to extract metadata for element ", expressID, ": ", e.what());
+                }
+            }
+        }
+        
+        // Scan material relationships
+        auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
+        auto geomLoader = geomProcessor->GetLoader();
+        const auto& relMaterials = geomLoader.GetRelMaterials();
+        
+        for (const auto& [elementID, materialRelations] : relMaterials) {
+            for (const auto& [materialID, _] : materialRelations) {
+                metadata.materialIDs.insert(materialID);
+            }
+        }
+        
+        metadata.totalMaterialCount = static_cast<uint32_t>(metadata.materialIDs.size());
+        
+        LogDebug("Metadata scan complete - Elements: ", metadata.geometricElements.size(), 
+               ", Estimated meshes: ", metadata.totalMeshCount, 
+               ", Materials: ", metadata.totalMaterialCount,
+               ", Storeys: ", metadata.storeyToElements.size());
+        
+    } catch (const std::exception& e) {
+        LogWarn("Failed to complete metadata scan: ", e.what());
+        // Return partial metadata - processing can continue with fallbacks
+    }
+    
+    return metadata;
+}
+
+void IFCImporter::PreAllocateScene(const IFCMetadata& metadata, aiScene* pScene) {
+    LogDebug("Pre-allocating scene for ", metadata.totalMeshCount, " meshes");
+    
+    // Pre-allocate mesh array only (materials are already extracted)
+    if (metadata.totalMeshCount > 0) {
+        pScene->mNumMeshes = metadata.totalMeshCount;
+        pScene->mMeshes = new aiMesh*[metadata.totalMeshCount];
+        
+        // Initialize all mesh slots to nullptr
+        for (unsigned int i = 0; i < metadata.totalMeshCount; ++i) {
+            pScene->mMeshes[i] = nullptr;
+        }
+        
+        LogDebug("Pre-allocated ", pScene->mNumMeshes, " mesh slots");
+    }
+}
+
+void IFCImporter::StreamGeometryIntoSlots(
+    const IFCMetadata& metadata,
+    const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+    webifc::parsing::IfcLoader* loader,
+    aiScene* pScene) {
+    
+    LogDebug("Starting geometry streaming into pre-allocated slots");
+    
+    auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
+    std::unordered_map<std::string, unsigned int> colorMaterialCache;
+    
+    uint32_t currentMeshSlot = 0;
+    size_t elementsProcessed = 0;
+    
+    // Process each element and immediately assign to slots
+    for (const auto& elementInfo : metadata.geometricElements) {
+        uint32_t expressID = elementInfo.expressID;
+        
+        try {
+            // Get flat mesh (creates references but we'll consume immediately)
+            auto flatMesh = geomProcessor->GetFlatMesh(expressID);
+            
+            if (!flatMesh.geometries.empty()) {
+                // Load vertex data for immediate consumption
+                for (auto &geom : flatMesh.geometries) {
+                    auto &ifcGeom = geomProcessor->GetGeometry(geom.geometryExpressID);
+                    ifcGeom.GetVertexData();
+                }
+                
+                // Ensure we don't exceed pre-allocated slots
+                if (currentMeshSlot >= pScene->mNumMeshes) {
+                    LogWarn("Mesh slot overflow - expanding scene mesh array");
+                    // Emergency expansion (shouldn't normally happen)
+                    unsigned int newSize = pScene->mNumMeshes + 100;
+                    aiMesh** newArray = new aiMesh*[newSize];
+                    
+                    // Copy existing meshes
+                    for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
+                        newArray[i] = pScene->mMeshes[i];
+                    }
+                    
+                    // Initialize new slots
+                    for (unsigned int i = pScene->mNumMeshes; i < newSize; ++i) {
+                        newArray[i] = nullptr;
+                    }
+                    
+                    delete[] pScene->mMeshes;
+                    pScene->mMeshes = newArray;
+                    pScene->mNumMeshes = newSize;
+                }
+                
+                // Create mesh immediately and assign to slot(s)
+                uint32_t slotsUsed = CreateMeshIntoSlot(expressID, flatMesh, currentMeshSlot, relMaterials, colorMaterialCache, pScene);
+                currentMeshSlot += slotsUsed;
+                
+                LogDebug("Processed element ", expressID, " using ", slotsUsed, " slots");
+            }
+            
+            // Clear cache AFTER mesh has been created and assigned
+            geomProcessor->Clear();
+            
+            elementsProcessed++;
+            if (elementsProcessed % 100 == 0) {
+                LogDebug("Processed ", elementsProcessed, " elements...");
+            }
+            
+        } catch (const std::exception& e) {
+            LogWarn("Failed to process element ", expressID, ": ", e.what());
+        }
+    }
+    
+    // Adjust final mesh count to actual created meshes
+    if (currentMeshSlot < pScene->mNumMeshes) {
+        LogDebug("Adjusting mesh count from ", pScene->mNumMeshes, " to ", currentMeshSlot);
+        
+        // Create new array with correct size
+        if (currentMeshSlot > 0) {
+            aiMesh** newArray = new aiMesh*[currentMeshSlot];
+            for (uint32_t i = 0; i < currentMeshSlot; ++i) {
+                newArray[i] = pScene->mMeshes[i];
+            }
+            delete[] pScene->mMeshes;
+            pScene->mMeshes = newArray;
+            pScene->mNumMeshes = currentMeshSlot;
+        } else {
+            delete[] pScene->mMeshes;
+            pScene->mMeshes = nullptr;
+            pScene->mNumMeshes = 0;
+        }
+    }
+    
+    LogDebug("Geometry streaming complete - ", pScene->mNumMeshes, " meshes created");
+}
+
+uint32_t IFCImporter::CreateMeshIntoSlot(
+    uint32_t expressID,
+    const webifc::geometry::IfcFlatMesh& flatMesh,
+    uint32_t meshSlot,
+    const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+    std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+    aiScene* pScene) {
+    
+    uint32_t slotsUsed = 0;
+    
+    try {
+        // Create mesh immediately using existing helper (no deferred processing)
+        aiMesh* mesh = CreateMeshFromFlatMesh(expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
+        
+        if (mesh) {
+            // Check if this mesh needs to be split by materials (same logic as ProcessSingleMesh)
+            std::string meshName = mesh->mName.C_Str();
+            if (meshName == "IFC_MultiMaterial_Element") {
+                // This is a multi-material mesh - split it
+                
+                // Use RAII pattern for exception safety: create replacement before deleting original
+                std::unique_ptr<aiMesh> originalMesh(mesh); // Take ownership
+                mesh = nullptr; // Clear original pointer
+                
+                // Re-process this flatMesh with splitting enabled
+                auto loader = modelManager->GetIfcLoader(currentModelID);
+                auto splitMeshes = CreateSplitMeshesFromFlatMesh(loader, expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
+                
+                // Add all split meshes to consecutive slots
+                std::string elementName = GetIFCElementName(loader, expressID);
+                uint32_t ifcTypeCode = loader->GetLineType(expressID);
+                
+                for (size_t i = 0; i < splitMeshes.size(); ++i) {
+                    if (meshSlot + i >= pScene->mNumMeshes) {
+                        // Dynamically expand mesh array to handle overflow
+                        uint32_t oldMeshCount = pScene->mNumMeshes;
+                        uint32_t newMeshCount = std::max(oldMeshCount * 2, meshSlot + static_cast<uint32_t>(splitMeshes.size()));
+                        
+                        // Create new larger mesh array
+                        aiMesh** newMeshes = new aiMesh*[newMeshCount];
+                        
+                        // Copy existing meshes
+                        for (uint32_t j = 0; j < oldMeshCount; ++j) {
+                            newMeshes[j] = pScene->mMeshes[j];
+                        }
+                        
+                        // Initialize new slots to nullptr
+                        for (uint32_t j = oldMeshCount; j < newMeshCount; ++j) {
+                            newMeshes[j] = nullptr;
+                        }
+                        
+                        // Replace scene mesh array
+                        delete[] pScene->mMeshes;
+                        pScene->mMeshes = newMeshes;
+                        pScene->mNumMeshes = newMeshCount;
+                        
+                        LogDebug("Expanded mesh array from ", oldMeshCount, " to ", newMeshCount, " slots for multi-material splitting");
+                    }
+                    
+                    aiMesh* splitMesh = splitMeshes[i];
+                    pScene->mMeshes[meshSlot + i] = splitMesh;
+                    
+                    // Store IFC metadata for scene graph building
+                    meshToIFCMetadata[meshSlot + i] = {expressID, ifcTypeCode, elementName.empty() ? "" : elementName};
+                    
+                    slotsUsed++;
+                }
+                
+                LogDebug("Split element ", expressID, " into ", splitMeshes.size(), " meshes in slots ", meshSlot, "-", meshSlot + splitMeshes.size() - 1);
+                
+            } else {
+                // Single material mesh - add with proper IFC element name (same logic as ProcessSingleMesh)
+                auto loader = modelManager->GetIfcLoader(currentModelID);
+                std::string elementName = GetIFCElementName(loader, expressID);
+                if (!elementName.empty()) {
+                    mesh->mName = aiString(elementName);
+                } else {
+                    // Use semantic fallback name - ExpressID stored in metadata
+                    mesh->mName = aiString("IFC_Element");
+                }
+                
+                // Assign mesh to pre-allocated slot
+                pScene->mMeshes[meshSlot] = mesh;
+                
+                // Store IFC metadata for scene graph building
+                uint32_t ifcTypeCode = loader->GetLineType(expressID);
+                meshToIFCMetadata[meshSlot] = {expressID, ifcTypeCode, elementName.empty() ? "" : elementName};
+                
+                slotsUsed = 1;
+                LogDebug("Created single mesh for element ", expressID, " in slot ", meshSlot, " with name '", mesh->mName.C_Str(), "'");
+            }
+        } else {
+            LogDebug("Failed to create mesh for element ", expressID);
+        }
+        
+    } catch (const std::exception& e) {
+        LogWarn("Failed to create mesh for element ", expressID, " in slot ", meshSlot, ": ", e.what());
+    }
+    
+    return slotsUsed;
 }
 
 

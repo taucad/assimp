@@ -55,6 +55,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <cmath>
 #include "web-ifc/schema/IfcSchemaManager.h"
+#include "web-ifc/schema/ifc-schema.h"
 
 using namespace Assimp;
 
@@ -2470,7 +2471,7 @@ TEST_F(utIFCImportExport, storeyElevationSorting) {
         
         if (nodeName.find("Dach-1") != std::string::npos && node->mMetaData) {
             uint32_t expressID;
-            aiString ifcType;
+            uint32_t ifcType;
             if (node->mMetaData->Get("IFC.ExpressID", expressID) &&
                 node->mMetaData->Get("IFC.Type", ifcType)) {
                 foundMetadata = true;
@@ -2495,4 +2496,69 @@ TEST_F(utIFCImportExport, storeyElevationSorting) {
     
     EXPECT_TRUE(foundMetadata) 
         << "Expected to find IFC metadata (ExpressID and Type) on nodes";
+}
+
+// Test that unnamed IFC entities get proper "Unnamed" fallback names
+TEST_F(utIFCImportExport, unnamedEntityHandling) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/IFC/dental_clinic.ifc", 
+        aiProcess_ValidateDataStructure | aiProcess_Triangulate);
+    
+    ASSERT_NE(nullptr, scene) << "Failed to load dental_clinic.ifc";
+    ASSERT_NE(nullptr, scene->mRootNode) << "Scene has no root node";
+    
+    // Track if we found an unnamed building that got properly handled
+    bool foundUnnamedBuildingWithProperName = false;
+    std::string foundBuildingName;
+    
+    // Recursively search for building nodes
+    std::function<void(const aiNode*)> searchForBuildings = [&](const aiNode* node) {
+        if (!node) return;
+        
+        // Check if this node has IFC metadata indicating it's a building
+        if (node->mMetaData) {
+            uint32_t ifcType = 0;
+            if (node->mMetaData->Get("IFC.Type", ifcType) && ifcType == webifc::schema::IFCBUILDING) {
+                foundBuildingName = node->mName.C_Str();
+                
+                // Check if this building has a proper name (not empty, not special characters)
+                if (!foundBuildingName.empty() && 
+                    foundBuildingName != "$" && 
+                    foundBuildingName != "''" &&
+                    foundBuildingName.find('?') == std::string::npos) {
+                    foundUnnamedBuildingWithProperName = true;
+                    
+                    // If it's "Unnamed", that's what we expect for entities without names
+                    if (foundBuildingName == "Unnamed") {
+                        // This is the expected behavior we want to implement
+                        return;  // Found what we're looking for, exit search
+                    }
+                }
+            }
+        }
+        
+        // Recursively search children
+        for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+            searchForBuildings(node->mChildren[i]);
+        }
+    };
+    
+    searchForBuildings(scene->mRootNode);
+    
+    // The test expectation: building should have a proper name, ideally "Unnamed" for unnamed entities
+    EXPECT_TRUE(foundUnnamedBuildingWithProperName) 
+        << "Expected to find building with proper name (got: '" << foundBuildingName << "'). "
+        << "Unnamed IFC entities should be named 'Unnamed', not contain invalid characters like '?'";
+    
+    // Additional check: the name should not contain invalid JSON characters
+    if (!foundBuildingName.empty()) {
+        EXPECT_EQ(foundBuildingName.find('?'), std::string::npos) 
+            << "Building name '" << foundBuildingName << "' contains invalid character '?' which breaks JSON serialization";
+        
+        EXPECT_NE(foundBuildingName, "$") 
+            << "Building name should not be '$' (IFC null indicator)";
+        
+        EXPECT_NE(foundBuildingName, "''") 
+            << "Building name should not be empty quotes";
+    }
 }

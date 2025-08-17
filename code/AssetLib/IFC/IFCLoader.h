@@ -100,7 +100,8 @@ public:
                 circleSegments(12),
                 skipOpeningElements(true),
                 skipSpaceGeometry(true),
-                skipOpeningStandardCase(true) {}
+                skipOpeningStandardCase(true),
+                unnamedNodeName("Unnamed") {}
 
         bool skipSpaceRepresentations;
         bool useCustomTriangulation;
@@ -114,6 +115,9 @@ public:
         bool skipOpeningElements;      // Skip IFCOPENINGELEMENT (typically voids)
         bool skipSpaceGeometry;        // Skip IFCSPACE geometry (rooms/spaces)
         bool skipOpeningStandardCase;  // Skip IFCOPENINGSTANDARDCASE (standard voids)
+        
+        // Unnamed node handling
+        std::string unnamedNodeName;   // Name to use for IFC entities that have no name (default: "Unnamed")
     };
 
     IFCImporter();
@@ -226,6 +230,45 @@ private:
     
     void SetupSceneMeshes(std::vector<aiMesh*>& meshes, bool needsDefaultMaterial, aiScene* pScene);
     
+    // Scene-First Architecture (Option 1) - WASM-safe streaming
+    struct IFCMetadata {
+        struct ElementInfo {
+            uint32_t expressID;
+            uint32_t elementType;
+            std::string elementName;
+            uint32_t estimatedMeshCount;
+            uint32_t storeyID;
+        };
+        
+        std::vector<ElementInfo> geometricElements;
+        std::unordered_set<uint32_t> materialIDs;
+        std::unordered_map<uint32_t, std::vector<uint32_t>> storeyToElements;
+        uint32_t totalMeshCount;
+        uint32_t totalMaterialCount;
+    };
+    
+    // Phase 1: Metadata-only scan
+    IFCMetadata ScanIFCMetadata(webifc::parsing::IfcLoader* loader);
+    
+    // Phase 2: Pre-allocate scene structure
+    void PreAllocateScene(const IFCMetadata& metadata, aiScene* pScene);
+    
+    // Phase 3: Stream geometry into pre-allocated slots
+    void StreamGeometryIntoSlots(
+        const IFCMetadata& metadata,
+        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+        webifc::parsing::IfcLoader* loader,
+        aiScene* pScene);
+    
+    // Helper: Create mesh immediately and assign to slot, returns number of slots used
+    uint32_t CreateMeshIntoSlot(
+        uint32_t expressID,
+        const webifc::geometry::IfcFlatMesh& flatMesh,
+        uint32_t meshSlot,
+        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+        std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+        aiScene* pScene);
+    
     // CreateMeshFromFlatMesh helper methods for better maintainability
     struct GeometryData {
         std::vector<aiVector3D> vertices;
@@ -249,7 +292,7 @@ private:
     // Forward declarations and data structures
     struct IFCMeshMetadata {
         uint32_t expressID;
-        std::string ifcType;
+        uint32_t ifcType;
         std::string elementName;
     };
     
