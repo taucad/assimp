@@ -202,17 +202,28 @@ private:
     
     // ExtractGeometry helper methods for better maintainability
     std::vector<uint32_t> FilterGeometricElementTypes(const std::unordered_set<uint32_t>& allElementTypes);
-    std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>> CollectFlatMeshes(
-        webifc::parsing::IfcLoader* loader,
-        const std::vector<uint32_t>& geometricElementTypes);
-    void ProcessMeshesFromFlatMeshes(
-        const std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>>& flatMeshesWithGeometry,
+
+
+    
+    // Streaming approach for large file support
+    void ProcessMeshesStreaming(
+        const std::vector<uint32_t>& geometricElementTypes,
         const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
         webifc::parsing::IfcLoader* loader,
         std::vector<aiMesh*>& meshes,
         std::unordered_map<std::string, unsigned int>& colorMaterialCache,
         bool& needsDefaultMaterial,
         aiScene* pScene);
+    void ProcessSingleMesh(
+        uint32_t expressID,
+        const webifc::geometry::IfcFlatMesh& flatMesh,
+        const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+        webifc::parsing::IfcLoader* loader,
+        std::vector<aiMesh*>& meshes,
+        std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+        bool& needsDefaultMaterial,
+        aiScene* pScene);
+    
     void SetupSceneMeshes(std::vector<aiMesh*>& meshes, bool needsDefaultMaterial, aiScene* pScene);
     
     // CreateMeshFromFlatMesh helper methods for better maintainability
@@ -338,6 +349,7 @@ private:
         uint32_t materialID,
         const std::vector<std::pair<uint32_t, uint32_t>>& definitions);
     
+    
     void ExtractMaterialProperties(
         webifc::parsing::IfcLoader* ifcLoader,
         const std::vector<std::pair<uint32_t, uint32_t>>& definitions,
@@ -403,6 +415,10 @@ private:
     std::unordered_map<uint32_t, uint32_t> PopulateSpatialContainmentMap(webifc::parsing::IfcLoader* ifcLoader);
     std::unordered_map<uint32_t, uint32_t> elementToStoreyMap; // expressID -> storeyID mapping
     
+    // STREAMING SPATIAL HIERARCHY - Memory-efficient lazy lookup
+    std::optional<uint32_t> GetElementSpatialContainer(uint32_t elementID, webifc::parsing::IfcLoader* ifcLoader);
+    mutable std::unordered_map<uint32_t, uint32_t> spatialContainerCache; // Small cache for recent lookups
+    
     // Storey elevation mapping and sorting for semantic hierarchy
     struct StoreyInfo {
         uint32_t expressID;
@@ -410,6 +426,12 @@ private:
         std::string name;
     };
     std::vector<StoreyInfo> GetSortedStoreysByElevation(webifc::parsing::IfcLoader* ifcLoader);
+    
+    // LAZY SCENE GRAPH CONSTRUCTION
+    void BuildLazySceneGraphFromMeshes(webifc::parsing::IfcLoader* ifcLoader, aiNode* projectNode, aiScene* pScene);
+    void CreateElementNodesUnderStorey(aiNode* storeyNode, const std::vector<unsigned int>& meshIndices, aiScene* pScene);
+    void AssignMeshesToNode(aiNode* node, const std::vector<unsigned int>& meshIndices, aiScene* pScene);
+    
     aiNode* FindSemanticParentForUnassignedItems(
         aiNode* rootNode, 
         const std::unordered_map<uint32_t, std::vector<aiNode*>>& entityTypeToNodes);

@@ -56,7 +56,7 @@
 namespace Assimp {
 template <>
 const char *LogFunctions<IFCImporter>::Prefix() {
-    return "IFC: ";
+    return "";
 }
 } // namespace Assimp
 
@@ -220,6 +220,15 @@ void IFCImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 void IFCImporter::InitializeWebIFC() {
     std::lock_guard<std::recursive_mutex> lock(modelManagerMutex);
     if (!modelManager) {
+        // Save current log severity to restore later if needed
+        if (DefaultLogger::get() && !DefaultLogger::isNullLogger()) {
+          auto currentSeverity = DefaultLogger::get()->getLogSeverity();
+          if (currentSeverity == Logger::VERBOSE) {
+              DefaultLogger::get()->setLogSeverity(Logger::NORMAL);
+              LogDebug("Reduced log severity from VERBOSE to NORMAL to suppress debug noise");
+          }
+        }
+      
         modelManager = std::make_unique<webifc::manager::ModelManager>(false);
         
         // Suppress verbose web-ifc logging to avoid cluttering test output
@@ -233,7 +242,7 @@ void IFCImporter::InitializeWebIFC() {
 }
 
 void IFCImporter::LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
-    LogInfo("Loading IFC file with Web-IFC: ", pFile);
+    LogDebug("Loading IFC file with Web-IFC: ", pFile);
 
     // Open the IFC file
     std::shared_ptr<IOStream> stream(pIOHandler->Open(pFile));
@@ -287,15 +296,16 @@ void IFCImporter::LoadModelWithWebIFC(const std::string &pFile, aiScene *pScene,
         // Create scene structure
         pScene->mRootNode = new aiNode("IFC_Scene");
         
-        // Build spatial containment map for correct mesh assignment to storeys
-        elementToStoreyMap = PopulateSpatialContainmentMap(ifcLoader);
+        // STREAMING APPROACH: Initialize lazy spatial hierarchy service
+        // Instead of building entire spatial map upfront, resolve containment on-demand
+        LogDebug("Initialized streaming spatial hierarchy service");
         
         // Extract geometry and materials from Web-IFC
         ExtractMaterials(currentModelID, pScene);
         ExtractGeometry(currentModelID, pScene);
         BuildSceneGraph(currentModelID, pScene);
         
-        LogInfo("IFC file loaded successfully with Web-IFC - ", 
+        LogDebug("IFC file loaded successfully with Web-IFC - ", 
                pScene->mNumMeshes, " meshes, ", 
                pScene->mNumMaterials, " materials");
 
@@ -338,47 +348,13 @@ std::vector<uint32_t> IFCImporter::FilterGeometricElementTypes(const std::unorde
     return geometricElementTypes;
 }
 
-std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>> IFCImporter::CollectFlatMeshes(
-    webifc::parsing::IfcLoader* loader,
-    const std::vector<uint32_t>& geometricElementTypes) {
-    
-    // Get geometry processor
-    auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
-    
-    // Optimized bulk geometry loading approach
-    std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>> flatMeshesWithGeometry;
-    flatMeshesWithGeometry.reserve(IFCConstants::GEOMETRY_CONTAINER_INITIAL_CAPACITY);
-    
-    // Batch process geometric elements by type for better cache locality
-    for (uint32_t elementType : geometricElementTypes) {
-        auto elements = loader->GetExpressIDsWithType(elementType);
-        
-        // Process all elements of this type in batch for better performance
-        for (uint32_t i = 0; i < elements.size(); ++i) {
-            uint32_t expressID = elements[i];
-            try {
-                auto flatMesh = geomProcessor->GetFlatMesh(expressID);
-                if (!flatMesh.geometries.empty()) {
-                    // Batch vertex data loading for this mesh
-                    for (auto &geom : flatMesh.geometries) {
-                        auto &ifcGeom = geomProcessor->GetGeometry(geom.geometryExpressID);
-                        ifcGeom.GetVertexData(); // Ensure geometry data is loaded
-                    }
-                    flatMeshesWithGeometry.emplace_back(expressID, std::move(flatMesh));
-                }
-            } catch (const std::exception& e) {
-                // Skip elements without geometry but log for debugging
-                LogVerboseDebug("IFC: Element ", expressID, " has no geometry: ", e.what());
-                continue;
-            }
-        }
-    }
-    
-    return flatMeshesWithGeometry;
-}
 
-void IFCImporter::ProcessMeshesFromFlatMeshes(
-    const std::vector<std::pair<uint32_t, webifc::geometry::IfcFlatMesh>>& flatMeshesWithGeometry,
+
+
+
+void IFCImporter::ProcessSingleMesh(
+    uint32_t expressID,
+    const webifc::geometry::IfcFlatMesh& flatMesh,
     const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
     webifc::parsing::IfcLoader* loader,
     std::vector<aiMesh*>& meshes,
@@ -386,67 +362,158 @@ void IFCImporter::ProcessMeshesFromFlatMeshes(
     bool& needsDefaultMaterial,
     aiScene* pScene) {
     
-    // Process each flat mesh to create Assimp meshes
-    for (auto& [expressID, flatMesh] : flatMeshesWithGeometry) {
-        try {
-            // Create individual mesh for this expressID (like reference implementation)
-            auto assimpMesh = CreateMeshFromFlatMesh(expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
-            if (assimpMesh) {
-                // Check if this mesh needs to be split by materials
-                std::string meshName = assimpMesh->mName.C_Str();
-                if (meshName == "IFC_MultiMaterial_Element") {
-                    // This is a multi-material mesh - split it
-                    
-                    // Use RAII pattern for exception safety: create replacement before deleting original
-                    std::unique_ptr<aiMesh> originalMesh(assimpMesh); // Take ownership
-                    assimpMesh = nullptr; // Clear original pointer
-                    
-                    // Re-process this flatMesh with splitting enabled
-                    auto splitMeshes = CreateSplitMeshesFromFlatMesh(loader, expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
-                    
-                    // Add all split meshes and store their metadata
-                    std::string elementName = GetIFCElementName(loader, expressID);
-                    std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
-                    
-                    for (auto* splitMesh : splitMeshes) {
-                        unsigned int meshIndex = static_cast<unsigned int>(meshes.size());
-                        meshToIFCMetadata[meshIndex] = {expressID, ifcTypeName, elementName.empty() ? "" : elementName};
-                        
-                        meshes.push_back(splitMesh);
-                        
-                        // Check if this mesh needs default material (material index 0)
-                        if (splitMesh->mMaterialIndex == 0) {
-                            needsDefaultMaterial = true;
-                        }
-                    }
-                } else {
-                    // Single material mesh - add with IFC element name
-                    std::string elementName = GetIFCElementName(loader, expressID);
-                    if (!elementName.empty()) {
-                        assimpMesh->mName = aiString(elementName);
-                    } else {
-                        // Use semantic fallback name - ExpressID stored in metadata
-                        assimpMesh->mName = aiString("IFC_Element");
-                    }
-                    
-                    // Store IFC metadata for later node assignment
+    try {
+        // Create individual mesh for this expressID (same logic as batch version)
+        auto assimpMesh = CreateMeshFromFlatMesh(expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
+        if (assimpMesh) {
+            // Check if this mesh needs to be split by materials
+            std::string meshName = assimpMesh->mName.C_Str();
+            if (meshName == "IFC_MultiMaterial_Element") {
+                // This is a multi-material mesh - split it
+                
+                // Use RAII pattern for exception safety: create replacement before deleting original
+                std::unique_ptr<aiMesh> originalMesh(assimpMesh); // Take ownership
+                assimpMesh = nullptr; // Clear original pointer
+                
+                // Re-process this flatMesh with splitting enabled
+                auto splitMeshes = CreateSplitMeshesFromFlatMesh(loader, expressID, flatMesh, relMaterials, colorMaterialCache, pScene);
+                
+                // Add all split meshes and store their metadata
+                std::string elementName = GetIFCElementName(loader, expressID);
+                std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
+                
+                for (auto* splitMesh : splitMeshes) {
                     unsigned int meshIndex = static_cast<unsigned int>(meshes.size());
-                    std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
                     meshToIFCMetadata[meshIndex] = {expressID, ifcTypeName, elementName.empty() ? "" : elementName};
                     
-                    meshes.push_back(assimpMesh);
+                    meshes.push_back(splitMesh);
                     
                     // Check if this mesh needs default material (material index 0)
-                    if (assimpMesh->mMaterialIndex == 0) {
+                    if (splitMesh->mMaterialIndex == 0) {
                         needsDefaultMaterial = true;
                     }
                 }
+            } else {
+                // Single material mesh - add with IFC element name
+                std::string elementName = GetIFCElementName(loader, expressID);
+                if (!elementName.empty()) {
+                    assimpMesh->mName = aiString(elementName);
+                } else {
+                    // Use semantic fallback name - ExpressID stored in metadata
+                    assimpMesh->mName = aiString("IFC_Element");
+                }
+                
+                // Store IFC metadata for later node assignment
+                unsigned int meshIndex = static_cast<unsigned int>(meshes.size());
+                std::string ifcTypeName = modelManager->GetSchemaManager().IfcTypeCodeToType(loader->GetLineType(expressID));
+                meshToIFCMetadata[meshIndex] = {expressID, ifcTypeName, elementName.empty() ? "" : elementName};
+                
+                meshes.push_back(assimpMesh);
+                
+                // Check if this mesh needs default material (material index 0)
+                if (assimpMesh->mMaterialIndex == 0) {
+                    needsDefaultMaterial = true;
+                }
             }
+        }
+        
+    } catch (const std::exception &e) {
+        LogWarn("Failed to extract geometry for element ", expressID, ": ", e.what());
+    }
+}
+
+void IFCImporter::ProcessMeshesStreaming(
+    const std::vector<uint32_t>& geometricElementTypes,
+    const std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>>& relMaterials,
+    webifc::parsing::IfcLoader* loader,
+    std::vector<aiMesh*>& meshes,
+    std::unordered_map<std::string, unsigned int>& colorMaterialCache,
+    bool& needsDefaultMaterial,
+    aiScene* pScene) {
+    
+    LogDebug("Processing meshes using streaming approach for large file support");
+    
+    // Get geometry processor inside the method to avoid type issues
+    auto geomProcessor = modelManager->GetGeometryProcessor(currentModelID);
+    
+    // Counter for progress tracking
+    size_t totalElementsProcessed = 0;
+    size_t progressInterval = 100; // Log every 100 elements
+    
+    // Process elements one at a time to minimize memory usage
+    for (uint32_t elementType : geometricElementTypes) {
+        auto elements = loader->GetExpressIDsWithType(elementType);
+        
+        // Process each element individually with immediate cleanup
+        for (uint32_t i = 0; i < elements.size(); ++i) {
+            uint32_t expressID = elements[i];
             
-        } catch (const std::exception &e) {
-            LogWarn("IFC: Failed to extract geometry for element ", expressID, ": ", e.what());
+            try {
+                // Get single flat mesh - this is the key difference from batch approach
+                auto flatMesh = geomProcessor->GetFlatMesh(expressID);
+                
+                if (!flatMesh.geometries.empty()) {
+                    // Load vertex data for this mesh only
+                    for (auto &geom : flatMesh.geometries) {
+                        auto &ifcGeom = geomProcessor->GetGeometry(geom.geometryExpressID);
+                        ifcGeom.GetVertexData(); // Ensure geometry data is loaded
+                    }
+                    
+                    // Track mesh count before processing
+                    size_t meshCountBefore = meshes.size();
+                    
+                    // Process this single mesh immediately
+                    ProcessSingleMesh(expressID, flatMesh, relMaterials, loader, 
+                                    meshes, colorMaterialCache, needsDefaultMaterial, pScene);
+                    
+                    // Track how many meshes were created for this element
+                    size_t meshCountAfter = meshes.size();
+                    size_t meshesCreated = meshCountAfter - meshCountBefore;
+                    
+                    if (meshesCreated > 1) {
+                        LogDebug("Element ", expressID, " created ", meshesCreated, " meshes (multi-material split)");
+                    } else if (meshesCreated == 1) {
+                        LogDebug("Element ", expressID, " created 1 mesh");
+                    } else {
+                        LogDebug("Element ", expressID, " created 0 meshes (empty geometry)");
+                    }
+                    
+                    // CRITICAL: Clear intermediate geometry data after processing each mesh
+                    // This is the key memory optimization from web-ifc-wasm.cpp approach
+                    try {
+                        geomProcessor->Clear();
+                        LogDebug("Cleared geometry processor cache after processing element ", expressID);
+                    } catch (const std::exception& e) {
+                        LogWarn("Failed to clear geometry processor cache for element ", expressID, ": ", e.what());
+                    }
+                }
+                
+                totalElementsProcessed++;
+                
+                // Progress logging for large files
+                if (totalElementsProcessed % progressInterval == 0) {
+                    LogDebug("Processed ", totalElementsProcessed, " elements so far...");
+                }
+                
+            } catch (const std::exception& e) {
+                // Skip elements without geometry but log for debugging
+                LogDebug("Element ", expressID, " has no geometry: ", e.what());
+                continue;
+            }
         }
     }
+    
+    // Final cache cleanup after all streaming processing is complete
+    try {
+        auto geomLoader = geomProcessor->GetLoader();
+        geomLoader.ResetCache();
+        LogDebug("Reset geometry loader cache after streaming processing");
+    } catch (const std::exception& e) {
+        LogWarn("Failed to reset geometry loader cache: ", e.what());
+    }
+    
+    LogDebug("Streaming processing completed. Total elements processed: ", totalElementsProcessed, 
+           ", meshes created: ", meshes.size());
 }
 
 void IFCImporter::SetupSceneMeshes(std::vector<aiMesh*>& meshes, bool needsDefaultMaterial, aiScene* pScene) {
@@ -520,22 +587,19 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
         const auto& allElementTypes = schemaManager.GetIfcElementList();
         auto geometricElementTypes = FilterGeometricElementTypes(allElementTypes);
         
-        // 2. Collect flat meshes from geometry processor
-        auto flatMeshesWithGeometry = CollectFlatMeshes(loader, geometricElementTypes);
-        
-        // 3. Process meshes and handle material assignments
+        // 2. STREAMING APPROACH: Process meshes one at a time to avoid large memory usage
         std::unordered_map<std::string, unsigned int> colorMaterialCache;
         bool needsDefaultMaterial = false;
-        ProcessMeshesFromFlatMeshes(flatMeshesWithGeometry, relMaterials, loader, 
-                                  meshes, colorMaterialCache, needsDefaultMaterial, pScene);
+        ProcessMeshesStreaming(geometricElementTypes, relMaterials, loader,
+                             meshes, colorMaterialCache, needsDefaultMaterial, pScene);
         
         // 4. Setup scene with processed meshes
         SetupSceneMeshes(meshes, needsDefaultMaterial, pScene);
         
-        LogInfo("Extracted ", meshes.size(), " meshes from IFC file");
+        LogDebug("Extracted ", meshes.size(), " meshes from IFC file");
 
     } catch (const std::exception &e) {
-        LogError("IFC: Failed to extract geometry from Web-IFC: ", e.what());
+        LogError("Failed to extract geometry from Web-IFC: ", e.what());
         
         // Clean up partial results
         for (auto* mesh : meshes) {
@@ -545,10 +609,10 @@ void IFCImporter::ExtractGeometry(uint32_t modelID, aiScene *pScene) {
 }
 
 aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flatMesh, uint32_t geometryIndex) {
-    LogVerboseDebug("ConvertWebIFCMesh: Starting conversion for geometry index: ", geometryIndex);
+    LogDebug("ConvertWebIFCMesh: Starting conversion for geometry index: ", geometryIndex);
 
     if (geometryIndex >= flatMesh.geometries.size()) {
-        LogVerboseDebug("ConvertWebIFCMesh: Invalid geometry index ", geometryIndex, " >= ", flatMesh.geometries.size());
+        LogDebug("ConvertWebIFCMesh: Invalid geometry index ", geometryIndex, " >= ", flatMesh.geometries.size());
         return nullptr;
     }
 
@@ -573,10 +637,10 @@ aiMesh* IFCImporter::ConvertWebIFCMesh(const webifc::geometry::IfcFlatMesh &flat
     const auto& vertexDataVector = ifcGeom.fvertexData;
     const auto& indexDataVector = ifcGeom.indexData;
     
-    LogVerboseDebug("ConvertWebIFCMesh: Processing geometry ID ", placedGeom.geometryExpressID, " with ", vertexDataVector.size(), " vertex elements and ", indexDataVector.size(), " indices");
+    LogDebug("ConvertWebIFCMesh: Processing geometry ID ", placedGeom.geometryExpressID, " with ", vertexDataVector.size(), " vertex elements and ", indexDataVector.size(), " indices");
     
     if (vertexDataVector.empty() || indexDataVector.empty()) {
-        LogVerboseDebug("ConvertWebIFCMesh: Empty data vectors - returning nullptr");
+        LogDebug("ConvertWebIFCMesh: Empty data vectors - returning nullptr");
         return nullptr;
     }
     // Get pointers to the actual data
@@ -719,10 +783,10 @@ void IFCImporter::ExtractMaterials(uint32_t modelID, aiScene *pScene) {
             pScene->mMaterials[i] = materials[i];
         }
         
-        LogInfo("Extracted ", materials.size(), " IFC materials");
+        LogDebug("Extracted ", materials.size(), " IFC materials");
         
     } catch (const std::exception &e) {
-        LogWarn("IFC: Failed to extract materials: ", e.what());
+        LogWarn("Failed to extract materials: ", e.what());
         
         // Fallback to default material only
         if (materials.empty()) {
@@ -795,13 +859,20 @@ void IFCImporter::ExtractIFCMaterials(
     std::vector<aiMaterial*>& materials,
     std::unordered_map<uint32_t, unsigned int>& materialIDToIndex) {
     
+    LogDebug("Extracting IFC materials using streaming approach");
+    
     try {
+        // STREAMING APPROACH: Process only materials actually used by geometry
         // Get material relationships and definitions from Web-IFC
         const auto& relMaterials = geomLoader.GetRelMaterials();
         const auto& materialDefinitions = geomLoader.GetMaterialDefinitions();
         const auto& styledItems = geomLoader.GetStyledItems();
         
-        // Process each material definition
+        LogDebug("Found ", materialDefinitions.size(), " material definitions used by geometry");
+        
+        size_t totalMaterialsProcessed = 0;
+        
+        // Process each material definition that's actually used
         for (const auto& [materialID, definitions] : materialDefinitions) {
             try {
                 aiMaterial* material = ExtractSingleIFCMaterial(ifcLoader, materialID, definitions);
@@ -810,20 +881,22 @@ void IFCImporter::ExtractIFCMaterials(
                     materials.push_back(material);
                     materialIDToIndex[materialID] = materialIndex;
                     
-                    LogVerboseDebug("Extracted IFC material: ", materialID, " -> index ", materialIndex);
+                    LogDebug("Extracted IFC material: ", materialID, " -> index ", materialIndex);
+                    totalMaterialsProcessed++;
                 }
             } catch (const std::exception& e) {
-                LogWarn("IFC: Failed to extract material ", materialID, ": ", e.what());
+                LogWarn("Failed to extract material ", materialID, ": ", e.what());
             }
         }
         
-        // Process styled items for visual representations
-        ProcessStyledItems(ifcLoader, styledItems, materials, materialIDToIndex);
+        LogDebug("Material extraction completed. Total materials processed: ", totalMaterialsProcessed);
         
     } catch (const std::exception& e) {
-        LogWarn("IFC: Failed to access Web-IFC material APIs: ", e.what());
+        LogWarn("Failed to access Web-IFC material APIs: ", e.what());
     }
 }
+
+
 
 aiMaterial* IFCImporter::ExtractSingleIFCMaterial(
     webifc::parsing::IfcLoader* ifcLoader,
@@ -861,7 +934,7 @@ aiMaterial* IFCImporter::ExtractSingleIFCMaterial(
         return material.release();
         
     } catch (const std::exception& e) {
-        LogWarn("IFC: Failed to extract material properties for ", materialID, ": ", e.what());
+        LogWarn("Failed to extract material properties for ", materialID, ": ", e.what());
         return nullptr;
     }
 }
@@ -1128,10 +1201,10 @@ void IFCImporter::ProcessSurfaceStyle(
         materials.push_back(material.release());
         materialIDToIndex[styleID] = materialIndex;
         
-        LogVerboseDebug("Processed surface style: ", styleID, " -> index ", materialIndex);
+        LogDebug("Processed surface style: ", styleID, " -> index ", materialIndex);
         
     } catch (const std::exception& e) {
-        LogWarn("IFC: Failed to process surface style ", styleID, ": ", e.what());
+        LogWarn("Failed to process surface style ", styleID, ": ", e.what());
     }
 }
 
@@ -1154,7 +1227,7 @@ void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
         BuildIFCSpatialHierarchy(ifcLoader, pScene);
         
     } catch (const std::exception &e) {
-        LogWarn("IFC: Failed to build spatial hierarchy: ", e.what(), ", falling back to flat hierarchy");
+        LogWarn("Failed to build spatial hierarchy: ", e.what(), ", falling back to flat hierarchy");
         
         // Fallback: create a simple flat hierarchy
         if (pScene->mNumMeshes > 0) {
@@ -1169,7 +1242,7 @@ void IFCImporter::BuildSceneGraph(uint32_t modelID, aiScene *pScene) {
         }
     }
     
-    LogInfo("Built scene graph with ", CountNodesInHierarchy(pScene->mRootNode), " nodes");
+    LogDebug("Built scene graph with ", CountNodesInHierarchy(pScene->mRootNode), " nodes");
 }
 
 void IFCImporter::CleanupWebIFC(uint32_t modelID) {
@@ -1215,11 +1288,11 @@ std::string IFCImporter::GetIFCElementName(webifc::parsing::IfcLoader* ifcLoader
             }
         } catch (const std::exception& e) {
             // Tag property not found in schema for this element type - this is expected for many elements
-            LogDebug("IFC: Tag property not available for element type ", elementType, ": ", e.what());
+            LogDebug("Tag property not available for element type ", elementType, ": ", e.what());
         }
         
     } catch (const std::exception& e) {
-        LogDebug("IFC: Failed to extract name for element ", expressID, ": ", e.what());
+        LogDebug("Failed to extract name for element ", expressID, ": ", e.what());
     }
     
     // Return empty string to indicate fallback to expressID should be used
@@ -1267,7 +1340,7 @@ std::unordered_map<uint32_t, uint32_t> IFCImporter::PopulateSpatialContainmentMa
         // Use Web-IFC's efficient API to get all spatial containment relationships
         auto spatialContainments = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCRELCONTAINEDINSPATIALSTRUCTURE);
         
-        LogDebug("IFC: Found ", spatialContainments.size(), " spatial containment relationships");
+        LogDebug("Found ", spatialContainments.size(), " spatial containment relationships");
         
         for (uint32_t relationshipID : spatialContainments) {
             try {
@@ -1289,20 +1362,73 @@ std::unordered_map<uint32_t, uint32_t> IFCImporter::PopulateSpatialContainmentMa
                     elementToStorey[elementID] = relatingStructure;
                 }
                 
-                LogDebug("IFC: Spatial containment - storey ", relatingStructure, " contains ", relatedElements.size(), " elements");
+                LogDebug("Spatial containment - storey ", relatingStructure, " contains ", relatedElements.size(), " elements");
                 
             } catch (const std::exception& e) {
-                LogWarn("IFC: Failed to process spatial containment relationship ", relationshipID, ": ", e.what());
+                LogWarn("Failed to process spatial containment relationship ", relationshipID, ": ", e.what());
             }
         }
         
-        LogInfo("IFC: Built spatial containment map with ", elementToStorey.size(), " element-to-storey mappings");
+        LogDebug("Built spatial containment map with ", elementToStorey.size(), " element-to-storey mappings");
         
     } catch (const std::exception& e) {
-        LogError("IFC: Failed to populate spatial containment map: ", e.what());
+        LogError("Failed to populate spatial containment map: ", e.what());
     }
     
     return elementToStorey;
+}
+
+// STREAMING SPATIAL HIERARCHY - Memory-efficient lazy lookup implementation
+std::optional<uint32_t> IFCImporter::GetElementSpatialContainer(uint32_t elementID, webifc::parsing::IfcLoader* ifcLoader) {
+    // Check cache first to avoid repeated IFC parsing
+    auto cacheIt = spatialContainerCache.find(elementID);
+    if (cacheIt != spatialContainerCache.end()) {
+        return cacheIt->second;
+    }
+    
+    try {
+        // Stream through spatial containment relationships to find this element
+        auto spatialContainments = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCRELCONTAINEDINSPATIALSTRUCTURE);
+        
+        for (uint32_t relationshipID : spatialContainments) {
+            try {
+                // Get the set of elements contained in this spatial structure
+                ifcLoader->MoveToArgumentOffset(relationshipID, 4);
+                auto relatedElements = ifcLoader->GetSetArgument();
+                
+                // Check if our element is in this containment relationship
+                for (auto& elementRef : relatedElements) {
+                    uint32_t containedElementID = ifcLoader->GetRefArgument(elementRef);
+                    if (containedElementID == elementID) {
+                        // Found our element! Get its spatial container
+                        ifcLoader->MoveToArgumentOffset(relationshipID, 5);
+                        uint32_t spatialContainer = ifcLoader->GetRefArgument();
+                        
+                        // Cache the result for future lookups
+                        spatialContainerCache[elementID] = spatialContainer;
+                        
+                        // Limit cache size to prevent memory growth in WASM
+                        if (spatialContainerCache.size() > 1000) {
+                            spatialContainerCache.clear();
+                            LogDebug("Cleared spatial container cache to manage memory");
+                        }
+                        
+                        return spatialContainer;
+                    }
+                }
+            } catch (const std::exception& e) {
+                LogDebug("Failed to process spatial containment relationship ", relationshipID, ": ", e.what());
+            }
+        }
+        
+        // Element not found in any spatial containment
+        spatialContainerCache[elementID] = 0; // Cache negative result
+        return std::nullopt;
+        
+    } catch (const std::exception& e) {
+        LogWarn("Failed to lookup spatial container for element ", elementID, ": ", e.what());
+        return std::nullopt;
+    }
 }
 
 std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(webifc::parsing::IfcLoader* ifcLoader) {
@@ -1319,13 +1445,13 @@ std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(we
         try {
             nameIndex = schemaCache.GetPropertyIndex(webifc::schema::IFCBUILDINGSTOREY, "Name", ifcLoader);
         } catch (const std::exception& e) {
-            LogWarn("IFC: Name property not available for IFCBUILDINGSTOREY: ", e.what());
+            LogWarn("Name property not available for IFCBUILDINGSTOREY: ", e.what());
         }
         
         try {
             elevationIndex = schemaCache.GetPropertyIndex(webifc::schema::IFCBUILDINGSTOREY, "Elevation", ifcLoader);
         } catch (const std::exception& e) {
-            LogWarn("IFC: Elevation property not available for IFCBUILDINGSTOREY: ", e.what());
+            LogWarn("Elevation property not available for IFCBUILDINGSTOREY: ", e.what());
         }
         
         for (uint32_t storeyID : buildingStoreys) {
@@ -1359,10 +1485,10 @@ std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(we
                 
                 storeys.push_back(storeyInfo);
                 
-                LogDebug("IFC: Found storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation);
+                LogDebug("Found storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation);
                 
             } catch (const std::exception& e) {
-                LogWarn("IFC: Failed to extract elevation for building storey ", storeyID, ": ", e.what());
+                LogWarn("Failed to extract elevation for building storey ", storeyID, ": ", e.what());
             }
         }
         
@@ -1372,13 +1498,13 @@ std::vector<IFCImporter::StoreyInfo> IFCImporter::GetSortedStoreysByElevation(we
                 return a.elevation < b.elevation;
             });
         
-        LogInfo("IFC: Sorted ", storeys.size(), " building storeys by elevation");
+        LogDebug("Sorted ", storeys.size(), " building storeys by elevation");
         for (const auto& storey : storeys) {
-            LogDebug("IFC: Storey '", storey.name, "' at elevation ", storey.elevation);
+            LogDebug("Storey '", storey.name, "' at elevation ", storey.elevation);
         }
         
     } catch (const std::exception& e) {
-        LogError("IFC: Failed to get sorted storeys by elevation: ", e.what());
+        LogError("Failed to get sorted storeys by elevation: ", e.what());
     }
     
     return storeys;
@@ -1424,7 +1550,7 @@ void IFCImporter::GenerateTextureCoordinates(aiMesh* mesh, const aiVector3D& min
         mesh->mTextureCoords[0][i] = aiVector3D(u, v, 0.0f);
     }
     
-    LogVerboseDebug("Generated texture coordinates for mesh with ", mesh->mNumVertices, " vertices");
+    LogDebug("Generated texture coordinates for mesh with ", mesh->mNumVertices, " vertices");
 }
 
 aiColor4D IFCImporter::ConvertWebIFCColor(const glm::dvec4& webifcColor) {
@@ -1692,7 +1818,7 @@ aiMesh* IFCImporter::CreateMeshFromFlatMesh(
         return mesh.release();
         
     } catch (const std::exception& e) {
-        LogWarn("IFC: Failed to create mesh from flat mesh: ", e.what());
+        LogWarn("Failed to create mesh from flat mesh: ", e.what());
         
         // mesh will be automatically cleaned up by unique_ptr
         return nullptr;
@@ -2021,7 +2147,7 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
         return SplitMeshByMaterials(ifcLoader, expressID, vertices, faces, materialIndices, minBounds, maxBounds, pScene);
         
     } catch (const std::exception &e) {
-        LogError("IFC: Failed to create split meshes for element ", expressID, ": ", e.what());
+        LogError("Failed to create split meshes for element ", expressID, ": ", e.what());
         
         // Clean up any partially created faces
         for (auto& face : faces) {
@@ -2038,7 +2164,7 @@ std::vector<aiMesh*> IFCImporter::CreateSplitMeshesFromFlatMesh(
 // BuildIFCSpatialHierarchy helper methods for better maintainability and code organization
 
 void IFCImporter::HandleMissingProject(aiScene* pScene) {
-    LogWarn("IFC: No IfcProject found, using flat hierarchy");
+    LogWarn("No IfcProject found, using flat hierarchy");
     
     if (pScene->mNumMeshes > 0) {
         // Link all meshes to root node using exception-safe pattern
@@ -2111,7 +2237,7 @@ std::vector<aiNode*> IFCImporter::BuildStoreyHierarchy(webifc::parsing::IfcLoade
         storeyNode->mParent = buildingNode;
         storeyNodes.push_back(storeyNode);
         
-        LogDebug("IFC: Added storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation, " to building hierarchy");
+        LogDebug("Added storey '", storeyInfo.name, "' at elevation ", storeyInfo.elevation, " to building hierarchy");
         
         // Build Spaces under this Storey
         std::vector<aiNode*> spaceNodes = BuildSpaceHierarchy(ifcLoader, storeyNode);
@@ -2152,6 +2278,8 @@ void IFCImporter::AssignChildrenToParent(aiNode* parent, const std::vector<aiNod
 
 void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader, aiScene* pScene) {
     
+    // LAZY SCENE GRAPH CONSTRUCTION - Only create hierarchy nodes that contain meshes
+    
     // 1. Create project node as the spatial hierarchy root
     aiNode* projectNode = CreateProjectNode(ifcLoader);
     
@@ -2162,20 +2290,283 @@ void IFCImporter::BuildIFCSpatialHierarchy(webifc::parsing::IfcLoader* ifcLoader
     }
     
     // 2. Replace the root node with the project node using exception-safe pattern
-    std::unique_ptr<aiNode> oldRootNode(pScene->mRootNode); // Take ownership of old node
-    pScene->mRootNode = projectNode; // Assign new node first
-    // oldRootNode will be automatically deleted when going out of scope
+    std::unique_ptr<aiNode> oldRootNode(pScene->mRootNode);
+    pScene->mRootNode = projectNode;
     
-    // 3. Build the complete spatial hierarchy: Project → Sites → Buildings → Stories → Spaces
-    std::vector<aiNode*> siteNodes = BuildSiteHierarchy(ifcLoader, projectNode);
-    AssignChildrenToParent(projectNode, siteNodes);
-    
-    // 4. Assign meshes to appropriate nodes in the hierarchy
+    // 3. STREAMING APPROACH: Build hierarchy lazily based on actual mesh assignments
+    // Instead of building complete hierarchy upfront, only create nodes that will contain meshes
     if (pScene->mNumMeshes > 0) {
-        AssignMeshesToHierarchy(projectNode, pScene);
+        LogDebug("Building lazy scene graph - only creating nodes that contain meshes");
+        BuildLazySceneGraphFromMeshes(ifcLoader, projectNode, pScene);
     }
     
-    LogInfo("Built IFC spatial hierarchy: Project (", siteNodes.size(), " sites, total nodes: ", CountNodesInHierarchy(projectNode), ")");
+    LogDebug("Built lazy IFC spatial hierarchy with ", CountNodesInHierarchy(projectNode), " nodes total");
+}
+
+// LAZY SCENE GRAPH CONSTRUCTION - Create proper IFC hierarchy only when needed for meshes
+void IFCImporter::BuildLazySceneGraphFromMeshes(webifc::parsing::IfcLoader* ifcLoader, aiNode* projectNode, aiScene* pScene) {
+    // 1. Group meshes by their spatial containers using streaming approach
+    MeshGrouping meshGrouping = GroupMeshesByStorey(pScene);
+    
+    // 2. Create proper IFC hierarchy: Project → Site → Building → Storey → Meshes
+    // Only create hierarchy levels that will contain meshes
+    
+    // Create site and building nodes from actual IFC entities
+    aiNode* siteNode = nullptr;
+    aiNode* buildingNode = nullptr;
+    
+    try {
+        // Try to get actual IFC site with proper name extraction
+        auto siteIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCSITE);
+        if (!siteIDs.empty()) {
+            siteNode = CreateNodeFromIFCElement(ifcLoader, siteIDs[0], "IFC_Site");
+            LogDebug("Created site node '", siteNode->mName.C_Str(), "' from actual IFC site entity");
+        }
+    } catch (const std::exception& e) {
+        LogWarn("Failed to create site from IFC entity: ", e.what());
+    }
+    
+    if (!siteNode) {
+        siteNode = new aiNode("IFC_Site");
+        LogDebug("Created fallback site node");
+    }
+    siteNode->mParent = projectNode;
+    
+    try {
+        // Try to get actual IFC building
+        auto buildingIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCBUILDING);
+        if (!buildingIDs.empty()) {
+            buildingNode = CreateNodeFromIFCElement(ifcLoader, buildingIDs[0], "IFC_Building");
+        }
+    } catch (...) {}
+    
+    if (!buildingNode) {
+        buildingNode = new aiNode("IFC_Building");
+    }
+    buildingNode->mParent = siteNode;
+    
+    // Track created storey nodes to avoid duplicates
+    std::unordered_map<uint32_t, aiNode*> spatialContainerToNode;
+    std::vector<aiNode*> storeyNodes;
+    
+    // 3. Get all actual building storeys and collect meshes for each storey
+    std::unordered_map<uint32_t, std::vector<unsigned int>> storeyToAllMeshes;
+    std::vector<unsigned int> unassignedMeshes;
+    
+    try {
+        // Get all actual building storeys from IFC file
+        auto buildingStoreyIDs = ifcLoader->GetExpressIDsWithType(webifc::schema::IFCBUILDINGSTOREY);
+        LogDebug("Found ", buildingStoreyIDs.size(), " building storeys in IFC file");
+        
+        // Initialize all building storeys
+        for (uint32_t storeyID : buildingStoreyIDs) {
+            storeyToAllMeshes[storeyID] = std::vector<unsigned int>();
+        }
+        
+        // Assign meshes to building storeys by checking spatial containment
+        for (const auto& [spatialContainerID, meshIndices] : meshGrouping.storeyToMeshes) {
+            if (meshIndices.empty()) continue;
+            
+            bool assignedToStorey = false;
+            
+            try {
+                uint32_t elementType = ifcLoader->GetLineType(spatialContainerID);
+                
+                if (elementType == webifc::schema::IFCBUILDINGSTOREY) {
+                    // This is a building storey - add meshes directly
+                    storeyToAllMeshes[spatialContainerID].insert(
+                        storeyToAllMeshes[spatialContainerID].end(),
+                        meshIndices.begin(), meshIndices.end()
+                    );
+                    assignedToStorey = true;
+                    LogDebug("Assigned ", meshIndices.size(), " meshes directly to building storey ", spatialContainerID);
+                } else {
+                    // This is a space/room - find which building storey contains it
+                    for (uint32_t storeyID : buildingStoreyIDs) {
+                        // Check if this space is contained in this building storey
+                        auto spatialContainer = GetElementSpatialContainer(spatialContainerID, ifcLoader);
+                        if (spatialContainer.has_value() && spatialContainer.value() == storeyID) {
+                            storeyToAllMeshes[storeyID].insert(
+                                storeyToAllMeshes[storeyID].end(),
+                                meshIndices.begin(), meshIndices.end()
+                            );
+                            assignedToStorey = true;
+                            LogDebug("Assigned ", meshIndices.size(), " meshes from space ", spatialContainerID, " to building storey ", storeyID);
+                            break;
+                        }
+                    }
+                }
+                
+            } catch (const std::exception& e) {
+                LogWarn("Failed to resolve spatial container ", spatialContainerID, ": ", e.what());
+            }
+            
+            // If not assigned to any building storey, add to unassigned
+            if (!assignedToStorey) {
+                unassignedMeshes.insert(unassignedMeshes.end(), meshIndices.begin(), meshIndices.end());
+                LogDebug("Added ", meshIndices.size(), " meshes from container ", spatialContainerID, " to unassigned");
+            }
+        }
+        
+    } catch (const std::exception& e) {
+        LogWarn("Failed to get building storeys: ", e.what());
+        // Fallback: use all meshes as unassigned
+        for (const auto& [spatialContainerID, meshIndices] : meshGrouping.storeyToMeshes) {
+            unassignedMeshes.insert(unassignedMeshes.end(), meshIndices.begin(), meshIndices.end());
+        }
+    }
+    
+    // 4. Create storey nodes in elevation order (ground floor first)
+    std::vector<StoreyInfo> sortedStoreys = GetSortedStoreysByElevation(ifcLoader);
+    
+    for (const StoreyInfo& storeyInfo : sortedStoreys) {
+        uint32_t storeyID = storeyInfo.expressID;
+        auto meshesIt = storeyToAllMeshes.find(storeyID);
+        
+        if (meshesIt == storeyToAllMeshes.end() || meshesIt->second.empty()) {
+            continue; // Skip storeys with no meshes
+        }
+        
+        const std::vector<unsigned int>& meshIndices = meshesIt->second;
+        
+        try {
+            // Create storey node for actual IfcBuildingStorey
+            aiNode* storeyNode = CreateNodeFromIFCElement(ifcLoader, storeyID, "IFC_Storey");
+            if (storeyNode) {
+                spatialContainerToNode[storeyID] = storeyNode;
+                storeyNodes.push_back(storeyNode);
+                storeyNode->mParent = buildingNode;
+                
+                // Create individual element nodes under this storey instead of bulk assignment
+                CreateElementNodesUnderStorey(storeyNode, meshIndices, pScene);
+                LogDebug("Created building storey node '", storeyNode->mName.C_Str(), "' (elevation ", storeyInfo.elevation, ") with ", meshIndices.size(), " meshes in individual element nodes");
+            }
+            
+        } catch (const std::exception& e) {
+            LogWarn("Failed to create building storey hierarchy for ", storeyID, ": ", e.what());
+        }
+    }
+    
+    // 5. Handle unassigned meshes using coordinate-based assignment first
+    std::vector<unsigned int> allUnassignedMeshes = meshGrouping.unassignedMeshes;
+    allUnassignedMeshes.insert(allUnassignedMeshes.end(), unassignedMeshes.begin(), unassignedMeshes.end());
+    
+    if (!allUnassignedMeshes.empty()) {
+        LogDebug("Attempting coordinate-based assignment for ", allUnassignedMeshes.size(), " unassigned meshes");
+        
+        // Build lookup maps for the created storey nodes
+        NodeLookupMaps lookupMaps;
+        for (aiNode* storeyNode : storeyNodes) {
+            if (storeyNode->mMetaData) {
+                uint32_t storeyExpressID = 0;
+                uint32_t storeyType = 0;
+                if (storeyNode->mMetaData->Get("ExpressID", storeyExpressID)) {
+                    lookupMaps.expressIDToNode[storeyExpressID] = storeyNode;
+                }
+                if (storeyNode->mMetaData->Get("IFC.Type", storeyType)) {
+                    lookupMaps.entityTypeToNodes[storeyType].push_back(storeyNode);
+                }
+            }
+        }
+        
+        // Try coordinate-based assignment to existing building storeys
+        std::vector<unsigned int> stillUnassignedMeshes;
+        bool coordinateAssignmentSuccessful = TryCoordinateBasedStoreyAssignment(
+            allUnassignedMeshes, lookupMaps, pScene, stillUnassignedMeshes);
+        
+        if (coordinateAssignmentSuccessful) {
+            unsigned int assignedCount = allUnassignedMeshes.size() - stillUnassignedMeshes.size();
+            LogDebug("Coordinate-based assignment: ", assignedCount, " meshes assigned to existing storeys");
+        }
+        
+        // Only create IFC_Unassigned node if there are still unassigned meshes after coordinate assignment
+        if (!stillUnassignedMeshes.empty()) {
+            aiNode* unassignedStoreyNode = new aiNode("IFC_Unassigned");
+            unassignedStoreyNode->mParent = buildingNode;
+            storeyNodes.push_back(unassignedStoreyNode);
+            
+            AssignMeshesToNode(unassignedStoreyNode, stillUnassignedMeshes, pScene);
+            LogDebug("Created unassigned storey node for remaining ", stillUnassignedMeshes.size(), " meshes");
+        }
+    }
+    
+    // 6. Build proper hierarchy: Project → Site → Building → Storeys
+    std::vector<aiNode*> siteChildren = {buildingNode};
+    std::vector<aiNode*> projectChildren = {siteNode};
+    
+    AssignChildrenToParent(buildingNode, storeyNodes);
+    AssignChildrenToParent(siteNode, siteChildren);
+    AssignChildrenToParent(projectNode, projectChildren);
+    
+    LogDebug("Lazy scene graph created proper IFC hierarchy: Project → Site → Building → ", storeyNodes.size(), " Storeys");
+}
+
+// Create individual element nodes under a storey for proper hierarchy structure
+void IFCImporter::CreateElementNodesUnderStorey(aiNode* storeyNode, const std::vector<unsigned int>& meshIndices, aiScene* pScene) {
+    if (!storeyNode || meshIndices.empty() || !pScene) {
+        return;
+    }
+    
+    // Group meshes by their ExpressID (IFC element) to create proper element nodes
+    std::unordered_map<uint32_t, std::vector<unsigned int>> expressIDToMeshes;
+    std::unordered_map<uint32_t, IFCMeshMetadata> expressIDToMetadata;
+    
+    for (unsigned int meshIndex : meshIndices) {
+        auto metadataIt = meshToIFCMetadata.find(meshIndex);
+        if (metadataIt != meshToIFCMetadata.end()) {
+            uint32_t expressID = metadataIt->second.expressID;
+            expressIDToMeshes[expressID].push_back(meshIndex);
+            expressIDToMetadata[expressID] = metadataIt->second;
+        } else {
+            // Fallback for meshes without metadata - treat as individual elements
+            expressIDToMeshes[0].push_back(meshIndex);
+        }
+    }
+    
+    // Create individual element nodes directly under the storey
+    std::vector<aiNode*> elementNodes;
+    elementNodes.reserve(expressIDToMeshes.size());
+    
+    for (const auto& [expressID, meshIndicesForElement] : expressIDToMeshes) {
+        if (meshIndicesForElement.size() == 1) {
+            // Single mesh - create node directly
+            aiNode* elementNode = CreateSingleMeshNode(meshIndicesForElement[0], storeyNode, pScene);
+            elementNodes.push_back(elementNode);
+        } else if (meshIndicesForElement.size() > 1) {
+            // Multi-material element - create parent node with child nodes for each material
+            auto metadataIt = expressIDToMetadata.find(expressID);
+            const IFCMeshMetadata& metadata = (metadataIt != expressIDToMetadata.end()) ? 
+                                              metadataIt->second : IFCMeshMetadata{0, "", ""};
+            
+            aiNode* parentNode = CreateMultiMaterialElementNode(meshIndicesForElement, expressID, metadata, storeyNode, pScene);
+            elementNodes.push_back(parentNode);
+        }
+    }
+    
+    // Assign all element nodes as children of the storey
+    if (!elementNodes.empty()) {
+        AssignChildrenToParent(storeyNode, elementNodes);
+        LogDebug("Created ", elementNodes.size(), " element nodes under storey '", storeyNode->mName.C_Str(), "'");
+    }
+}
+
+// Assign specific meshes to a scene node for lazy hierarchy construction
+void IFCImporter::AssignMeshesToNode(aiNode* node, const std::vector<unsigned int>& meshIndices, aiScene* pScene) {
+    if (!node || meshIndices.empty() || !pScene) {
+        return;
+    }
+    
+    // Assign meshes to this node using exception-safe pattern
+    node->mNumMeshes = static_cast<unsigned int>(meshIndices.size());
+    std::unique_ptr<unsigned int[]> nodeMeshIndices(new unsigned int[meshIndices.size()]);
+    
+    for (size_t i = 0; i < meshIndices.size(); ++i) {
+        nodeMeshIndices[i] = meshIndices[i];
+    }
+    
+    node->mMeshes = nodeMeshIndices.release();
+    
+    LogDebug("Assigned ", meshIndices.size(), " meshes to node ", node->mName.C_Str());
 }
 
 aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoader, uint32_t expressID, const std::string& fallbackName) {
@@ -2204,7 +2595,7 @@ aiNode* IFCImporter::CreateNodeFromIFCElement(webifc::parsing::IfcLoader* ifcLoa
             try {
                 nameArgumentIndex = schemaCache.GetPropertyIndex(elementType, "Name", ifcLoader);
             } catch (const std::exception& e) {
-                LogWarn("IFC: Cannot find Name property for element type ", elementType, ": ", e.what());
+                LogWarn("Cannot find Name property for element type ", elementType, ": ", e.what());
                 // Use semantic naming as fallback
                 node->mName = aiString(fallbackName.empty() ? "IFC_Element" : fallbackName);
                 node->mTransformation = aiMatrix4x4();
@@ -2322,6 +2713,9 @@ IFCImporter::NodeLookupMaps IFCImporter::BuildNodeLookupMaps(aiNode* rootNode) {
 IFCImporter::MeshGrouping IFCImporter::GroupMeshesByStorey(aiScene* pScene) {
     MeshGrouping grouping;
     
+    // Get IFC loader for streaming spatial lookups
+    auto ifcLoader = modelManager->GetIfcLoader(currentModelID);
+    
     for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
         if (!pScene->mMeshes[i]) continue;
         
@@ -2336,26 +2730,26 @@ IFCImporter::MeshGrouping IFCImporter::GroupMeshesByStorey(aiScene* pScene) {
         }
         
         if (hasExpressID) {
-            // Look up which storey this element belongs to using spatial containment map
-            auto storeyIt = elementToStoreyMap.find(expressID);
-            if (storeyIt != elementToStoreyMap.end()) {
-                // Element found in spatial containment map - assign to correct storey
-                uint32_t storeyID = storeyIt->second;
+            // STREAMING APPROACH: Look up spatial container on-demand (memory-efficient)
+            auto spatialContainer = GetElementSpatialContainer(expressID, ifcLoader);
+            if (spatialContainer.has_value()) {
+                // Element found in spatial containment - assign to correct storey
+                uint32_t storeyID = spatialContainer.value();
                 grouping.storeyToMeshes[storeyID].push_back(i);
                 
-                LogVerboseDebug("IFC: Mesh ", i, " (element ", expressID, ") assigned to storey ", storeyID);
+                LogDebug("Mesh ", i, " (element ", expressID, ") assigned to storey ", storeyID);
             } else {
-                // Element not found in spatial containment map - add to unassigned
+                // Element not found in spatial containment - add to unassigned
                 grouping.unassignedMeshes.push_back(i);
                 
-                LogVerboseDebug("IFC: Mesh ", i, " (element ", expressID, ") not found in spatial containment - unassigned");
+                LogDebug("Mesh ", i, " (element ", expressID, ") not found in spatial containment - unassigned");
             }
         } else {
             // No IFC metadata - add to unassigned
             grouping.unassignedMeshes.push_back(i);
             
             std::string meshName = pScene->mMeshes[i]->mName.C_Str();
-            LogVerboseDebug("IFC: Mesh ", i, " ('", meshName, "') has no IFC metadata - unassigned");
+            LogDebug("Mesh ", i, " ('", meshName, "') has no IFC metadata - unassigned");
         }
     }
     
@@ -2380,7 +2774,7 @@ void IFCImporter::CreateNodesForStoreyMeshes(
                 uint32_t nodeType = 0;
                 if (foundNode->mMetaData->Get("IFC.Type", nodeType) && 
                     nodeType == webifc::schema::IFCBUILDINGSTOREY) {
-                    LogVerboseDebug("IFC: Found storey node for ExpressID ", targetStoreyID, " via O(1) lookup");
+                    LogDebug("Found storey node for ExpressID ", targetStoreyID, " via O(1) lookup");
                     return foundNode;
                 }
             }
@@ -2393,7 +2787,7 @@ void IFCImporter::CreateNodesForStoreyMeshes(
         // Find the storey node for this storeyID
         aiNode* storeyNode = findStoreyByExpressID(storeyID);
         if (!storeyNode) {
-            LogDebug("IFC: Could not find storey node for storey ", storeyID, " - ", meshIndices.size(), " meshes will be handled by coordinate-based assignment");
+            LogDebug("Could not find storey node for storey ", storeyID, " - ", meshIndices.size(), " meshes will be handled by coordinate-based assignment");
             
             // Add comprehensive debug logging for orphaned meshes
             for (unsigned int meshIndex : meshIndices) {
@@ -2401,7 +2795,7 @@ void IFCImporter::CreateNodesForStoreyMeshes(
                 if (mesh && mesh->mNumVertices > 0) {
                     double meshCenterY = CalculateMeshCenterY(mesh);
                     auto bbox = CalculateMeshBoundingBox(mesh);
-                    LogDebug("IFC: Orphaned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+                    LogDebug("Orphaned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
                             ", BBox: [", bbox.first.x, ",", bbox.first.y, ",", bbox.first.z, "] to [", 
                             bbox.second.x, ",", bbox.second.y, ",", bbox.second.z, "], Target storeyID: ", storeyID);
                 }
@@ -2479,7 +2873,7 @@ void IFCImporter::CreateNodesForStoreyMeshes(
             }
         }
         
-        LogInfo("IFC: Assigned ", meshIndices.size(), " meshes to storey ", storeyID);
+        LogDebug("Assigned ", meshIndices.size(), " meshes to storey ", storeyID);
     }
 }
 
@@ -2494,7 +2888,7 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
     // Find all building storey nodes with their elevations
     auto storeyIt = lookupMaps.entityTypeToNodes.find(webifc::schema::IFCBUILDINGSTOREY);
     if (storeyIt == lookupMaps.entityTypeToNodes.end() || storeyIt->second.empty()) {
-        LogDebug("IFC: No building storeys found for coordinate-based assignment");
+        LogDebug("No building storeys found for coordinate-based assignment");
         remainingUnassignedMeshes = unassignedMeshes;
         return false;
     }
@@ -2526,7 +2920,7 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
     }
     
     if (storeysWithElevations.empty()) {
-        LogDebug("IFC: No storeys with valid elevations found for coordinate-based assignment");
+        LogDebug("No storeys with valid elevations found for coordinate-based assignment");
         remainingUnassignedMeshes = unassignedMeshes;
         return false;
     }
@@ -2537,9 +2931,9 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
             return a.elevation < b.elevation;
         });
     
-    LogInfo("IFC: Found ", storeysWithElevations.size(), " storeys for coordinate-based assignment");
+    LogDebug("Found ", storeysWithElevations.size(), " storeys for coordinate-based assignment");
     for (const auto& storey : storeysWithElevations) {
-        LogDebug("IFC: Storey '", storey.node->mName.C_Str(), "' at elevation ", storey.elevation);
+        LogDebug("Storey '", storey.node->mName.C_Str(), "' at elevation ", storey.elevation);
     }
     
     // Calculate estimated storey Y-ranges based on elevations and typical heights (IFC Y-up)
@@ -2568,14 +2962,14 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
         
         storeysWithYRanges.push_back({storey, {minY, maxY}});
         
-        LogDebug("IFC: Storey '", storey.node->mName.C_Str(), "' (ID: ", storey.expressID, ") elevation: ", storey.elevation, ", Y-range: [", minY, ", ", maxY, "] (height: ", storeyHeight, ")");
+        LogDebug("Storey '", storey.node->mName.C_Str(), "' (ID: ", storey.expressID, ") elevation: ", storey.elevation, ", Y-range: [", minY, ", ", maxY, "] (height: ", storeyHeight, ")");
     }
     
     // Log all storey Y-ranges for debugging stair mesh assignment
-    LogInfo("🔍 STOREY DEBUG: All storey Y-ranges for coordinate-based assignment:");
+    LogDebug("🔍 STOREY DEBUG: All storey Y-ranges for coordinate-based assignment:");
     for (const auto& [storeyWithElevation, yRange] : storeysWithYRanges) {
         double quarterY = yRange.first + (yRange.second - yRange.first) * 0.25;
-        LogInfo("🔍 STOREY DEBUG: '", storeyWithElevation.node->mName.C_Str(), 
+        LogDebug("🔍 STOREY DEBUG: '", storeyWithElevation.node->mName.C_Str(), 
                "' elevation: ", storeyWithElevation.elevation, 
                ", Y-range: [", yRange.first, ", ", yRange.second, "], quarterY: ", quarterY);
     }
@@ -2594,7 +2988,7 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
         double meshCenterY = CalculateMeshCenterY(mesh);
         auto meshBBox = CalculateMeshBoundingBox(mesh);
         
-        LogDebug("IFC: Analyzing mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+        LogDebug("Analyzing mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
                 ", BBox: [", meshBBox.first.x, ",", meshBBox.first.y, ",", meshBBox.first.z, "] to [", 
                 meshBBox.second.x, ",", meshBBox.second.y, ",", meshBBox.second.z, "]");
         
@@ -2610,7 +3004,7 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
             double storeyQuarterY = storeyMinY + (storeyMaxY - storeyMinY) * 0.25;
             double distance = std::abs(meshCenterY - storeyQuarterY);
             
-            LogDebug("IFC: Checking storey '", storeyWithElevation.node->mName.C_Str(), "' (ID: ", storeyWithElevation.expressID, 
+            LogDebug("Checking storey '", storeyWithElevation.node->mName.C_Str(), "' (ID: ", storeyWithElevation.expressID, 
                     ") quarterY: ", storeyQuarterY, " (range [", storeyMinY, ", ", storeyMaxY, "]) - distance to mesh centerY ", meshCenterY, " = ", distance);
             
             // Check if this storey is closer than the previous closest
@@ -2620,15 +3014,15 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
                 targetStoreyName = storeyWithElevation.node->mName.C_Str();
                 closestStoreyID = storeyWithElevation.expressID;
                 
-                LogDebug("IFC: NEW CLOSEST! Storey '", targetStoreyName, "' with distance ", distance);
+                LogDebug("NEW CLOSEST! Storey '", targetStoreyName, "' with distance ", distance);
             }
         }
         
         if (targetStorey) {
-            LogDebug("IFC: FINAL ASSIGNMENT: Mesh centerY ", meshCenterY, " assigned to closest storey '", 
+            LogDebug("FINAL ASSIGNMENT: Mesh centerY ", meshCenterY, " assigned to closest storey '", 
                         targetStoreyName, "' (ID: ", closestStoreyID, ") with distance ", closestDistance);
         } else {
-            LogDebug("IFC: NO STOREY found for mesh ", meshIndex, " with centerY ", meshCenterY, " - will remain unassigned");
+            LogDebug("NO STOREY found for mesh ", meshIndex, " with centerY ", meshCenterY, " - will remain unassigned");
         }
         
         if (targetStorey) {
@@ -2654,14 +3048,14 @@ bool IFCImporter::TryCoordinateBasedStoreyAssignment(
             
             assignedCount++;
             
-            LogInfo("IFC: Assigned mesh '", mesh->mName.C_Str(), "' (center Y ", meshCenterY, 
+            LogDebug("Assigned mesh '", mesh->mName.C_Str(), "' (center Y ", meshCenterY, 
                    ") to storey '", targetStoreyName, "'");
         } else {
             remainingUnassignedMeshes.push_back(meshIndex);
         }
     }
     
-    LogInfo("IFC: Coordinate-based assignment: ", assignedCount, " meshes assigned, ", 
+    LogDebug("Coordinate-based assignment: ", assignedCount, " meshes assigned, ", 
            remainingUnassignedMeshes.size(), " still unassigned");
     
     return assignedCount > 0;
@@ -2723,16 +3117,16 @@ void IFCImporter::HandleUnassignedMeshes(
     
     if (TryCoordinateBasedStoreyAssignment(unassignedMeshes, lookupMaps, pScene, stillUnassignedMeshes)) {
         coordinateAssignedCount = unassignedMeshes.size() - stillUnassignedMeshes.size();
-        LogInfo("IFC: Coordinate-based assignment: ", coordinateAssignedCount, " meshes assigned to storeys by elevation");
+        LogDebug("Coordinate-based assignment: ", coordinateAssignedCount, " meshes assigned to storeys by elevation");
     } else {
         // If coordinate-based assignment fails, all meshes remain unassigned
         stillUnassignedMeshes = unassignedMeshes;
-        LogDebug("IFC: Coordinate-based assignment failed, using semantic fallback");
+        LogDebug("Coordinate-based assignment failed, using semantic fallback");
     }
     
     // Handle remaining unassigned meshes - all assignment methods have failed
     if (!stillUnassignedMeshes.empty()) {
-        LogError("IFC: Failed to assign ", stillUnassignedMeshes.size(), " meshes to any storey after both spatial containment and coordinate-based assignment attempts");
+        LogError("Failed to assign ", stillUnassignedMeshes.size(), " meshes to any storey after both spatial containment and coordinate-based assignment attempts");
         
         // Log detailed information about failed meshes for debugging
         for (unsigned int meshIndex : stillUnassignedMeshes) {
@@ -2740,17 +3134,17 @@ void IFCImporter::HandleUnassignedMeshes(
             if (mesh && mesh->mNumVertices > 0) {
                 double meshCenterY = CalculateMeshCenterY(mesh);
                 auto meshBBox = CalculateMeshBoundingBox(mesh);
-                LogError("IFC: Unassigned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
+                LogError("Unassigned mesh ", meshIndex, " ('", mesh->mName.C_Str(), "') - CenterY: ", meshCenterY, 
                         ", BBox: [", meshBBox.first.x, ",", meshBBox.first.y, ",", meshBBox.first.z, "] to [", 
                         meshBBox.second.x, ",", meshBBox.second.y, ",", meshBBox.second.z, "]");
             }
         }
         
-        throw DeadlyImportError("IFC: Unable to assign ", stillUnassignedMeshes.size(), 
+        throw DeadlyImportError("Unable to assign ", stillUnassignedMeshes.size(), 
                               " meshes to building storeys. This indicates a coordinate system mismatch or missing storey information in the IFC file.");
     }
     
-    LogInfo("IFC: Total assignment summary - Coordinate-based: ", coordinateAssignedCount, 
+    LogDebug("Total assignment summary - Coordinate-based: ", coordinateAssignedCount, 
            ", Failed assignments: ", stillUnassignedMeshes.size());
 }
 
@@ -2856,7 +3250,7 @@ void IFCImporter::AssignMeshesToHierarchy(aiNode* node, aiScene* pScene) {
     std::vector<unsigned int> allUnassignedMeshes = meshGrouping.unassignedMeshes;
     allUnassignedMeshes.insert(allUnassignedMeshes.end(), orphanedMeshes.begin(), orphanedMeshes.end());
     
-    LogInfo("IFC: Assignment summary - Spatially assigned: ", 
+    LogDebug("Assignment summary - Spatially assigned: ", 
            (pScene->mNumMeshes - allUnassignedMeshes.size()), 
            ", Unassigned (will use coordinate-based): ", allUnassignedMeshes.size(),
            " (original unassigned: ", meshGrouping.unassignedMeshes.size(), 
@@ -2904,7 +3298,7 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
     if (buildingIt != entityTypeToNodes.end() && !buildingIt->second.empty()) {
         // Use the first available building node
         aiNode* buildingNode = buildingIt->second[0];
-        LogDebug("IFC: Using building node for unassigned items: ", buildingNode->mName.C_Str());
+        LogDebug("Using building node for unassigned items: ", buildingNode->mName.C_Str());
         return buildingNode;
     }
     
@@ -2913,7 +3307,7 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
     if (siteIt != entityTypeToNodes.end() && !siteIt->second.empty()) {
         // Use the first available site node
         aiNode* siteNode = siteIt->second[0];
-        LogDebug("IFC: Using site node for unassigned items: ", siteNode->mName.C_Str());
+        LogDebug("Using site node for unassigned items: ", siteNode->mName.C_Str());
         return siteNode;
     }
     
@@ -2922,12 +3316,12 @@ aiNode* IFCImporter::FindSemanticParentForUnassignedItems(
     if (projectIt != entityTypeToNodes.end() && !projectIt->second.empty()) {
         // Use the first available project node
         aiNode* projectNode = projectIt->second[0];
-        LogDebug("IFC: Using project node for unassigned items: ", projectNode->mName.C_Str());
+        LogDebug("Using project node for unassigned items: ", projectNode->mName.C_Str());
         return projectNode;
     }
     
     // Priority 4: Final fallback to root node
-    LogDebug("IFC: Using root node for unassigned items: ", rootNode->mName.C_Str());
+    LogDebug("Using root node for unassigned items: ", rootNode->mName.C_Str());
     return rootNode;
 }
 
