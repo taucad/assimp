@@ -1288,13 +1288,6 @@ IF (ASSIMP_BUILD_IFC_IMPORTER)
         set_source_files_properties(AssetLib/IFC/IFCLoader.cpp PROPERTIES
             COMPILE_FLAGS "-Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function -Wno-unused-value -Wno-unused-const-variable -Wno-unused-local-typedefs -Wno-return-type -Wno-return-stack-address -Wno-unknown-pragmas -Wno-pragma-once-outside-header -Wno-unused-lambda-capture"
         )
-        
-        # EMSCRIPTEN-specific optimizations for Web-IFC (mirroring upstream build)
-        if(EMSCRIPTEN)
-            message(STATUS "Applying EMSCRIPTEN-specific optimizations for Web-IFC")
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto")  # Link Time Optimization for size reduction
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -flto")
-        endif()
     endif()
     
     ADD_DEFINITIONS(-DASSIMP_ENABLE_WEBIFC)

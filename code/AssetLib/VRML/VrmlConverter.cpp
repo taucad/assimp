@@ -94,7 +94,7 @@ std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile, IOSystem
         std::string content;
         bool fileLoaded = false;
         
-        // Try to read using IOSystem first (for WASM/Emscripten)
+        // Try to read using IOSystem first
         if (pIOHandler) {
             IOStream* pStream = pIOHandler->Open(pFile, "rb");
             if (pStream) {
