@@ -50,7 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <cstring>
 
-#ifndef ASSIMP_BUILD_NO_FBX_IMPORTER
+#if !defined(ASSIMP_BUILD_NO_FBX_IMPORTER) || !defined(ASSIMP_BUILD_NO_FBX_EXPORTER)
 
 namespace Assimp {
 namespace FBX {

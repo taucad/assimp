@@ -665,7 +665,9 @@ if (NOT ASSIMP_NO_EXPORT)
     AssetLib/FBX/FBXExportNode.h
     AssetLib/FBX/FBXExportNode.cpp
     AssetLib/FBX/FBXExportProperty.h
-    AssetLib/FBX/FBXExportProperty.cpp)
+    AssetLib/FBX/FBXExportProperty.cpp
+    AssetLib/FBX/FBXUtil.h
+    AssetLib/FBX/FBXUtil.cpp)
 
   ADD_ASSIMP_EXPORTER( STL
     AssetLib/STL/STLExporter.h
