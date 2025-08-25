@@ -177,6 +177,7 @@ SET( IMPORTERS
 if(ASSIMP_BUILD_USD_IMPORTER)
   list( APPEND IMPORTERS
     unit/utUSDImport.cpp
+    unit/utUSDZExport.cpp
   )
 endif()
 
