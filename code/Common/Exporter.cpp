@@ -364,6 +364,12 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         unsigned int pPreprocessing, const ExportProperties* pProperties) {
     ASSIMP_BEGIN_EXCEPTION_REGION();
 	ai_assert(nullptr != pimpl);
+    
+    if (!pScene) {
+        pimpl->mError = "Export failed: Scene is null";
+        return AI_FAILURE;
+    }
+    
     // when they create scenes from scratch, users will likely create them not in verbose
     // format. They will likely not be aware that there is a flag in the scene to indicate
     // this, however. To avoid surprises and bug reports, we check for duplicates in
