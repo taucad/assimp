@@ -68,7 +68,7 @@ protected:
     void SetupProperties(const Importer *pImp) override;
 
 private:
-    void ImportEmbeddedTextures(glTF2::Asset &a);
+    void ImportTextures(glTF2::Asset &a);
     void ImportMaterials(glTF2::Asset &a);
     void ImportMeshes(glTF2::Asset &a);
     void ImportCameras(glTF2::Asset &a);

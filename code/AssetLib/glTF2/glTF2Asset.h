@@ -1243,6 +1243,8 @@ public:
 
     Ref<Buffer> GetBodyBuffer() { return mBodyBuffer; }
 
+    IOStream *OpenFile(const std::string &path, const char *mode, bool absolute = false);
+
     Asset(Asset &) = delete;
     Asset &operator=(const Asset &) = delete;
 
@@ -1256,8 +1258,6 @@ private:
 
     void ReadExtensionsUsed(Document &doc);
     void ReadExtensionsRequired(Document &doc);
-
-    IOStream *OpenFile(const std::string &path, const char *mode, bool absolute = false);
 
 private:
     IOSystem *mIOSystem;
