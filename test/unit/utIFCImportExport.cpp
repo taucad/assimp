@@ -546,7 +546,7 @@ TEST_F(utIFCImportExport, importDentalClinicTest) {
             
             // Test GLB export for large file
             Assimp::Exporter exporter;
-            std::string glbPath = "test_dental_clinic.glb";
+            std::string glbPath = "test_dental_clinic_out.glb";
             
             aiReturn glbResult = exporter.Export(scene, "glb2", glbPath.c_str());
             EXPECT_EQ(glbResult, AI_SUCCESS) << "GLB export should succeed for dental clinic file";
@@ -1795,13 +1795,13 @@ TEST_F(utIFCImportExport, transparencyGLTFExport) {
     
     // Export to a glTF file in the workspace to test transparency handling
     Assimp::Exporter exporter;
-    std::string tempPath = "test_transparency.gltf";
+    std::string tempPath = "test_transparency_out.gltf";
     
     aiReturn result = exporter.Export(scene, "gltf2", tempPath.c_str());
     EXPECT_EQ(result, AI_SUCCESS) << "glTF export should succeed";
     
     // Also test binary GLB export
-    std::string glbPath = "test_transparency.glb";
+    std::string glbPath = "test_transparency_out.glb";
     aiReturn glbResult = exporter.Export(scene, "glb2", glbPath.c_str());
     EXPECT_EQ(glbResult, AI_SUCCESS) << "GLB export should succeed";
     
