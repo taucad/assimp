@@ -122,7 +122,7 @@ private:
     // Core export methods
     void ExportMetadata();
     void ExportSceneStructure();
-    void ExportNodeHierarchy(const aiNode* node);
+    void ExportNodeHierarchy(const aiNode* node, tinyusdz::Prim* parentPrim = nullptr);
     void ExportMeshes();
     void ExportMaterials();
     void ExportTextures();
@@ -179,7 +179,7 @@ private:
     void ConvertLight(const aiLight* light);
 
     // Node hierarchy helpers
-    tinyusdz::Xform* ConvertNode(const aiNode* node);
+    tinyusdz::Xform* ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim = nullptr);
     void SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform);
 
     // Texture helpers
