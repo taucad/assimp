@@ -140,6 +140,7 @@ private:
     void AddARAnchoring();
 
     // Mesh conversion helpers
+    bool IsPointPrimitive(const aiMesh* mesh);
     void ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertVertices(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertFaces(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
@@ -166,6 +167,8 @@ private:
     // Animation conversion helpers
     void ConvertAnimation(const aiAnimation* anim);
     void ConvertSkeletalAnimation(const aiAnimation* anim);
+    void CreateMorphTargetSkelAnimation(const aiMeshMorphAnim* morphAnim, const std::string& meshName, 
+                                       double timeScale, const char* animationName);
     void ConvertSkinning(const aiMesh* mesh);
     void ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertBlendShapes(const aiMesh* mesh);
@@ -228,6 +231,10 @@ private:
 
     // Name tracking for uniqueness
     mutable std::map<std::string, uint32_t> mNameCounters;
+    
+    // Skeletal animation mapping: bone name → hierarchical USD path
+    // Critical for ensuring mesh skel:joints references match skeleton joint paths exactly
+    std::map<std::string, std::string> mBoneNameToUSDPath;
 
     // Texture processing helpers (for current material being processed)
     std::string mCurrentMaterialPath;

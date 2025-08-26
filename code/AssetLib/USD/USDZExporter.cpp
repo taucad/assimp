@@ -298,9 +298,6 @@ void USDZExporter::ExportMeshes() {
     for (uint32_t i = 0; i < mScene->mNumMeshes; ++i) {
         const aiMesh* mesh = mScene->mMeshes[i];
         
-        tinyusdz::GeomMesh usdMesh;
-        ConvertMesh(mesh, usdMesh);
-        
         // Generate unique mesh name
         std::string meshName = SanitizeName(mesh->mName.C_Str());
         if (meshName.empty()) {
@@ -308,29 +305,103 @@ void USDZExporter::ExportMeshes() {
         }
         meshName = GenerateUniqueName(meshName);
         
-        usdMesh.name = meshName;
         mMeshIdMap[mesh] = meshName;
         
-        // Bind material to mesh using proper tinyusdz API
-        if (mesh->mMaterialIndex < mScene->mNumMaterials) {
-            const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
-            auto matIt = mMaterialIdMap.find(material);
-            if (matIt != mMaterialIdMap.end()) {
-                // Create material binding using correct tinyusdz API pattern
-                tinyusdz::Relationship materialRel;
-                std::string materialPathStr = "/Materials/" + matIt->second;
-                tinyusdz::Path materialPath(materialPathStr, "");
-                materialRel.set(materialPath);
-                
-                // Set the material binding on the mesh
-                usdMesh.set_materialBinding(materialRel);
-                
-                ASSIMP_LOG_DEBUG("USDZExporter: Bound material " + matIt->second + " to mesh " + meshName);
-            }
-        }
+        // Convert to appropriate primitive type
+        tinyusdz::Prim meshPrim(tinyusdz::GeomMesh{});
         
-        // Convert to Prim
-        tinyusdz::Prim meshPrim(usdMesh);
+        if (IsPointPrimitive(mesh)) {
+            // For point primitives, create a GeomMesh with point-sized faces to ensure tinyusdz compatibility
+            tinyusdz::GeomMesh usdMesh;
+            usdMesh.name = meshName;
+            
+            // Convert vertices
+            if (mesh->mVertices && mesh->mNumVertices > 0) {
+                std::vector<tinyusdz::value::point3f> points;
+                points.reserve(mesh->mNumVertices);
+                
+                for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
+                    const aiVector3D& v = mesh->mVertices[i];
+                    points.emplace_back(v.x, v.y, v.z);
+                }
+                
+                usdMesh.points.set_value(std::move(points));
+                
+                // Create degenerate triangles (each point becomes a triangle with all 3 vertices at same location)
+                std::vector<int> faceVertexCounts;
+                std::vector<int> faceVertexIndices;
+                faceVertexCounts.reserve(mesh->mNumVertices);
+                faceVertexIndices.reserve(mesh->mNumVertices * 3);
+                
+                for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
+                    faceVertexCounts.push_back(3);  // Each face has 3 vertices (degenerate triangle)
+                    // All 3 vertices point to the same vertex index (degenerate triangle at point location)
+                    faceVertexIndices.push_back(static_cast<int>(i));
+                    faceVertexIndices.push_back(static_cast<int>(i));
+                    faceVertexIndices.push_back(static_cast<int>(i));
+                }
+                
+                usdMesh.faceVertexCounts.set_value(std::move(faceVertexCounts));
+                usdMesh.faceVertexIndices.set_value(std::move(faceVertexIndices));
+                
+                // Convert normals if present
+                if (mesh->mNormals) {
+                    std::vector<tinyusdz::value::normal3f> normals;
+                    normals.reserve(mesh->mNumVertices);
+                    
+                    for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
+                        const aiVector3D& n = mesh->mNormals[i];
+                        normals.emplace_back(n.x, n.y, n.z);
+                    }
+                    
+                    usdMesh.normals.set_value(std::move(normals));
+                }
+            }
+            
+            // Bind material to mesh using proper tinyusdz API
+            if (mesh->mMaterialIndex < mScene->mNumMaterials) {
+                const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
+                auto matIt = mMaterialIdMap.find(material);
+                if (matIt != mMaterialIdMap.end()) {
+                    tinyusdz::Relationship materialRel;
+                    std::string materialPathStr = "/Materials/" + matIt->second;
+                    tinyusdz::Path materialPath(materialPathStr, "");
+                    materialRel.set(materialPath);
+                    
+                    usdMesh.set_materialBinding(materialRel);
+                    
+                    ASSIMP_LOG_DEBUG("USDZExporter: Bound material " + matIt->second + " to point GeomMesh " + meshName);
+                }
+            }
+            
+            meshPrim = tinyusdz::Prim(usdMesh);
+            ASSIMP_LOG_DEBUG("USDZExporter: Created point GeomMesh primitive with " + ai_to_string(mesh->mNumVertices) + " individual point faces");
+            
+        } else {
+            // Use GeomMesh for regular meshes
+            tinyusdz::GeomMesh usdMesh;
+            ConvertMesh(mesh, usdMesh);
+            
+            usdMesh.name = meshName;
+            
+            // Bind material to mesh using proper tinyusdz API
+            if (mesh->mMaterialIndex < mScene->mNumMaterials) {
+                const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
+                auto matIt = mMaterialIdMap.find(material);
+                if (matIt != mMaterialIdMap.end()) {
+                    tinyusdz::Relationship materialRel;
+                    std::string materialPathStr = "/Materials/" + matIt->second;
+                    tinyusdz::Path materialPath(materialPathStr, "");
+                    materialRel.set(materialPath);
+                    
+                    usdMesh.set_materialBinding(materialRel);
+                    
+                    ASSIMP_LOG_DEBUG("USDZExporter: Bound material " + matIt->second + " to GeomMesh " + meshName);
+                }
+            }
+            
+            meshPrim = tinyusdz::Prim(usdMesh);
+        }
         
         // Find the parent nodes that reference this mesh and add it as their child
         bool meshPlaced = false;
@@ -629,8 +700,11 @@ void USDZExporter::ExportSkeletons() {
     }
     
     // Build joint hierarchy by finding root bones and traversing down
-    std::function<void(aiNode*, const std::string&)> buildJointHierarchy = [&](aiNode* node, const std::string& parentPath) {
-        if (referencedBoneNames.count(node->mName.C_Str())) {
+    std::function<void(aiNode*, const std::string&, bool)> buildJointHierarchy = [&](aiNode* node, const std::string& parentPath, bool forceInclude) {
+        bool isReferencedBone = referencedBoneNames.count(node->mName.C_Str()) > 0;
+        bool shouldInclude = isReferencedBone || forceInclude;
+        
+        if (shouldInclude) {
             JointInfo joint;
             joint.name = node->mName.C_Str();
             joint.node = node;
@@ -641,29 +715,31 @@ void USDZExporter::ExportSkeletons() {
             
             joint.usdPath = sanitizedParentPath.empty() ? sanitizedName : sanitizedParentPath + "/" + sanitizedName;
             
-            // Find bind transform from mesh bones
+            // Find bind transform from mesh bones (only for actual bones)
             bool foundBindTransform = false;
-            for (uint32_t meshIdx = 0; meshIdx < mScene->mNumMeshes && !foundBindTransform; ++meshIdx) {
-                const aiMesh* mesh = mScene->mMeshes[meshIdx];
-                for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
-                    const aiBone* bone = mesh->mBones[boneIdx];
-                    if (bone->mName == node->mName) {
-                        // Convert offset matrix to bind transform (inverse)
-                        aiMatrix4x4 bindMatrix = bone->mOffsetMatrix;
-                        bindMatrix.Inverse();
-                        for (int row = 0; row < 4; ++row) {
-                            for (int col = 0; col < 4; ++col) {
-                                joint.bindTransform.m[row][col] = bindMatrix[row][col];
+            if (isReferencedBone) {
+                for (uint32_t meshIdx = 0; meshIdx < mScene->mNumMeshes && !foundBindTransform; ++meshIdx) {
+                    const aiMesh* mesh = mScene->mMeshes[meshIdx];
+                    for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
+                        const aiBone* bone = mesh->mBones[boneIdx];
+                        if (bone->mName == node->mName) {
+                            // Convert offset matrix to bind transform (inverse)
+                            aiMatrix4x4 bindMatrix = bone->mOffsetMatrix;
+                            bindMatrix.Inverse();
+                            for (int row = 0; row < 4; ++row) {
+                                for (int col = 0; col < 4; ++col) {
+                                    joint.bindTransform.m[row][col] = bindMatrix[row][col];
+                                }
                             }
+                            foundBindTransform = true;
+                            break;
                         }
-                        foundBindTransform = true;
-                        break;
                     }
                 }
             }
             
             if (!foundBindTransform) {
-                // Use identity as fallback
+                // Use identity as fallback (for skeletal root or bones without bind transforms)
                 tinyusdz::Identity(&joint.bindTransform);
             }
             
@@ -676,38 +752,68 @@ void USDZExporter::ExportSkeletons() {
         // Process children recursively
         for (uint32_t i = 0; i < node->mNumChildren; ++i) {
             std::string newParentPath = parentPath;
-            if (referencedBoneNames.count(node->mName.C_Str())) {
+            if (shouldInclude) {
                 // CRITICAL: Use sanitized names for USD paths consistently
                 std::string sanitizedNodeName = SanitizeName(node->mName.C_Str());
                 newParentPath = parentPath.empty() ? sanitizedNodeName : parentPath + "/" + sanitizedNodeName;
             }
-            buildJointHierarchy(node->mChildren[i], newParentPath);
+            buildJointHierarchy(node->mChildren[i], newParentPath, false); // Don't force include children
         }
     };
     
-    // Find root bone nodes (bones that don't have a bone parent in the hierarchy)
-    std::set<aiNode*> rootBoneNodes;
-    for (const auto& boneName : referencedBoneNames) {
-        if (boneNameToNode.count(boneName)) {
-            aiNode* boneNode = boneNameToNode[boneName];
-            bool hasReferencedParent = false;
-            aiNode* parent = boneNode->mParent;
-            while (parent) {
-                if (referencedBoneNames.count(parent->mName.C_Str())) {
-                    hasReferencedParent = true;
+    // Find the proper skeletal root node (typically "Armature" or parent of all bones)
+    // tinyusdz requires single-rooted skeleton topology
+    aiNode* skeletalRoot = nullptr;
+    
+    // Find a common parent that contains all bone nodes
+    if (!referencedBoneNames.empty()) {
+        // Get first bone node and walk up to find parent that contains all bones
+        std::string firstBoneName = *referencedBoneNames.begin();
+        if (boneNameToNode.count(firstBoneName)) {
+            aiNode* firstBone = boneNameToNode[firstBoneName];
+            aiNode* candidate = firstBone->mParent;
+            
+            while (candidate) {
+                // Check if this candidate contains all referenced bones as descendants
+                std::function<bool(aiNode*)> containsAllBonesCheck = [&](aiNode* node) -> bool {
+                    std::set<std::string> foundBones;
+                    std::function<void(aiNode*)> collectBones = [&](aiNode* n) {
+                        if (referencedBoneNames.count(n->mName.C_Str())) {
+                            foundBones.insert(n->mName.C_Str());
+                        }
+                        for (uint32_t i = 0; i < n->mNumChildren; ++i) {
+                            collectBones(n->mChildren[i]);
+                        }
+                    };
+                    collectBones(node);
+                    return foundBones.size() == referencedBoneNames.size();
+                };
+                
+                if (containsAllBonesCheck(candidate)) {
+                    skeletalRoot = candidate;
                     break;
                 }
-                parent = parent->mParent;
-            }
-            if (!hasReferencedParent) {
-                rootBoneNodes.insert(boneNode);
+                candidate = candidate->mParent;
             }
         }
     }
     
-    // Build hierarchy from root bones
-    for (aiNode* rootBone : rootBoneNodes) {
-        buildJointHierarchy(rootBone, "");
+    if (skeletalRoot) {
+        // Found proper skeletal root - build hierarchy with it as root
+        std::string skeletalRootName = SanitizeName(skeletalRoot->mName.C_Str());
+        ASSIMP_LOG_DEBUG("USDZExporter: Found skeletal root: " + std::string(skeletalRoot->mName.C_Str()) + " -> " + skeletalRootName);
+        
+        // Build hierarchy with skeletal root as the single root joint
+        buildJointHierarchy(skeletalRoot, "", true); // Force include skeletal root
+    } else {
+        // Fallback: use first bone as root (single-rooted requirement)
+        ASSIMP_LOG_DEBUG("USDZExporter: No common skeletal root found, using first bone as root");
+        for (const auto& boneName : referencedBoneNames) {
+            if (boneNameToNode.count(boneName)) {
+                buildJointHierarchy(boneNameToNode[boneName], "", false); // Don't force include, bone is already referenced
+                break; // Only add first bone as root to satisfy single-root requirement
+            }
+        }
     }
     
     // If no proper hierarchy found, create a single artificial root
@@ -776,15 +882,27 @@ void USDZExporter::ExportSkeletons() {
     tinyusdz::Skeleton skeleton;
     skeleton.name = "Skeleton";
     
-    // Convert joint hierarchy to USD format
+    // Convert joint hierarchy to USD format and build bone name → USD path mapping
     std::vector<tinyusdz::value::token> jointTokens;
     std::vector<tinyusdz::value::matrix4d> bindTransforms;
     std::vector<tinyusdz::value::matrix4d> restTransforms;
+    
+    // Clear and rebuild the bone name to USD path mapping
+    mBoneNameToUSDPath.clear();
     
     for (const JointInfo& joint : orderedJoints) {
         jointTokens.push_back(tinyusdz::value::token(joint.usdPath)); // Use full USD path
         bindTransforms.push_back(joint.bindTransform);
         restTransforms.push_back(joint.restTransform);
+        
+        // Store bone name → USD path mapping ONLY for actual bones referenced in meshes
+        // Skip skeletal root nodes (like "Armature") that aren't actual bones
+        if (referencedBoneNames.count(joint.name)) {
+            mBoneNameToUSDPath[joint.name] = joint.usdPath;
+            ASSIMP_LOG_DEBUG("USDZExporter: Mapped actual bone '" + joint.name + "' to USD path '" + joint.usdPath + "'");
+        } else {
+            ASSIMP_LOG_DEBUG("USDZExporter: Skeleton joint '" + joint.name + "' (USD path: '" + joint.usdPath + "') is not a mesh bone, skipping mesh mapping");
+        }
     }
     
     // Set skeleton attributes
@@ -995,6 +1113,19 @@ void USDZExporter::ExportVolumeRendering() {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Check if mesh is point primitive
+bool USDZExporter::IsPointPrimitive(const aiMesh* mesh) {
+    if (!mesh || !mesh->mFaces || mesh->mNumFaces == 0) return false;
+    
+    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
+        if (mesh->mFaces[i].mNumIndices != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Convert mesh
 void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
     if (!mesh) return;
@@ -1014,6 +1145,8 @@ void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) 
         ConvertBlendShapesToMesh(mesh, usdMesh);
     }
 }
+
+
 
 // ------------------------------------------------------------------------------------------------
 // Convert vertices
@@ -1035,6 +1168,21 @@ void USDZExporter::ConvertVertices(const aiMesh* mesh, tinyusdz::GeomMesh& usdMe
 // Convert faces
 void USDZExporter::ConvertFaces(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
     if (!mesh->mFaces || mesh->mNumFaces == 0) return;
+    
+    // Check if this is a point primitive (all faces have exactly 1 vertex)
+    bool isPointPrimitive = true;
+    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
+        if (mesh->mFaces[i].mNumIndices != 1) {
+            isPointPrimitive = false;
+            break;
+        }
+    }
+    
+    // For point primitives, USD doesn't need face data - just the points array
+    if (isPointPrimitive) {
+        ASSIMP_LOG_DEBUG("USDZExporter: Detected point primitive - skipping face data export");
+        return;
+    }
     
     std::vector<int> faceVertexCounts;
     std::vector<int> faceVertexIndices;
@@ -1121,12 +1269,12 @@ void USDZExporter::ConvertVertexColors(const aiMesh* mesh, tinyusdz::GeomMesh& u
     for (uint32_t colorIndex = 0; colorIndex < AI_MAX_NUMBER_OF_COLOR_SETS; ++colorIndex) {
         if (!mesh->mColors[colorIndex]) continue;
         
-        std::vector<tinyusdz::value::color4f> colors;
+        std::vector<tinyusdz::value::color3f> colors;
         colors.reserve(mesh->mNumVertices);
         
         for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
             const aiColor4D& c = mesh->mColors[colorIndex][i];
-            colors.emplace_back(c.r, c.g, c.b, c.a);
+            colors.emplace_back(c.r, c.g, c.b); // tinyusdz requires Vec3 RGB, not Vec4 RGBA
         }
         
         // Add as primvar
@@ -1679,74 +1827,52 @@ void USDZExporter::ConvertAnimation(const aiAnimation* anim) {
         const aiMeshMorphAnim* morphAnim = anim->mMorphMeshChannels[i];
         if (!morphAnim) continue;
         
-        std::string meshName = SanitizeName(morphAnim->mName.C_Str());
-        ASSIMP_LOG_DEBUG("USDZExporter: Converting morph animation for mesh: " + meshName);
+        std::string targetName = SanitizeName(morphAnim->mName.C_Str());
+        ASSIMP_LOG_DEBUG("USDZExporter: Converting morph animation for target: " + targetName);
         
-        // Find corresponding mesh and blend shapes in the stage
-        bool meshFound = false;
-        std::function<bool(tinyusdz::Prim&)> findMeshAndAnimateBlendShapes = [&](tinyusdz::Prim& prim) -> bool {
-            
-            // Check if this is a GeomMesh - try different name matching strategies
-            if (prim.prim_type_name() == "Mesh") {
-                bool isTargetMesh = false;
-                
-                // Strategy 1: Exact mesh name match
-                if (prim.element_name() == meshName) {
-                    isTargetMesh = true;
-                }
-                
-                // Strategy 2: If exact name doesn't match, try finding any mesh with blend shapes
-                // This handles glTF case where animation targets "AnimatedMorphCube" but mesh is "Cube"
-                if (!isTargetMesh) {
-                    // For morph animations, we'll take the first mesh we find since typically
-                    // there's only one mesh with blend shapes in such models
-                    isTargetMesh = true; // Take first mesh found during morph animation search
-                    ASSIMP_LOG_DEBUG("USDZExporter: Using mesh '" + prim.element_name() + "' for morph animation target '" + meshName + "'");
-                }
-                
-                if (isTargetMesh) {
-                    meshFound = true;
-                    ASSIMP_LOG_DEBUG("USDZExporter: Found matching mesh for morph animation: " + meshName);
-                    
-                    // Create blend shape weight animation for each keyframe
-                    for (uint32_t k = 0; k < morphAnim->mNumKeys; ++k) {
-                        const aiMeshMorphKey& key = morphAnim->mKeys[k];
-                        double time = key.mTime * timeScale;
-                        
-                        // Create weight animation for blend shapes
-                        // Note: This would need to be applied to existing blend shape prims
-                        // For now, we'll log the animation data
-                        std::string weightsStr = "";
-                        for (uint32_t w = 0; w < key.mNumValuesAndWeights; ++w) {
-                            weightsStr += ai_to_string(key.mWeights[w]) + " ";
-                        }
-                        ASSIMP_LOG_DEBUG("USDZExporter: Morph keyframe at time " + ai_to_string(time) + 
-                                        " with " + ai_to_string(key.mNumValuesAndWeights) + " weights: " + weightsStr);
-                    }
-                    
-                    return true;
-                }
-            }
-            
-            // Search recursively in children
-            for (auto& child : prim.children()) {
-                if (findMeshAndAnimateBlendShapes(child)) {
-                    return true;
-                }
-            }
-            return false;
-        };
+        // Resolve target name to actual mesh name using node-to-mesh mapping
+        std::string actualMeshName;
         
-        // Search all root prims for the mesh
-        for (auto& rootPrim : mStage->root_prims()) {
-            if (findMeshAndAnimateBlendShapes(rootPrim)) {
+        // Check if target is directly a mesh name
+        for (const auto& meshEntry : mMeshIdMap) {
+            if (meshEntry.second == targetName) {
+                actualMeshName = targetName;
                 break;
             }
         }
         
-        if (!meshFound) {
-            ASSIMP_LOG_WARN("USDZExporter: Could not find mesh '" + meshName + "' for morph animation");
+        // If not found, check if target is a node name that contains a mesh
+        if (actualMeshName.empty()) {
+            for (const auto& nodeEntry : mNodeIdMap) {
+                if (nodeEntry.second == targetName) {
+                    // Found the target node, now find the mesh it contains
+                    const aiNode* targetNode = nodeEntry.first;
+                    if (targetNode && targetNode->mNumMeshes > 0) {
+                        // Get the mesh from the scene
+                        const aiMesh* mesh = mScene->mMeshes[targetNode->mMeshes[0]];
+                        if (mesh) {
+                            // Find the USD mesh name from our mapping
+                            auto meshIt = mMeshIdMap.find(mesh);
+                            if (meshIt != mMeshIdMap.end()) {
+                                actualMeshName = meshIt->second;
+                                ASSIMP_LOG_DEBUG("USDZExporter: Resolved target node '" + targetName + "' to mesh '" + actualMeshName + "'");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
+        
+        if (actualMeshName.empty()) {
+            ASSIMP_LOG_WARN("USDZExporter: Could not resolve morph animation target '" + targetName + "' to any mesh");
+            continue;
+        }
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Processing morph animation for mesh: " + actualMeshName);
+        
+        // Create SkelAnimation for this morph target animation
+        CreateMorphTargetSkelAnimation(morphAnim, actualMeshName, timeScale, anim->mName.C_Str());
     }
     
     ASSIMP_LOG_DEBUG("USDZExporter: Animation conversion completed for " + ai_to_string(anim->mNumChannels) + " node channels and " + ai_to_string(anim->mNumMorphMeshChannels) + " morph channels");
@@ -1939,6 +2065,83 @@ void USDZExporter::ConvertSkeletalAnimation(const aiAnimation* anim) {
     
     ASSIMP_LOG_DEBUG("USDZExporter: Skeletal animation conversion completed for " + 
                      ai_to_string(jointNames.size()) + " joints");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Create SkelAnimation for morph target animations
+void USDZExporter::CreateMorphTargetSkelAnimation(const aiMeshMorphAnim* morphAnim, 
+                                                  const std::string& meshName, 
+                                                  double timeScale, 
+                                                  const char* animationName) {
+    if (!morphAnim || morphAnim->mNumKeys == 0) {
+        return;
+    }
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Creating SkelAnimation for morph target: " + meshName);
+    
+    // Create SkelAnimation for morph targets
+    tinyusdz::SkelAnimation skelAnim;
+    std::string animName = SanitizeName(animationName) + "_" + SanitizeName(meshName) + "_MorphAnim";
+    skelAnim.name = GenerateUniqueName(animName);
+    
+    // Collect blend shape names and build time-to-weights mapping
+    std::vector<tinyusdz::value::token> blendShapeTokens;
+    std::map<double, std::vector<float>> timeToWeights;
+    
+    // Get the first keyframe to determine number of blend shapes
+    if (morphAnim->mNumKeys > 0) {
+        const aiMeshMorphKey& firstKey = morphAnim->mKeys[0];
+        
+        // Build blend shape token list from mesh name and weight indices
+        for (uint32_t w = 0; w < firstKey.mNumValuesAndWeights; ++w) {
+            std::string blendShapeName = "BlendShape_" + ai_to_string(w);
+            blendShapeTokens.push_back(tinyusdz::value::token(blendShapeName));
+        }
+    }
+    
+    // Process all keyframes to build time samples
+    for (uint32_t k = 0; k < morphAnim->mNumKeys; ++k) {
+        const aiMeshMorphKey& key = morphAnim->mKeys[k];
+        double time = key.mTime * timeScale;
+        
+        std::vector<float> weights;
+        weights.reserve(key.mNumValuesAndWeights);
+        
+        for (uint32_t w = 0; w < key.mNumValuesAndWeights; ++w) {
+            weights.push_back(static_cast<float>(key.mWeights[w]));
+        }
+        
+        timeToWeights[time] = weights;
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Morph keyframe at time " + ai_to_string(time) + 
+                         " with " + ai_to_string(key.mNumValuesAndWeights) + " weights");
+    }
+    
+    // Set blendShapes attribute
+    skelAnim.blendShapes.set_value(blendShapeTokens);
+    
+    // Create time-sampled blendShapeWeights
+    if (!timeToWeights.empty()) {
+        tinyusdz::Animatable<std::vector<float>> animatedWeights;
+        
+        // Set default value (first time sample)
+        animatedWeights.set_default(timeToWeights.begin()->second);
+        
+        // Add all time samples
+        for (const auto& timeWeightPair : timeToWeights) {
+            animatedWeights.add_sample(timeWeightPair.first, timeWeightPair.second);
+        }
+        
+        skelAnim.blendShapeWeights.set_value(animatedWeights);
+    }
+    
+    // Create Prim and add to stage
+    tinyusdz::Prim skelAnimPrim(skelAnim);
+    mStage->root_prims().emplace_back(std::move(skelAnimPrim));
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Created SkelAnimation '" + skelAnim.name + "' with " + 
+                     ai_to_string(blendShapeTokens.size()) + " blend shapes and " +
+                     ai_to_string(timeToWeights.size()) + " time samples");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2163,64 +2366,27 @@ void USDZExporter::ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh&
     geomBindPrimvar.set_value(geomBindTransform);
     usdMesh.set_primvar(geomBindPrimvar);
     
-    // Add skel:joints property - must match skeleton joint paths EXACTLY
-    // Map bone names to their full USD hierarchical paths used in skeleton
+    // Add skel:joints property - must match skeleton joint names exactly
     std::vector<tinyusdz::value::token> meshJointTokens;
     
-    // Create a mapping from bone names to their USD paths by examining the skeleton
-    // This is critical - mesh joint references must match skeleton joint paths exactly
-    std::map<std::string, std::string> boneNameToUSDPath;
-    
-    // Find the skeleton to get the correct joint paths
-    for (const auto& rootPrim : mStage->root_prims()) {
-        if (rootPrim.element_name() == "SkelRoot") {
-            for (const auto& skelChild : rootPrim.children()) {
-                if (skelChild.element_name() == "Skeleton") {
-                    // Extract joint paths from skeleton
-                    const tinyusdz::Skeleton* skeleton = skelChild.as<tinyusdz::Skeleton>();
-                    if (skeleton && skeleton->joints.has_value()) {
-                        auto jointTokens = skeleton->joints.get_value();
-                        
-                        // Map each bone name to its corresponding USD path
-                        for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
-                            const aiBone* bone = mesh->mBones[boneIdx];
-                            std::string boneName = bone->mName.C_Str();
-                            std::string sanitizedBoneName = SanitizeName(boneName);
-                            
-                            // Find the USD path that ends with this bone name
-                            for (const auto& jointToken : *jointTokens) {
-                                std::string jointPath = jointToken.str();
-                                
-                                // Check if this joint path corresponds to this bone
-                                // Either exact match or ends with "/boneName"
-                                if (jointPath == sanitizedBoneName || 
-                                    jointPath.find("/" + sanitizedBoneName) == jointPath.length() - sanitizedBoneName.length() - 1) {
-                                    boneNameToUSDPath[boneName] = jointPath;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-            break;
-        }
-    }
-    
-    // Build mesh joint references using the exact USD paths from skeleton
+    // Build mesh joint references using exact hierarchical USD paths from skeleton
     for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
         const aiBone* bone = mesh->mBones[boneIdx];
         std::string boneName = bone->mName.C_Str();
         
-        if (boneNameToUSDPath.count(boneName)) {
-            // Use the exact USD path from skeleton
-            meshJointTokens.emplace_back(boneNameToUSDPath[boneName]);
+        // Use the exact USD path from skeleton (critical for tinyusdz validation)
+        auto pathIt = mBoneNameToUSDPath.find(boneName);
+        if (pathIt != mBoneNameToUSDPath.end()) {
+            const std::string& usdPath = pathIt->second;
+            meshJointTokens.emplace_back(usdPath);
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Mapped bone '" + boneName + "' to USD path '" + usdPath + "'");
         } else {
-            // Fallback to sanitized name if mapping not found
+            // Fallback to sanitized name (shouldn't happen if skeleton was built correctly)
             std::string sanitizedBoneName = SanitizeName(boneName);
             meshJointTokens.emplace_back(sanitizedBoneName);
-            ASSIMP_LOG_WARN("USDZExporter: Could not find USD path for bone: " + boneName + ", using fallback: " + sanitizedBoneName);
+            
+            ASSIMP_LOG_WARN("USDZExporter: Could not find USD path for bone '" + boneName + "', using fallback: '" + sanitizedBoneName + "'");
         }
     }
     

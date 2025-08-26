@@ -706,6 +706,14 @@ if (NOT ASSIMP_NO_EXPORT)
     AssetLib/Step/StepExporter.h
     AssetLib/Step/StepExporter.cpp)
 
+  if (ASSIMP_BUILD_USD_IMPORTER)
+    ADD_ASSIMP_EXPORTER( USD
+      AssetLib/USD/USDZExporter.h
+      AssetLib/USD/USDZExporter.cpp
+      AssetLib/USD/USDZExporterHelper.h
+      AssetLib/USD/USDZExporterHelper.cpp)
+  endif()
+
 endif()
 
 SET( PostProcessing_SRCS
@@ -1002,8 +1010,8 @@ IF (ASSIMP_BUILD_USD_IMPORTER)
     # Note: ALWAYS specify a git commit hash (or tag) instead of a branch name; using a branch
     #       name can lead to non-deterministic (unpredictable) results since the code is potentially
     #       in flux
-    # "dev" branch, 14 Mar 2025
-    set(TINYUSDZ_GIT_TAG "6050eef932f7d2788656d63297aa488fb0961ed1")
+    # "release" branch, 25 Aug 2025
+    set(TINYUSDZ_GIT_TAG "49eae689036a163e1e9b01dcfbb5d86645ff76d3")
     message("****")
     message("\n\n**** Cloning tinyusdz repo, git tag ${TINYUSDZ_GIT_TAG}\n\n")
 
