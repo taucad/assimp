@@ -1615,6 +1615,9 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
     if (mat->Get(AI_MATKEY_REFRACTI, ior) == AI_SUCCESS) {
         surface.ior.set_value(ior);
     }
+    
+    // Set useSpecularWorkflow to 0 (metallic workflow) - matches reference
+    surface.useSpecularWorkflow.set_value(0);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1682,7 +1685,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(texturePath.C_Str(), "metallic");
         
         std::string texShaderPath = mCurrentMaterialPath + "/metallic";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for metallic
+        tinyusdz::Path connPath(texShaderPath, "outputs:b"); // Use blue channel for metallic (matches reference)
         surface.metallic.set_connection(connPath);
         surface.metallic.set_value_empty();
         
@@ -1717,6 +1720,20 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         mCurrentMaterialTextureShaders.push_back(std::make_pair("emissiveColor", emissiveTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected emissive texture: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Occlusion texture (ambient occlusion)
+    if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
+        surface.occlusion.set_connection(connPath);
+        surface.occlusion.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture: " + std::string(texturePath.C_Str()));
     }
     
     // Occlusion texture
@@ -3214,8 +3231,11 @@ void USDZExporter::AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const st
     } else if (textureType == "roughness" || textureType == "clearcoatRoughness") {
         // Roughness textures output green channel (matches reference file)
         uvTexture.outputsG.set_authored(true);
+    } else if (textureType == "metallic") {
+        // Metallic textures output blue channel (matches reference file)
+        uvTexture.outputsB.set_authored(true);
     } else {
-        // Other scalar textures (metallic, clearcoat, etc.) output red channel
+        // Other scalar textures (occlusion, clearcoat, etc.) output red channel
         uvTexture.outputsR.set_authored(true);
     }
 }
