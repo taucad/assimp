@@ -653,14 +653,6 @@ void USDZExporter::ExportMaterials() {
             tinyusdz::Property fallbackProp(fallbackAttr, false);
             textureShader.props["inputs:fallback"] = fallbackProp;
             
-            // Set explicit USD-compliant type for st input (texture coordinates)
-            tinyusdz::Attribute stAttr;
-            stAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default UV coordinates
-            stAttr.set_type_name("float2");  // USD expects float2 for texture coordinates
-            stAttr.set_connection(tinyusdz::Path(stConnection, ""));  // Keep the connection
-            tinyusdz::Property stProp(stAttr, false);
-            textureShader.props["inputs:st"] = stProp;
-            
             // Add both shaders as children of material
             tinyusdz::Prim stTransformPrim(stTransformShader);
             tinyusdz::Prim textureShaderPrim(textureShader);
@@ -3155,13 +3147,6 @@ tinyusdz::Shader USDZExporter::CreateTexCoordReader(const std::string& varName) 
     
     texCoordReader.value = primvarReader;
     
-    // Set explicit USD-compliant type for UsdPrimvarReader_float2 result output
-    tinyusdz::Attribute resultAttr;
-    resultAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default value
-    resultAttr.set_type_name("float2");  // USD expects float2 for texture coordinates
-    tinyusdz::Property resultProp(resultAttr, false);
-    texCoordReader.props["outputs:result"] = resultProp;
-    
     return texCoordReader;
 }
 
@@ -3192,13 +3177,6 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
     transform2d.result.set_authored(true);
     
     stTransform.value = transform2d;
-    
-    // Set explicit USD-compliant type for UsdTransform2d result output
-    tinyusdz::Attribute resultAttr;
-    resultAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default value
-    resultAttr.set_type_name("float2");  // USD expects float2 for transform result
-    tinyusdz::Property resultProp(resultAttr, false);
-    stTransform.props["outputs:result"] = resultProp;
     
     return stTransform;
 }
