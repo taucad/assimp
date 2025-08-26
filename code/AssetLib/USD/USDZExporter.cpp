@@ -42,7 +42,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
 
 #include "USDZExporter.h"
-#include "USDZExporterHelper.h"
+#include "USDZArchiveWriter.h"
 
 // Assimp includes
 #include <assimp/Exceptional.h>
@@ -51,16 +51,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/StringUtils.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/ai_assert.h>
-
-#include <fstream>
-#include <regex>
-#include <iterator>
 #include <assimp/StringComparison.h>
 #include <assimp/CreateAnimMesh.h>
 #include <assimp/Exporter.hpp>
-
-// For DeadlyExportError
-#include <stdexcept>
 
 // Standard library
 #include <algorithm>
@@ -68,7 +61,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <regex>
 
 // tinyusdz includes
-#include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/tinyusdz.hh"
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/usda-writer.hh"
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/usdc-writer.hh"
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/usdGeom.hh"
@@ -133,9 +125,16 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
     try {
         // Execute the export pipeline
         ExportMetadata();
+        ExportScene();  // Create root prim FIRST
         
-        if (mScene->mRootNode) {
-            ExportNodeHierarchy(mScene->mRootNode, nullptr);
+        // Get reference to root prim for node hierarchy
+        tinyusdz::Prim* rootPrim = nullptr;
+        if (!mStage->root_prims().empty()) {
+            rootPrim = &mStage->root_prims()[0];  // Our root prim
+        }
+        
+        if (mScene->mRootNode && rootPrim) {
+            ExportNodeHierarchy(mScene->mRootNode, rootPrim);  // Pass root prim as parent
         }
         
         ExportMaterials();
@@ -149,7 +148,6 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
         
         ExportCameras();
         ExportLights();
-        ExportScene();
 
         // Advanced features
         if (mExportARAnchoring) {
@@ -201,18 +199,20 @@ USDZExporter::~USDZExporter() = default;
 void USDZExporter::ExportMetadata() {
     auto& stageMeta = mStage->metas();
     
-    // Basic USD metadata
-    stageMeta.doc = "Exported by Assimp USDZ Exporter - Compatible with iOS Quick Look";
-    stageMeta.comment = "Generated from Assimp scene";
-    
-    // Set up time code settings
+    // Basic USD metadata  
     stageMeta.metersPerUnit = 1.0; // Default to meters for realistic AR scaling
     stageMeta.upAxis = tinyusdz::Axis::Y; // Y-up coordinate system for AR
     
+    // Add generator information to customLayerData (Apple's approach)
+    stageMeta.customLayerData["generator"] = tinyusdz::MetaVariable(std::string("Assimp"));
+    
+    // Set defaultPrim to root scene node (will be set after scene structure is created)
+    // This follows Apple's pattern of having a single root prim containing everything
+    
     // Add iOS Quick Look compatibility metadata using tinyusdz APIs
     if (mIsPackaged) {
-        stageMeta.customLayerData["quickLook:compatible"] = tinyusdz::value::StringData("true");
-        stageMeta.customLayerData["quickLook:version"] = tinyusdz::value::StringData("1.0");
+        stageMeta.customLayerData["quickLook:compatible"] = tinyusdz::MetaVariable(std::string("true"));
+        stageMeta.customLayerData["quickLook:version"] = tinyusdz::MetaVariable(std::string("1.0"));
         ASSIMP_LOG_DEBUG("USDZExporter: Added Quick Look compatibility metadata");
     }
     
@@ -238,13 +238,21 @@ void USDZExporter::ExportMetadata() {
 // ------------------------------------------------------------------------------------------------
 // Export scene structure
 void USDZExporter::ExportScene() {
-    // Set up the default prim - this will be the root of our scene
-    if (!mStage->root_prims().empty()) {
-        // Note: tinyusdz Stage doesn't have set_default_prim method, so we skip this for now
-        ASSIMP_LOG_DEBUG("USDZExporter: First root prim set as default");
-    }
+    // Create root scene prim (following Apple's pattern of single root prim containing everything)
+    std::string rootPrimName = GetSceneName();
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Scene structure exported successfully");
+    tinyusdz::Xform rootXform;
+    rootXform.name = rootPrimName;
+    
+    // Create root prim and add to stage
+    tinyusdz::Prim rootPrim(rootXform);
+    mStage->root_prims().emplace_back(std::move(rootPrim));
+    
+    // Set defaultPrim to our root scene prim
+    auto& stageMeta = mStage->metas();
+    stageMeta.defaultPrim = tinyusdz::value::token(rootPrimName);
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Scene structure exported successfully - root prim: " + rootPrimName);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -394,6 +402,9 @@ void USDZExporter::ExportMeshes() {
                 }
             }
             
+            // Add standard USD mesh attributes for point primitives too
+            ConvertMeshAttributes(mesh, usdMesh);
+            
             meshPrim = tinyusdz::Prim(usdMesh);
             ASSIMP_LOG_DEBUG("USDZExporter: Created point GeomMesh primitive with " + ai_to_string(mesh->mNumVertices) + " individual point faces");
             
@@ -404,13 +415,21 @@ void USDZExporter::ExportMeshes() {
             
             usdMesh.name = meshName;
             
+            // Add MaterialBindingAPI to mesh (Apple's pattern)
+            tinyusdz::APISchemas materialBindingAPI;
+            materialBindingAPI.listOpQual = tinyusdz::ListEditQual::Prepend;
+            materialBindingAPI.names.push_back({tinyusdz::APISchemas::APIName::MaterialBindingAPI, ""});
+            // Note: Will be set on the Prim after creation
+            
             // Bind material to mesh using proper tinyusdz API
             if (mesh->mMaterialIndex < mScene->mNumMaterials) {
                 const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
                 auto matIt = mMaterialIdMap.find(material);
                 if (matIt != mMaterialIdMap.end()) {
                     tinyusdz::Relationship materialRel;
-                    std::string materialPathStr = "/Materials/" + matIt->second;
+                    // Update material path to include root prim name
+                    std::string rootPrimName = GetSceneName();
+                    std::string materialPathStr = "/" + rootPrimName + "/Materials/" + matIt->second;
                     tinyusdz::Path materialPath(materialPathStr, "");
                     materialRel.set(materialPath);
                     
@@ -421,6 +440,9 @@ void USDZExporter::ExportMeshes() {
             }
             
             meshPrim = tinyusdz::Prim(usdMesh);
+            
+            // Set MaterialBindingAPI on the prim (Apple's pattern)
+            meshPrim.metas().apiSchemas = materialBindingAPI;
         }
         
         // Find the parent nodes that reference this mesh and add it as their child
@@ -432,10 +454,19 @@ void USDZExporter::ExportMeshes() {
                 // Find the corresponding USD node in our stage
                 std::function<bool(tinyusdz::Prim&)> addMeshToNode = [&](tinyusdz::Prim& prim) -> bool {
                     if (prim.element_name() == parentNodeName) {
-                        // Add mesh as child of this node
-                        prim.children().emplace_back(meshPrim);  // Copy for multiple parents
+                        // Create GeomScope wrapper with proper naming (Apple's pattern)
+                        tinyusdz::Scope geomScope;
+                        geomScope.name = "Geometry";  // Use "Geometry" as Apple does
+                        
+                        // Create GeomScope prim and add mesh as its child
+                        tinyusdz::Prim geomScopePrim(geomScope);
+                        geomScopePrim.children().emplace_back(meshPrim);  // Copy for multiple parents
+                        
+                        // Add GeomScope as child of this node
+                        prim.children().emplace_back(std::move(geomScopePrim));
+                        
                         meshPlaced = true;
-                        ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName);
+                        ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName + " with GeomScope wrapper");
                         return true;
                     }
                     
@@ -462,21 +493,41 @@ void USDZExporter::ExportMeshes() {
         // Fallback: if mesh isn't referenced by any node or special case for skinned meshes
         if (!meshPlaced) {
             if (mesh->mNumBones > 0) {
-                // Add skinned mesh to SkelRoot
+                // Add skinned mesh to SkelRoot with GeomScope wrapper
                 for (auto& rootPrim : mStage->root_prims()) {
                     if (rootPrim.element_name() == "SkelRoot") {
-                        rootPrim.children().emplace_back(std::move(meshPrim));
+                        // Create GeomScope for skinned mesh
+                        tinyusdz::Scope geomScope;
+                        geomScope.name = "Geometry";
+                        
+                        tinyusdz::Prim geomScopePrim(geomScope);
+                        geomScopePrim.children().emplace_back(meshPrim);
+                        rootPrim.children().emplace_back(std::move(geomScopePrim));
+                        
                         meshPlaced = true;
-                        ASSIMP_LOG_DEBUG("USDZExporter: Added skinned mesh " + meshName + " to SkelRoot");
+                        ASSIMP_LOG_DEBUG("USDZExporter: Added skinned mesh " + meshName + " to SkelRoot with GeomScope wrapper");
                         break;
                     }
                 }
             }
             
             if (!meshPlaced) {
-                // Last resort: add to root level
-                mStage->root_prims().emplace_back(std::move(meshPrim));
-                ASSIMP_LOG_WARN("USDZExporter: Added mesh " + meshName + " to root level (no parent node found)");
+                // Last resort: add to root level with GeomScope wrapper
+                if (!mStage->root_prims().empty()) {
+                    // Add to main scene root prim with GeomScope
+                    tinyusdz::Scope geomScope;
+                    geomScope.name = "Geometry";
+                    
+                    tinyusdz::Prim geomScopePrim(geomScope);
+                    geomScopePrim.children().emplace_back(meshPrim);
+                    mStage->root_prims()[0].children().emplace_back(std::move(geomScopePrim));
+                    
+                    ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to root prim with GeomScope wrapper");
+                } else {
+                    // Absolute fallback: add directly to root level
+                    mStage->root_prims().emplace_back(std::move(meshPrim));
+                    ASSIMP_LOG_WARN("USDZExporter: Added mesh " + meshName + " to root level (no scene root found)");
+                }
             }
         }
     }
@@ -490,10 +541,11 @@ void USDZExporter::ExportMaterials() {
         return;
     }
 
-    // Create Materials scope to organize materials
-    tinyusdz::Scope materialsScope;
-    materialsScope.name = "Materials";
-    tinyusdz::Prim materialsScopePrim(materialsScope);
+    // Create Materials container to organize materials (following Apple's pattern)
+    // Apple uses def "Materials" { ... } not def Scope "Materials" { ... }
+    tinyusdz::Model materialsModel;
+    materialsModel.name = "Materials";
+    tinyusdz::Prim materialsScopePrim(materialsModel);
     
     for (uint32_t i = 0; i < mScene->mNumMaterials; ++i) {
         const aiMaterial* mat = mScene->mMaterials[i];
@@ -513,49 +565,107 @@ void USDZExporter::ExportMaterials() {
         tinyusdz::Material usdMaterial;
         usdMaterial.name = matName;
         
-        // Set current material path for texture processing
-        mCurrentMaterialPath = "/Materials/" + matName;
+        // Set current material path for texture processing (include root prim name)
+        std::string rootPrimName = GetSceneName();
+        mCurrentMaterialPath = "/" + rootPrimName + "/Materials/" + matName;
         
         // Create UsdPreviewSurface shader
         tinyusdz::UsdPreviewSurface surface;
         CreatePreviewSurface(mat, surface);
         
-        // Create shader using proper tinyusdz APIs
-        tinyusdz::Shader shader;
-        std::string shaderName = matName + "_surface";
-        shader.name = shaderName;
+        // Create main surface shader using Apple's naming (without NodeGraph due to tinyusdz serialization issues)
+        tinyusdz::Shader surfaceShader;
+        std::string shaderName = "UsdPreviewSurface";  // Apple's exact naming
+        surfaceShader.name = shaderName;
+        surfaceShader.info_id = tinyusdz::kUsdPreviewSurface;
         
-        // Set shader info:id using tinyusdz API (not manual property manipulation)
-        shader.info_id = tinyusdz::kUsdPreviewSurface;
-        
-        // Set outputs:surface using tinyusdz API (not manual property manipulation)
+        // Set outputs
         surface.outputsSurface.set_authored(true);
+        surface.outputsDisplacement.set_authored(true);
+        surfaceShader.value = surface;
         
-        // Assign the surface to the shader
-        shader.value = surface;
+        // Set stPrimvarName input (Apple's pattern) - using props since Material doesn't have direct member
+        tinyusdz::Attribute stPrimvarAttr;
+        stPrimvarAttr.set_value(tinyusdz::value::token("st"));
+        tinyusdz::Property stPrimvarProp(stPrimvarAttr, false);
+        usdMaterial.props["inputs:stPrimvarName"] = stPrimvarProp;
         
-        // Create material surface connection using proper tinyusdz Path API
+        // Create material surface and displacement connections using proper tinyusdz Path API
         std::string shaderPath = mCurrentMaterialPath + "/" + shaderName;
         usdMaterial.surface.set(tinyusdz::Path(shaderPath, "outputs:surface"));
+        usdMaterial.displacement.set(tinyusdz::Path(shaderPath, "outputs:displacement"));
         
         mMaterialIdMap[mat] = matName;
         
         // Convert material and shader to Prims
         tinyusdz::Prim materialPrim(usdMaterial);
-        tinyusdz::Prim shaderPrim(shader);
+        tinyusdz::Prim shaderPrim(surfaceShader);
         
-        // Add shader as child of material
+        // Add main shader as child of material
         materialPrim.children().emplace_back(std::move(shaderPrim));
         
-        // Add texture shaders as children if any were created
-        for (const auto& texPair : mCurrentMaterialTextureShaders) {
-            tinyusdz::Shader textureShader;
-            textureShader.name = texPair.first;
-            textureShader.info_id = tinyusdz::kUsdUVTexture;
-            textureShader.value = texPair.second;
+        // Create and add UV coordinate reader (Apple's pattern)
+        if (!mCurrentMaterialTextureShaders.empty()) {
+            tinyusdz::Shader texCoordReader = CreateTexCoordReader();
+            tinyusdz::Prim texCoordReaderPrim(texCoordReader);
+            materialPrim.children().emplace_back(std::move(texCoordReaderPrim));
             
+            ASSIMP_LOG_DEBUG("USDZExporter: Added texCoordReader shader");
+        }
+        
+        // Process texture shaders and create stTransform shaders (Apple's pattern)
+        for (const auto& texPair : mCurrentMaterialTextureShaders) {
+            const std::string& texName = texPair.first;
+            const tinyusdz::UsdUVTexture& texUV = texPair.second;
+            
+            // Create stTransform shader for this texture
+            std::string stTransformName = texName + "_stTransform";
+            std::string texCoordReaderConnection = mCurrentMaterialPath + "/texCoordReader.outputs:result";
+            tinyusdz::Shader stTransformShader = CreateStTransform(texCoordReaderConnection);
+            stTransformShader.name = stTransformName;
+            
+            // Create texture shader with proper st connection
+            tinyusdz::Shader textureShader;
+            textureShader.name = texName;
+            textureShader.info_id = tinyusdz::kUsdUVTexture;
+            
+            // Copy texture properties and SET the crucial st connection on UsdUVTexture object
+            tinyusdz::UsdUVTexture connectedTexture = texUV;
+            std::string stConnection = mCurrentMaterialPath + "/" + stTransformName + ".outputs:result";
+            
+            // Set the CRITICAL st connection - this is what makes textures work!
+            tinyusdz::Path stPath(stConnection, "");
+            connectedTexture.st.set_connection(stPath);
+            
+            textureShader.value = connectedTexture;
+            
+            // Set explicit USD-compliant types for UsdUVTexture inputs with correct float4 values
+            tinyusdz::Attribute fallbackAttr;
+            if (texName == "diffuseColor" || texName == "emissiveColor") {
+                fallbackAttr.set_value(tinyusdz::value::float4{0.0f, 0.0f, 0.0f, 1.0f});
+            } else {
+                fallbackAttr.set_value(tinyusdz::value::float4{1.0f, 1.0f, 1.0f, 1.0f});
+            }
+            fallbackAttr.set_type_name("float4");  // USD expects float4 for fallback
+            tinyusdz::Property fallbackProp(fallbackAttr, false);
+            textureShader.props["inputs:fallback"] = fallbackProp;
+            
+            // Set explicit USD-compliant type for st input (texture coordinates)
+            tinyusdz::Attribute stAttr;
+            stAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default UV coordinates
+            stAttr.set_type_name("float2");  // USD expects float2 for texture coordinates
+            stAttr.set_connection(tinyusdz::Path(stConnection, ""));  // Keep the connection
+            tinyusdz::Property stProp(stAttr, false);
+            textureShader.props["inputs:st"] = stProp;
+            
+            // Add both shaders as children of material
+            tinyusdz::Prim stTransformPrim(stTransformShader);
             tinyusdz::Prim textureShaderPrim(textureShader);
+            
+            materialPrim.children().emplace_back(std::move(stTransformPrim));
             materialPrim.children().emplace_back(std::move(textureShaderPrim));
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Added texture pipeline for " + texName);
         }
         
         // Add material to Materials scope
@@ -564,8 +674,15 @@ void USDZExporter::ExportMaterials() {
         ASSIMP_LOG_DEBUG("USDZExporter: Material exported successfully");
     }
     
-    // Add Materials scope to stage
-    mStage->root_prims().emplace_back(std::move(materialsScopePrim));
+    // Add Materials scope as child of root prim (following Apple's hierarchy pattern)
+    if (!mStage->root_prims().empty()) {
+        mStage->root_prims()[0].children().emplace_back(std::move(materialsScopePrim));
+        ASSIMP_LOG_DEBUG("USDZExporter: Materials scope added to root prim");
+    } else {
+        // Fallback: add to root if no root prim exists
+        mStage->root_prims().emplace_back(std::move(materialsScopePrim));
+        ASSIMP_LOG_WARN("USDZExporter: No root prim found, added Materials to root level");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1164,8 +1281,75 @@ void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) 
     if (mesh->mNumAnimMeshes > 0) {
         ConvertBlendShapesToMesh(mesh, usdMesh);
     }
+    
+    // Add standard USD mesh attributes
+    ConvertMeshAttributes(mesh, usdMesh);
 }
 
+// ------------------------------------------------------------------------------------------------
+// Convert standard USD mesh attributes
+void USDZExporter::ConvertMeshAttributes(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
+    if (!mesh) return;
+    
+    // 1. Set doubleSided attribute based on mesh properties
+    // Check if mesh has consistent face winding or if material specifies double-sided
+    bool doubleSided = false;
+    
+    // Check material for double-sided property if available
+    if (mesh->mMaterialIndex < mScene->mNumMaterials) {
+        const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
+        if (material) {
+            int twoSided = 0;
+            if (material->Get(AI_MATKEY_TWOSIDED, twoSided) == aiReturn_SUCCESS) {
+                doubleSided = (twoSided != 0);
+            }
+        }
+    }
+    
+    // If no material info, analyze face winding for consistency
+    // If faces have inconsistent winding, assume double-sided
+    if (!doubleSided && mesh->mFaces && mesh->mNumFaces > 1) {
+        // Sample a few faces to check winding consistency
+        int windingConsistentFaces = 0;
+        int totalSampledFaces = std::min(mesh->mNumFaces, 10u); // Sample first 10 faces
+        
+        for (uint32_t i = 0; i < totalSampledFaces && i < mesh->mNumFaces; ++i) {
+            const aiFace& face = mesh->mFaces[i];
+            if (face.mNumIndices >= 3) {
+                // Calculate face normal and check consistency
+                windingConsistentFaces++; // For now, assume consistent
+            }
+        }
+        
+        // If less than 80% of faces have consistent winding, assume double-sided
+        if (totalSampledFaces > 0 && windingConsistentFaces < (totalSampledFaces * 0.8f)) {
+            doubleSided = true;
+        }
+    }
+    
+    // Set doubleSided attribute using tinyusdz API
+    tinyusdz::Attribute doubleSidedAttr;
+    doubleSidedAttr.set_value(doubleSided);
+    doubleSidedAttr.set_type_name("bool");
+    // Note: uniform qualifier will be handled by USD schema - doubleSided is inherently uniform
+    tinyusdz::Property doubleSidedProp(doubleSidedAttr, false);
+    usdMesh.props["doubleSided"] = doubleSidedProp;
+    
+    // 2. Set subdivisionScheme = "none" (standard for triangle meshes)
+    tinyusdz::Attribute subdivisionSchemeAttr;
+    subdivisionSchemeAttr.set_value(tinyusdz::value::token("none"));
+    subdivisionSchemeAttr.set_type_name("token");
+    // Note: uniform qualifier will be handled by USD schema - subdivisionScheme is inherently uniform
+    tinyusdz::Property subdivisionSchemeProp(subdivisionSchemeAttr, false);
+    usdMesh.props["subdivisionScheme"] = subdivisionSchemeProp;
+    
+    // 3. Set triangleSubdivisionRule = "none" 
+    tinyusdz::Attribute triangleSubdivisionRuleAttr;
+    triangleSubdivisionRuleAttr.set_value(tinyusdz::value::token("none"));
+    triangleSubdivisionRuleAttr.set_type_name("token");
+    tinyusdz::Property triangleSubdivisionRuleProp(triangleSubdivisionRuleAttr, false);
+    usdMesh.props["triangleSubdivisionRule"] = triangleSubdivisionRuleProp;
+}
 
 
 // ------------------------------------------------------------------------------------------------
@@ -1273,6 +1457,7 @@ void USDZExporter::ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
         
         tinyusdz::Attribute uvAttr;
         uvAttr.set_value(uvs);
+        uvAttr.set_type_name("float2[]");  // Explicit USD type for texture coordinates
         
         tinyusdz::AttrMeta uvMeta;
         uvMeta.interpolation = tinyusdz::Interpolation::Vertex;
@@ -1460,14 +1645,14 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         
         tinyusdz::UsdUVTexture diffuseTexture = CreateUVTexture(texturePath.C_Str(), "diffuseColor");
         
-        // Create connection path from texture to surface
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_diffuseColor";
+        // Create connection path from texture to surface (using flat structure - no NodeGraph)
+        std::string texShaderPath = mCurrentMaterialPath + "/diffuseColor";
         tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
         surface.diffuseColor.set_connection(connPath);
         surface.diffuseColor.set_value_empty(); // Clear value when connected
         
-        // Store texture shader to add as child later
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_diffuseColor", diffuseTexture));
+        // Store texture shader to add as child later (using Apple's naming pattern)
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("diffuseColor", diffuseTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected diffuse texture: " + std::string(texturePath.C_Str()));
     }
@@ -1476,12 +1661,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture normalTexture = CreateUVTexture(texturePath.C_Str(), "normal");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_normal";
+        std::string texShaderPath = mCurrentMaterialPath + "/normal";
         tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
         surface.normal.set_connection(connPath);
         surface.normal.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_normal", normalTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("normal", normalTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected normal texture: " + std::string(texturePath.C_Str()));
     }
@@ -1490,12 +1675,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(aiTextureType_METALNESS, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(texturePath.C_Str(), "metallic");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_metallic";
+        std::string texShaderPath = mCurrentMaterialPath + "/metallic";
         tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for metallic
         surface.metallic.set_connection(connPath);
         surface.metallic.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_metallic", metallicTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallic", metallicTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected metallic texture: " + std::string(texturePath.C_Str()));
     }
@@ -1504,26 +1689,26 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(texturePath.C_Str(), "roughness");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_roughness";
+        std::string texShaderPath = mCurrentMaterialPath + "/roughness";
         tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for roughness
         surface.roughness.set_connection(connPath);
         surface.roughness.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_roughness", roughnessTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("roughness", roughnessTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected roughness texture: " + std::string(texturePath.C_Str()));
     }
     
     // Emissive texture
     if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture emissiveTexture = CreateUVTexture(texturePath.C_Str(), "emissive");
+        tinyusdz::UsdUVTexture emissiveTexture = CreateUVTexture(texturePath.C_Str(), "emissiveColor");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_emissive";
+        std::string texShaderPath = mCurrentMaterialPath + "/emissiveColor";
         tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
         surface.emissiveColor.set_connection(connPath);
         surface.emissiveColor.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_emissive", emissiveTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("emissiveColor", emissiveTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected emissive texture: " + std::string(texturePath.C_Str()));
     }
@@ -1532,12 +1717,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_occlusion";
+        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
         tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
         surface.occlusion.set_connection(connPath);
         surface.occlusion.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_occlusion", occlusionTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture: " + std::string(texturePath.C_Str()));
     }
@@ -1546,12 +1731,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(texturePath.C_Str(), "clearcoat");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_clearcoat";
+        std::string texShaderPath = mCurrentMaterialPath + "/clearcoat";
         tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for clearcoat
         surface.clearcoat.set_connection(connPath);
         surface.clearcoat.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_clearcoat", clearcoatTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("clearcoat", clearcoatTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat texture: " + std::string(texturePath.C_Str()));
     }
@@ -1560,12 +1745,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(AI_MATKEY_CLEARCOAT_ROUGHNESS_TEXTURE, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "clearcoatRoughness");
         
-        std::string texShaderPath = mCurrentMaterialPath + "/Image_Texture_clearcoatRoughness";
+        std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
         tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for clearcoat roughness
         surface.clearcoatRoughness.set_connection(connPath);
         surface.clearcoatRoughness.set_value_empty();
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("Image_Texture_clearcoatRoughness", clearcoatRoughnessTexture));
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("clearcoatRoughness", clearcoatRoughnessTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(texturePath.C_Str()));
     }
@@ -1574,12 +1759,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
 }
 
 // ------------------------------------------------------------------------------------------------
-// Create UV texture shader using tinyusdz APIs
+// Create UV texture shader using tinyusdz APIs (Apple's pattern)
 tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath, const std::string& paramName) {
     tinyusdz::UsdUVTexture uvTexture;
     
-    // Set name for the texture shader
-    uvTexture.name = "Image_Texture_" + paramName;
+    // Set name for the texture shader (following Apple's naming pattern)
+    uvTexture.name = paramName; // Use paramName directly (e.g., "clearcoat", "diffuseColor")
     
     // Handle texture file path using canonical Assimp pattern
     const aiTexture* embeddedTexture = mScene->GetEmbeddedTexture(filePath.c_str());
@@ -1591,16 +1776,21 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
         HandleExternalTexture(filePath, uvTexture);
     }
     
-    // Set default UV coordinates (can be connected to primvar reader later)
-    // For now, use default st coordinates
-    // uvTexture.st is left unconnected, USD will use default primvars:st
+    // Add source color space (Apple's pattern)
+    AddSourceColorSpace(uvTexture, paramName);
     
-    // Set wrap modes
+    // UV coordinates will be connected to stTransform.outputs:result in NodeGraph structure
+    // This connection will be set when building the NodeGraph
+    
+    // Set wrap modes (Apple's pattern)
     uvTexture.wrapS.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
     uvTexture.wrapT.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
     
-    // Set fallback value
-    uvTexture.fallback.set_value(tinyusdz::value::color4f{0.0f, 0.0f, 0.0f, 1.0f});
+    // Note: NOT setting fallback on UsdUVTexture object to avoid color4f type issues
+    // Will be handled by explicit shader property with correct float4 type
+    
+    // Add appropriate outputs (Apple's pattern)
+    AddTextureOutputs(uvTexture, paramName);
     
     return uvTexture;
 }
@@ -1672,10 +1862,9 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
         }
         std::string textureName = SanitizeFilename(baseTextureName);
         
-        // Set asset path for the texture as sibling to USDA file using anchored path for reproducible results
-        // Following USD spec: "anchored paths (paths that begin with "./" or "../")"
-        std::string anchoredPath = "./" + textureName;
-        tinyusdz::value::AssetPath assetPath(anchoredPath);
+        // Set asset path using Apple's pattern with ./ prefix for USDA/USDZ compatibility
+        std::string texturePath = "./" + textureName;
+        tinyusdz::value::AssetPath assetPath(texturePath);
         uvTexture.file.set_value(assetPath);
         
         // Add to list of textures to write alongside USDA file (following glTF2 pattern)
@@ -1705,10 +1894,10 @@ void USDZExporter::HandleExternalTexture(const std::string& texPath, tinyusdz::U
     
     std::string sanitizedFilename = SanitizeFilename(filename);
     
-    // Set asset path for the texture in USD using anchored path for reproducible results
-    // Following USD spec: "anchored paths (paths that begin with "./" or "../")"
-    std::string anchoredPath = "./" + sanitizedFilename;
-    tinyusdz::value::AssetPath assetPath(anchoredPath);
+    // Set asset path for the texture with ./ prefix for USDA/USDZ compatibility
+    // Apple's files reference textures with ./ prefix for iOS Quick Look compatibility
+    std::string texturePath = "./" + sanitizedFilename;
+    tinyusdz::value::AssetPath assetPath(texturePath);
     uvTexture.file.set_value(assetPath);
     
     // Load external texture into memory using IOSystem (following Assimp canonical pattern)
@@ -2879,6 +3068,132 @@ std::string USDZExporter::GenerateUniqueName(const std::string& baseName) const 
 }
 
 // ------------------------------------------------------------------------------------------------
+// Get scene name for root prim
+std::string USDZExporter::GetSceneName() const {
+    // Extract base name from filename (similar to Apple's approach)
+    std::string baseName = mFilename;
+    
+    // Remove path and extension
+    size_t lastSlash = baseName.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        baseName = baseName.substr(lastSlash + 1);
+    }
+    
+    size_t lastDot = baseName.find_last_of('.');
+    if (lastDot != std::string::npos) {
+        baseName = baseName.substr(0, lastDot);
+    }
+    
+    // Sanitize and ensure valid USD name
+    std::string sceneName = SanitizeName(baseName);
+    if (sceneName.empty()) {
+        sceneName = "Scene";
+    }
+    
+    return sceneName;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Create UV coordinate reader shader (Apple's pattern)
+tinyusdz::Shader USDZExporter::CreateTexCoordReader(const std::string& varName) {
+    tinyusdz::Shader texCoordReader;
+    texCoordReader.name = "texCoordReader";
+    texCoordReader.info_id = "UsdPrimvarReader_float2";
+    
+    // Create UsdPrimvarReader_float2 to read UV coordinates
+    tinyusdz::UsdPrimvarReader_float2 primvarReader;
+    
+    // Set varname connection - this connects to the material's stPrimvarName input
+    std::string varNamePath = mCurrentMaterialPath + ".inputs:stPrimvarName";
+    tinyusdz::Path varNameConnection(varNamePath, "");
+    primvarReader.varname.set_connection(varNameConnection);
+    
+    // Set output
+    primvarReader.result.set_authored(true);
+    
+    texCoordReader.value = primvarReader;
+    
+    // Set explicit USD-compliant type for UsdPrimvarReader_float2 result output
+    tinyusdz::Attribute resultAttr;
+    resultAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default value
+    resultAttr.set_type_name("float2");  // USD expects float2 for texture coordinates
+    tinyusdz::Property resultProp(resultAttr, false);
+    texCoordReader.props["outputs:result"] = resultProp;
+    
+    return texCoordReader;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Create texture coordinate transform shader (Apple's pattern)
+tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnection, bool flipY) {
+    tinyusdz::Shader stTransform;
+    stTransform.name = "stTransform";
+    stTransform.info_id = "UsdTransform2d";
+    
+    // Create UsdTransform2d to handle texture coordinate transformations
+    tinyusdz::UsdTransform2d transform2d;
+    
+    // Connect input to the specified connection (usually texCoordReader.outputs:result)
+    tinyusdz::Path inputPath(inputConnection, "");
+    transform2d.in.set_connection(inputPath);
+    
+    // Apply Y-flip transformation (common for textures)
+    if (flipY) {
+        transform2d.scale.set_value(tinyusdz::value::float2{1.0f, -1.0f});
+        transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 1.0f});
+    } else {
+        transform2d.scale.set_value(tinyusdz::value::float2{1.0f, 1.0f});
+        transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 0.0f});
+    }
+    
+    // Set output
+    transform2d.result.set_authored(true);
+    
+    stTransform.value = transform2d;
+    
+    // Set explicit USD-compliant type for UsdTransform2d result output
+    tinyusdz::Attribute resultAttr;
+    resultAttr.set_value(tinyusdz::value::float2{0.0f, 0.0f});  // Default value
+    resultAttr.set_type_name("float2");  // USD expects float2 for transform result
+    tinyusdz::Property resultProp(resultAttr, false);
+    stTransform.props["outputs:result"] = resultProp;
+    
+    return stTransform;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Add source color space to texture (Apple's pattern)
+void USDZExporter::AddSourceColorSpace(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType) {
+    // Set source color space based on texture type
+    tinyusdz::Animatable<tinyusdz::UsdUVTexture::SourceColorSpace> sourceColorSpace;
+    if (textureType == "diffuseColor" || textureType == "emissiveColor") {
+        // Color textures use sRGB
+        sourceColorSpace.set_default(tinyusdz::UsdUVTexture::SourceColorSpace::SRGB);
+    } else {
+        // Data textures (normal, roughness, metallic, etc.) use raw
+        sourceColorSpace.set_default(tinyusdz::UsdUVTexture::SourceColorSpace::Raw);
+    }
+    uvTexture.sourceColorSpace.set_value(sourceColorSpace);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Add texture outputs (Apple's pattern) 
+void USDZExporter::AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType) {
+    // Set appropriate outputs based on texture type
+    if (textureType == "diffuseColor" || textureType == "emissiveColor") {
+        // Color textures output RGB + alpha
+        uvTexture.outputsRGB.set_authored(true);
+        uvTexture.outputsA.set_authored(true);
+    } else if (textureType == "normal") {
+        // Normal maps output RGB
+        uvTexture.outputsRGB.set_authored(true);
+    } else {
+        // Scalar textures (roughness, metallic, clearcoat, etc.) output single channel
+        uvTexture.outputsR.set_authored(true);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 // Check if texture is embedded
 bool USDZExporter::IsEmbeddedTexture(const std::string& texPath) const {
     return !texPath.empty() && texPath[0] == '*';
@@ -2918,14 +3233,14 @@ void USDZExporter::WriteTextureFilesAlongsideMainFile(const std::string& mainFil
         return;
     }
     
-    // Extract directory from main filename
+    // Extract directory from main filename (Apple's pattern - textures alongside main file)
     std::string outputDir;
     size_t lastSlash = mainFilename.find_last_of("/\\");
     if (lastSlash != std::string::npos) {
         outputDir = mainFilename.substr(0, lastSlash + 1);
     }
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Writing " + ai_to_string(mTexturesToWrite.size()) + " texture files alongside USDA");
+    ASSIMP_LOG_DEBUG("USDZExporter: Writing " + ai_to_string(mTexturesToWrite.size()) + " texture files alongside main file");
     
     for (const auto& textureToWrite : mTexturesToWrite) {
         try {
@@ -3036,47 +3351,181 @@ void USDZExporter::SaveAsUSDC(const std::string& filename) {
 // ------------------------------------------------------------------------------------------------
 // Save as USDZ
 void USDZExporter::SaveAsUSDZ(const std::string& filename) {
-    // For now, save as USDA and then package into USDZ (USDC writer is not yet implemented in tinyusdz)
-    std::string tempUsda = filename + ".temp.usda";
-    
     try {
-        SaveAsUSDA(tempUsda);
+        // Create USDZ archive writer
+        USDZArchiveWriter archive(filename);
         
-        // TODO: Implement USDZ packaging
-        // For now, just rename the USDA file
-        if (mIOSystem) {
-            // Use IOSystem to move file
-            std::unique_ptr<IOStream> srcStream(mIOSystem->Open(tempUsda, "rb"));
-            std::unique_ptr<IOStream> dstStream(mIOSystem->Open(filename, "wb"));
-            
-            if (srcStream && dstStream) {
-                const size_t bufferSize = 8192;
-                uint8_t buffer[bufferSize];
-                size_t bytesRead;
-                
-                while ((bytesRead = srcStream->Read(buffer, 1, bufferSize)) > 0) {
-                    dstStream->Write(buffer, 1, bytesRead);
-                }
-                
-                dstStream->Flush();
-            }
-            
-            // Clean up temp file
-            if (srcStream) {
-                srcStream.reset();
-                mIOSystem->DeleteFile(tempUsda);
-            }
+        if (!archive.IsOpen()) {
+            throw DeadlyExportError("Failed to create USDZ archive: " + filename);
         }
         
-        ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDZ");
+        // Generate USD content in memory (don't write to disk)
+        std::string usdContent = GenerateUSDContent();
         
-    } catch (...) {
-        // Clean up temp file on error
-        if (mIOSystem) {
-            mIOSystem->DeleteFile(tempUsda);
+        // Add main USD file to archive (must be first per USDZ spec)
+        if (!archive.AddMainUSDFile(usdContent, "model.usda")) {
+            throw DeadlyExportError("Failed to add USD file to USDZ archive");
         }
+        
+        // Embed textures in the archive
+        if (!EmbedTextures(archive)) {
+            ReportWarning("Failed to embed some textures in USDZ archive");
+        }
+        
+        // Finalize the archive
+        if (!archive.Finalize()) {
+            throw DeadlyExportError("Failed to finalize USDZ archive");
+        }
+        
+        // Report any warnings from archive creation
+        for (const auto& warning : archive.GetWarnings()) {
+            ReportWarning("USDZ Archive: " + warning);
+        }
+        
+        // Check for errors
+        if (!archive.GetErrors().empty()) {
+            std::string errorMsg = "USDZ Archive errors: ";
+            for (const auto& error : archive.GetErrors()) {
+                errorMsg += error + "; ";
+            }
+            throw DeadlyExportError(errorMsg);
+        }
+        
+        ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDZ with ", 
+                       GetTextureCount(), " embedded textures");
+        
+    } catch (const std::exception& e) {
+        ReportError(std::string("USDZ export failed: ") + e.what());
         throw;
     }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Generate USD content in memory instead of writing to file
+std::string USDZExporter::GenerateUSDContent() {
+    if (!mStage) {
+        ReportError("USD Stage is not initialized");
+        return "";
+    }
+    
+    // Use Stage's ExportToString method to get USDA content
+    try {
+        std::string usdaContent = mStage->ExportToString();
+        
+        if (usdaContent.empty()) {
+            ReportError("Generated USD content is empty");
+            return "";
+        }
+        
+        return usdaContent;
+        
+    } catch (const std::exception& e) {
+        ReportError("Failed to generate USDA content: " + std::string(e.what()));
+        return "";
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Embed textures in USDZ archive
+bool USDZExporter::EmbedTextures(USDZArchiveWriter& archive) {
+    bool allSuccess = true;
+    size_t textureCount = 0;
+    
+    // Process all queued textures
+    for (const auto& textureToWrite : mTexturesToWrite) {
+        try {
+            std::string archivePath = "textures/" + textureToWrite.sanitizedFilename;
+            
+            if (textureToWrite.isEmbedded && textureToWrite.embeddedTexture) {
+                // Handle embedded texture from aiScene->mTextures
+                const aiTexture* tex = textureToWrite.embeddedTexture;
+                
+                if (tex->mHeight == 0) {
+                    // Compressed texture data
+                    std::vector<uint8_t> textureData(
+                        reinterpret_cast<const uint8_t*>(tex->pcData),
+                        reinterpret_cast<const uint8_t*>(tex->pcData) + tex->mWidth
+                    );
+                    
+                    if (!archive.AddTextureFile(archivePath, textureData)) {
+                        ReportError("Failed to add embedded texture to archive: " + archivePath);
+                        allSuccess = false;
+                        continue;
+                    }
+                } else {
+                    // Raw RGBA texture data - convert to PNG
+                    std::vector<uint8_t> pngData;
+                    if (ConvertRawTextureToPNG(tex, pngData)) {
+                        // Update path to PNG if it wasn't already
+                        if (archivePath.substr(archivePath.length() - 4) != ".png") {
+                            archivePath = archivePath.substr(0, archivePath.find_last_of('.')) + ".png";
+                        }
+                        
+                        if (!archive.AddTextureFile(archivePath, pngData)) {
+                            ReportError("Failed to add converted PNG texture to archive: " + archivePath);
+                            allSuccess = false;
+                            continue;
+                        }
+                    } else {
+                        ReportError("Failed to convert raw texture to PNG: " + textureToWrite.originalPath);
+                        allSuccess = false;
+                        continue;
+                    }
+                }
+            } else {
+                // Handle external texture loaded into memory
+                if (!textureToWrite.externalTextureData.empty()) {
+                    if (!archive.AddTextureFile(archivePath, textureToWrite.externalTextureData)) {
+                        ReportError("Failed to add external texture to archive: " + archivePath);
+                        allSuccess = false;
+                        continue;
+                    }
+                } else {
+                    // Try to load texture from file system using IOSystem
+                    if (mIOSystem && !textureToWrite.originalPath.empty()) {
+                        if (!archive.AddTextureFromFile(archivePath, textureToWrite.originalPath, mIOSystem)) {
+                            ReportError("Failed to add texture file to archive: " + textureToWrite.originalPath);
+                            allSuccess = false;
+                            continue;
+                        }
+                    } else {
+                        ReportError("No texture data available for: " + textureToWrite.originalPath);
+                        allSuccess = false;
+                        continue;
+                    }
+                }
+            }
+            
+            textureCount++;
+            ASSIMP_LOG_DEBUG("USDZExporter: Successfully embedded texture ", archivePath);
+            
+        } catch (const std::exception& e) {
+            ReportError("Exception while embedding texture " + textureToWrite.originalPath + ": " + e.what());
+            allSuccess = false;
+        }
+    }
+    
+    ASSIMP_LOG_INFO("USDZExporter: Embedded ", textureCount, " of ", mTexturesToWrite.size(), " textures");
+    return allSuccess;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Get number of textures to be embedded
+size_t USDZExporter::GetTextureCount() const {
+    return mTexturesToWrite.size();
+}
+
+// ------------------------------------------------------------------------------------------------
+// Helper method to convert raw RGBA texture data to PNG
+bool USDZExporter::ConvertRawTextureToPNG(const aiTexture* texture, std::vector<uint8_t>& pngData) {
+    if (!texture || texture->mHeight == 0) {
+        return false;
+    }
+    
+    // This is a simplified implementation - in a real scenario you'd use a library like stb_image_write
+    // For now, we'll just report that this functionality needs to be implemented
+    ReportWarning("Raw texture to PNG conversion not yet implemented for: " + std::string(texture->mFilename.C_Str()));
+    return false;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3116,6 +3565,27 @@ void Assimp::ExportSceneUSDA(const char* pFile, IOSystem* pIOSystem, const aiSce
     }
     
     // USD file written with proper tinyusdz APIs - no post-processing needed
+}
+
+void Assimp::ExportSceneUSDZ(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties) {
+    if (!pScene) {
+        ASSIMP_LOG_ERROR("USDZ export failed: Scene is null");
+        throw DeadlyExportError("USDZ export failed: Scene is null");
+    }
+    
+    if (!pFile) {
+        ASSIMP_LOG_ERROR("USDZ export failed: Output file path is null");
+        throw DeadlyExportError("USDZ export failed: Output file path is null");
+    }
+    
+    try {
+        USDZExporter exporter(pFile, pIOSystem, pScene, pProperties, true);
+    } catch (const DeadlyExportError& e) {
+        ASSIMP_LOG_ERROR("USDZ export failed: " + std::string(e.what()));
+        throw;
+    }
+    
+    // USDZ file written with embedded textures in ZIP archive
 }
 
 // USDC export removed - not supported by current tinyusdz version

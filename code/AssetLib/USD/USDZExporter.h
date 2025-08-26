@@ -94,6 +94,7 @@ class IOSystem;
 
 // Export function declarations
 void ExportSceneUSDA(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties);
+void ExportSceneUSDZ(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties);
 
 /**
  * @brief USDZ Exporter class using tinyusdz library
@@ -148,6 +149,7 @@ private:
     void ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertVertexColors(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertTangents(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
+    void ConvertMeshAttributes(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
 
     // Material conversion helpers
     void ConvertMaterial(const aiMaterial* mat, tinyusdz::Material& usdMaterial, 
@@ -163,6 +165,12 @@ private:
                        tinyusdz::UsdUVTexture& uvTexture);
     void HandleEmbeddedTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture);
     void HandleExternalTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture);
+    
+    // Shader creation helpers (Apple's NodeGraph pattern implementation)
+    tinyusdz::Shader CreateTexCoordReader(const std::string& varName = "st");
+    tinyusdz::Shader CreateStTransform(const std::string& inputConnection, bool flipY = true);
+    void AddSourceColorSpace(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType);
+    void AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType);
 
     // Animation conversion helpers
     void ConvertAnimation(const aiAnimation* anim);
@@ -189,6 +197,7 @@ private:
     std::string SanitizeName(const std::string& name) const;
     std::string SanitizeFilename(const std::string& filename) const;
     std::string GenerateUniqueName(const std::string& baseName) const;
+    std::string GetSceneName() const;
     bool IsEmbeddedTexture(const std::string& texPath) const;
     
     // File output methods
@@ -196,6 +205,12 @@ private:
     void SaveAsUSDC(const std::string& filename);
     void SaveAsUSDZ(const std::string& filename);
     void WriteTextureFilesAlongsideMainFile(const std::string& mainFilename);
+    
+    // USDZ specific methods
+    std::string GenerateUSDContent();
+    bool EmbedTextures(class USDZArchiveWriter& archive);
+    size_t GetTextureCount() const;
+    bool ConvertRawTextureToPNG(const aiTexture* texture, std::vector<uint8_t>& pngData);
 
     // Error handling
     void ReportError(const std::string& message);

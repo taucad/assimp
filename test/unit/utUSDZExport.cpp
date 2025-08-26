@@ -376,7 +376,13 @@ TEST_F(utUSDZExport, importGltfBoxTexturedExportUsda) {
     ));
 }
 
-// USDZ export removed - not supported by current tinyusdz version
+TEST_F(utUSDZExport, importGltfBoxTexturedExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF/BoxTextured.gltf",
+        "usd/basic/BoxTextured_out.usdz",
+        "usdz"
+    ));
+}
 
 // USDC export removed - not supported by current tinyusdz version
 
@@ -389,6 +395,20 @@ TEST_F(utUSDZExport, importGltfPbrSpecularGlossinessExportUsda) {
     const std::string outputPath = "usd/pbr/BoxTextured_PbrSpecGloss_out.usda";
     
     EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Additional PBR-specific validation
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(outputPath, aiProcess_ValidateDataStructure);
+    if (scene && scene->mNumMaterials > 0) {
+        validatePBRMaterial(scene->mMaterials[0], "BoxTextured PBR Material");
+    }
+}
+
+TEST_F(utUSDZExport, importGltfPbrSpecularGlossinessExportUsdz) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-pbrSpecularGlossiness/BoxTextured.gltf";
+    const std::string outputPath = "usd/pbr/BoxTextured_PbrSpecGloss_out.usdz";
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usdz"));
     
     // Additional PBR-specific validation
     Assimp::Importer importer;
@@ -437,6 +457,41 @@ TEST_F(utUSDZExport, importGltfClearcoatExportUsda) {
     }
 }
 
+TEST_F(utUSDZExport, importGltfClearcoatExportUsdz) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/ClearCoat-glTF/ClearCoatTest.gltf";
+    const std::string outputPath = "usd/clearcoat/ClearCoatTest_out.usdz";
+    
+    // Debug: Check import counts
+    Assimp::Importer importer;
+    const aiScene* importedScene = importer.ReadFile(inputPath, 0);
+    if (importedScene) {
+        std::cout << "[DEBUG] Imported " << importedScene->mNumMeshes << " meshes, " 
+                  << importedScene->mNumMaterials << " materials" << std::endl;
+        
+        std::function<int(const aiNode*)> countNodes = [&](const aiNode* n) -> int {
+            if (!n) return 0;
+            int count = 1;
+            for (uint32_t i = 0; i < n->mNumChildren; ++i) {
+                count += countNodes(n->mChildren[i]);
+            }
+            return count;
+        };
+        std::cout << "[DEBUG] Total nodes: " << countNodes(importedScene->mRootNode) << std::endl;
+    }
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usdz"));
+    
+    // Additional clearcoat-specific validation
+    Assimp::Importer reimporter;
+    const aiScene* scene = reimporter.ReadFile(outputPath, aiProcess_ValidateDataStructure);
+    if (scene && scene->mNumMaterials > 0) {
+        // Look for specific clearcoat materials
+        for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
+            validateClearcoatMaterial(scene->mMaterials[i], "Partial_Coated");
+        }
+    }
+}
+
 // =============================================================================
 // EMBEDDED TEXTURE TESTS
 // =============================================================================
@@ -446,6 +501,14 @@ TEST_F(utUSDZExport, importGltfEmbeddedTexturesExportUsda) {
         ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-Embedded/BoxTextured.gltf",
         "usd/embedded/BoxTextured_Embedded_out.usda",
         "usda"
+    ));
+}
+
+TEST_F(utUSDZExport, importGltfEmbeddedTexturesExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-Embedded/BoxTextured.gltf",
+        "usd/embedded/BoxTextured_Embedded_out.usdz",
+        "usdz"
     ));
 }
 
