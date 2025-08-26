@@ -295,6 +295,14 @@ ENDIF()
 
 target_link_libraries( unit assimp ${platform_libs} )
 
+# Configure Web-IFC dependencies for unit tests if enabled
+IF (ASSIMP_BUILD_IFC_IMPORTER)
+    WEBIFC_PARAM_SETTER(unit)
+    # Also add the Web-IFC include path for test compilation
+    target_include_directories(unit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/web-ifc/autoclone/webifc_repo-src/src/cpp")
+    MESSAGE(STATUS "Applied Web-IFC parameter configuration to unit test target")
+ENDIF()
+
 add_subdirectory(headercheck)
 
 add_test( unittests unit )
