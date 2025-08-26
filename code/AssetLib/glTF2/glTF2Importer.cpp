@@ -1610,30 +1610,30 @@ void glTF2Importer::ImportAnimations(glTF2::Asset &r) {
     }
 }
 
-static unsigned int countEmbeddedTextures(glTF2::Asset &r) {
-    unsigned int numEmbeddedTexs = 0;
+static unsigned int countAllTextures(glTF2::Asset &r) {
+    unsigned int numTexs = 0;
     for (size_t i = 0; i < r.images.Size(); ++i) {
         if (r.images[i].HasData()) {
-            numEmbeddedTexs += 1;
+            numTexs += 1;
         }
     }
 
-    return numEmbeddedTexs;
+    return numTexs;
 }
 
-void glTF2Importer::ImportEmbeddedTextures(glTF2::Asset &r) {
+void glTF2Importer::ImportTextures(glTF2::Asset &r) {
     mEmbeddedTexIdxs.resize(r.images.Size(), -1);
-    const unsigned int numEmbeddedTexs = countEmbeddedTextures(r);
-    if (numEmbeddedTexs == 0) {
+    const unsigned int numTextures = countAllTextures(r);
+    if (numTextures == 0) {
         return;
     }
 
-    ASSIMP_LOG_DEBUG("Importing ", numEmbeddedTexs, " embedded textures");
+    ASSIMP_LOG_DEBUG("Importing ", numTextures, " textures (embedded and external)");
 
-    mScene->mTextures = new aiTexture *[numEmbeddedTexs];
-    std::fill(mScene->mTextures, mScene->mTextures + numEmbeddedTexs, nullptr);
+    mScene->mTextures = new aiTexture *[numTextures];
+    std::fill(mScene->mTextures, mScene->mTextures + numTextures, nullptr);
 
-    // Add the embedded textures
+    // Add all textures (both embedded and external loaded into memory)
     for (size_t i = 0; i < r.images.Size(); ++i) {
         Image &img = r.images[i];
         if (!img.HasData()) {
@@ -1648,7 +1648,12 @@ void glTF2Importer::ImportEmbeddedTextures(glTF2::Asset &r) {
         size_t length = img.GetDataLength();
         void *data = img.StealData();
 
-        tex->mFilename = img.name;
+        // Set filename - prefer original filename, fallback to URI or name
+        if (!img.uri.empty()) {
+            tex->mFilename = img.uri;  // External texture - use original URI
+        } else if (!img.name.empty()) {
+            tex->mFilename = img.name;  // Use image name if available
+        }
         tex->mWidth = static_cast<unsigned int>(length);
         tex->mHeight = 0;
         tex->pcData = reinterpret_cast<aiTexel *>(data);
@@ -1718,7 +1723,7 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     }
 
     // Copy the data out
-    ImportEmbeddedTextures(asset);
+    ImportTextures(asset);
     ImportMaterials(asset);
 
     ImportMeshes(asset);

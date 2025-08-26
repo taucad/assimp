@@ -141,6 +141,9 @@ void ExportAssimp2Json(const char* , IOSystem*, const aiScene* , const Assimp::E
 #ifndef ASSIMP_BUILD_NO_PBRT_EXPORTER
 void ExportScenePbrt(const char*, IOSystem*, const aiScene*, const ExportProperties*);
 #endif
+#ifndef ASSIMP_BUILD_NO_USD_EXPORTER
+void ExportSceneUSDA(const char*, IOSystem*, const aiScene*, const ExportProperties*);
+#endif
 
 static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporters) {
 	(void)exporters;
@@ -228,6 +231,10 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 
 #ifndef ASSIMP_BUILD_NO_ASSJSON_EXPORTER
 	exporters.emplace_back("assjson", "Assimp JSON Document", "json", &ExportAssimp2Json, 0);
+#endif
+
+#ifndef ASSIMP_BUILD_NO_USD_EXPORTER
+	exporters.emplace_back("usda", "Universal Scene Description (ASCII)", "usda", &ExportSceneUSDA, 0);
 #endif
 }
 
@@ -364,6 +371,12 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         unsigned int pPreprocessing, const ExportProperties* pProperties) {
     ASSIMP_BEGIN_EXCEPTION_REGION();
 	ai_assert(nullptr != pimpl);
+    
+    if (!pScene) {
+        pimpl->mError = "Export failed: Scene is null";
+        return AI_FAILURE;
+    }
+    
     // when they create scenes from scratch, users will likely create them not in verbose
     // format. They will likely not be aware that there is a flag in the scene to indicate
     // this, however. To avoid surprises and bug reports, we check for duplicates in

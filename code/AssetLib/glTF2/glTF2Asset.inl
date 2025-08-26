@@ -45,6 +45,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/StringUtils.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Base64.hpp>
+#include <algorithm>
+#include <memory>
 #include <rapidjson/document.h>
 #include <rapidjson/schema.h>
 #include <rapidjson/stringbuffer.h>
@@ -1148,6 +1150,42 @@ inline void Image::Read(Value &obj, Asset &r) {
                 }
             } else {
                 this->uri = uristr;
+                // Load external texture into memory for export compatibility
+                // This ensures external textures are available when exporting to other formats
+                std::unique_ptr<IOStream> textureFile(r.OpenFile(uristr, "rb"));
+                if (textureFile && textureFile->FileSize() > 0) {
+                    size_t fileSize = textureFile->FileSize();
+                    uint8_t* textureData = new uint8_t[fileSize];
+                    size_t bytesRead = textureFile->Read(textureData, 1, fileSize);
+                    
+                    if (bytesRead == fileSize) {
+                        // Successfully loaded external texture into memory
+                        mData.reset(textureData);
+                        mDataLength = fileSize;
+                        
+                        // Try to determine MIME type from file extension
+                        std::string uriString(uristr);
+                        size_t dotPos = uriString.find_last_of('.');
+                        if (dotPos != std::string::npos) {
+                            std::string ext = uriString.substr(dotPos + 1);
+                            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                            
+                            if (ext == "png") {
+                                mimeType = "image/png";
+                            } else if (ext == "jpg" || ext == "jpeg") {
+                                mimeType = "image/jpeg";
+                            } else if (ext == "webp") {
+                                mimeType = "image/webp";
+                            } else if (ext == "ktx2") {
+                                mimeType = "image/ktx2";
+                            } else if (ext == "basis") {
+                                mimeType = "image/basis";
+                            }
+                        }
+                    } else {
+                        delete[] textureData;
+                    }
+                }
             }
         } else if (Value *bufferViewVal = FindUInt(obj, "bufferView")) {
             this->bufferView = r.bufferViews.Retrieve(bufferViewVal->GetUint());
