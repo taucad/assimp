@@ -1667,6 +1667,11 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     if (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture normalTexture = CreateUVTexture(texturePath.C_Str(), "normal");
         
+        // Set proper bias and scale for normal maps as per USD specification
+        // For 8-bit normal maps: bias=(-1,-1,-1,0), scale=(2,2,2,1)
+        normalTexture.bias.set_value(tinyusdz::value::float4{-1.0f, -1.0f, -1.0f, 0.0f});
+        normalTexture.scale.set_value(tinyusdz::value::float4{2.0f, 2.0f, 2.0f, 1.0f});
+        
         std::string texShaderPath = mCurrentMaterialPath + "/normal";
         tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
         surface.normal.set_connection(connPath);
