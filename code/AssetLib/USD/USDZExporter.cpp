@@ -637,6 +637,9 @@ void USDZExporter::ExportMaterials() {
             tinyusdz::Path stPath(stConnection, "");
             connectedTexture.st.set_connection(stPath);
             
+            // Clear the default st value since we're using a connection (avoid redundant inputs:st and inputs:st.connect)
+            connectedTexture.st.set_value_empty();
+            
             textureShader.value = connectedTexture;
             
             // Set explicit USD-compliant types for UsdUVTexture inputs with correct float4 values
@@ -1671,8 +1674,11 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected normal texture: " + std::string(texturePath.C_Str()));
     }
     
-    // Metallic texture
-    if (mat->GetTexture(aiTextureType_METALNESS, 0, &texturePath) == AI_SUCCESS) {
+    // Metallic texture (only create connection if metallic factor > 0)
+    float currentMetallic = 0.0f;
+    mat->Get(AI_MATKEY_METALLIC_FACTOR, currentMetallic);
+    
+    if (mat->GetTexture(aiTextureType_METALNESS, 0, &texturePath) == AI_SUCCESS && currentMetallic > 0.0f) {
         tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(texturePath.C_Str(), "metallic");
         
         std::string texShaderPath = mCurrentMaterialPath + "/metallic";
@@ -1690,7 +1696,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(texturePath.C_Str(), "roughness");
         
         std::string texShaderPath = mCurrentMaterialPath + "/roughness";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for roughness
+        tinyusdz::Path connPath(texShaderPath, "outputs:g"); // Use green channel for roughness (matches reference)
         surface.roughness.set_connection(connPath);
         surface.roughness.set_value_empty();
         
@@ -1746,7 +1752,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "clearcoatRoughness");
         
         std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for clearcoat roughness
+        tinyusdz::Path connPath(texShaderPath, "outputs:g"); // Use green channel for clearcoat roughness (matches reference)
         surface.clearcoatRoughness.set_connection(connPath);
         surface.clearcoatRoughness.set_value_empty();
         
@@ -3205,8 +3211,11 @@ void USDZExporter::AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const st
     } else if (textureType == "normal") {
         // Normal maps output RGB
         uvTexture.outputsRGB.set_authored(true);
+    } else if (textureType == "roughness" || textureType == "clearcoatRoughness") {
+        // Roughness textures output green channel (matches reference file)
+        uvTexture.outputsG.set_authored(true);
     } else {
-        // Scalar textures (roughness, metallic, clearcoat, etc.) output single channel
+        // Other scalar textures (metallic, clearcoat, etc.) output red channel
         uvTexture.outputsR.set_authored(true);
     }
 }
