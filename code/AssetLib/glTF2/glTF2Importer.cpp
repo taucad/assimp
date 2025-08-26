@@ -258,6 +258,13 @@ static aiMaterial *ImportMaterial(std::vector<int> &embeddedTexIdxs, Asset &r, M
 
         SetMaterialTextureProperty(embeddedTexIdxs, r, mat.pbrMetallicRoughness.baseColorTexture, aimat, aiTextureType_DIFFUSE);
         SetMaterialTextureProperty(embeddedTexIdxs, r, mat.pbrMetallicRoughness.baseColorTexture, aimat, aiTextureType_BASE_COLOR);
+        
+        // glTF uses the alpha channel of baseColorTexture for opacity when alphaMode != "OPAQUE"
+        // Create aiTextureType_OPACITY mapping so downstream exporters can find it
+        if (mat.pbrMetallicRoughness.baseColorTexture.texture && mat.pbrMetallicRoughness.baseColorTexture.texture->source && 
+            mat.alphaMode != "OPAQUE") {
+            SetMaterialTextureProperty(embeddedTexIdxs, r, mat.pbrMetallicRoughness.baseColorTexture, aimat, aiTextureType_OPACITY);
+        }
 
         // Keep AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE for backwards compatibility
         SetMaterialTextureProperty(embeddedTexIdxs, r, mat.pbrMetallicRoughness.metallicRoughnessTexture, aimat, AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE);

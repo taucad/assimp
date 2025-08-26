@@ -1755,6 +1755,20 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(texturePath.C_Str()));
     }
     
+    // Opacity texture
+    if (mat->GetTexture(aiTextureType_OPACITY, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture opacityTexture = CreateUVTexture(texturePath.C_Str(), "opacity");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/opacity";
+        tinyusdz::Path connPath(texShaderPath, "outputs:a"); // Use alpha channel for opacity
+        surface.opacity.set_connection(connPath);
+        surface.opacity.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("opacity", opacityTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected opacity texture: " + std::string(texturePath.C_Str()));
+    }
+    
     ASSIMP_LOG_DEBUG("USDZExporter: Texture connections completed");
 }
 
@@ -3166,8 +3180,8 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
 void USDZExporter::AddSourceColorSpace(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType) {
     // Set source color space based on texture type
     tinyusdz::Animatable<tinyusdz::UsdUVTexture::SourceColorSpace> sourceColorSpace;
-    if (textureType == "diffuseColor" || textureType == "emissiveColor") {
-        // Color textures use sRGB
+    if (textureType == "diffuseColor" || textureType == "emissiveColor" || textureType == "opacity") {
+        // Color and opacity textures use sRGB (opacity textures are often RGBA images)
         sourceColorSpace.set_default(tinyusdz::UsdUVTexture::SourceColorSpace::SRGB);
     } else {
         // Data textures (normal, roughness, metallic, etc.) use raw
@@ -3184,6 +3198,10 @@ void USDZExporter::AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const st
         // Color textures output RGB + alpha
         uvTexture.outputsRGB.set_authored(true);
         uvTexture.outputsA.set_authored(true);
+    } else if (textureType == "opacity") {
+        // Opacity textures primarily output alpha channel
+        uvTexture.outputsA.set_authored(true);
+        uvTexture.outputsRGB.set_authored(true); // Also enable RGB in case needed
     } else if (textureType == "normal") {
         // Normal maps output RGB
         uvTexture.outputsRGB.set_authored(true);
