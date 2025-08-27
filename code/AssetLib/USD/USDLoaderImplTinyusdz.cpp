@@ -119,7 +119,7 @@ void USDImporterImplTinyusdz::InternReadFile(
         ss << "InternReadFile(): LoadUSDCFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsda(pFile)) {
-        ret = LoadUSDAFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
+        ret = LoadUSDAFromMemory(in_mem_data.data(), in_mem_data.size(), basePath, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDAFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
