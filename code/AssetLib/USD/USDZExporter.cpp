@@ -1322,25 +1322,20 @@ void USDZExporter::ConvertMeshAttributes(const aiMesh* mesh, tinyusdz::GeomMesh&
         }
     }
     
-    // Set doubleSided attribute using tinyusdz API
-    tinyusdz::Attribute doubleSidedAttr;
-    doubleSidedAttr.set_value(doubleSided);
+    // Set doubleSided attribute using tinyusdz API (must be uniform variability)
+    tinyusdz::Attribute doubleSidedAttr = tinyusdz::Attribute::Uniform(doubleSided);
     doubleSidedAttr.set_type_name("bool");
-    // Note: uniform qualifier will be handled by USD schema - doubleSided is inherently uniform
     tinyusdz::Property doubleSidedProp(doubleSidedAttr, false);
     usdMesh.props["doubleSided"] = doubleSidedProp;
     
-    // 2. Set subdivisionScheme = "none" (standard for triangle meshes)
-    tinyusdz::Attribute subdivisionSchemeAttr;
-    subdivisionSchemeAttr.set_value(tinyusdz::value::token("none"));
+    // 2. Set subdivisionScheme = "none" (standard for triangle meshes) - must be uniform
+    tinyusdz::Attribute subdivisionSchemeAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
     subdivisionSchemeAttr.set_type_name("token");
-    // Note: uniform qualifier will be handled by USD schema - subdivisionScheme is inherently uniform
     tinyusdz::Property subdivisionSchemeProp(subdivisionSchemeAttr, false);
     usdMesh.props["subdivisionScheme"] = subdivisionSchemeProp;
     
-    // 3. Set triangleSubdivisionRule = "none" 
-    tinyusdz::Attribute triangleSubdivisionRuleAttr;
-    triangleSubdivisionRuleAttr.set_value(tinyusdz::value::token("none"));
+    // 3. Set triangleSubdivisionRule = "none" - must be uniform
+    tinyusdz::Attribute triangleSubdivisionRuleAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
     triangleSubdivisionRuleAttr.set_type_name("token");
     tinyusdz::Property triangleSubdivisionRuleProp(triangleSubdivisionRuleAttr, false);
     usdMesh.props["triangleSubdivisionRule"] = triangleSubdivisionRuleProp;
@@ -3149,6 +3144,8 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
     // Connect input to the specified connection (usually texCoordReader.outputs:result)
     tinyusdz::Path inputPath(inputConnection, "");
     transform2d.in.set_connection(inputPath);
+    // Clear any default value since we're using a connection
+    transform2d.in.set_value_empty();
     
     // Apply Y-flip transformation (common for textures)
     if (flipY) {
