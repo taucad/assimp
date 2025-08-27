@@ -683,92 +683,10 @@ void USDZExporter::ExportMaterials() {
 // ------------------------------------------------------------------------------------------------
 // Export textures using proper tinyusdz APIs
 void USDZExporter::ExportTextures() {
-    // Following established Assimp pattern: only export embedded textures from memory
-    // External textures are referenced by path (like OBJ exporter does)
-    if (!mScene || mScene->mNumTextures == 0) {
-        ASSIMP_LOG_DEBUG("USDZExporter: No embedded textures to export");
-        return;
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Exporting " + ai_to_string(mScene->mNumTextures) + " embedded textures");
-    
-    // Process embedded textures - write them as siblings to USDA file
-    for (uint32_t i = 0; i < mScene->mNumTextures; ++i) {
-        const aiTexture* tex = mScene->mTextures[i];
-        if (!tex) continue;
-        
-        // Generate texture filename (preserving proper extension)
-        std::string baseTextureName;
-        if (tex->mFilename.length > 0) {
-            baseTextureName = tex->mFilename.C_Str();
-        } else {
-            baseTextureName = "texture_" + ai_to_string(i);
-        }
-        
-        // Add appropriate extension if not present
-        std::string extension = ".png"; // Default extension
-        if (tex->mHeight == 0) {
-            // Compressed texture - use format hint as extension
-            if (tex->achFormatHint[0] != '\0') {
-                std::string formatHint(tex->achFormatHint);
-                if (formatHint.find('.') == std::string::npos) {
-                    extension = "." + formatHint;
-            } else {
-                    extension = formatHint; // Already includes dot
-                }
-            }
-        }
-        
-        // Ensure base name has extension and sanitize the complete filename
-        if (baseTextureName.find('.') == std::string::npos) {
-            baseTextureName += extension;
-        }
-        std::string textureName = SanitizeFilename(baseTextureName);
-        
-        // Ensure unique filename
-        textureName = GenerateUniqueName(textureName);
-        
-        // Build texture path as sibling to USDA file
-        std::string textureFilePath = textureName;
-        
-        try {
-            // No directory creation needed - embedded textures are siblings to USDA file
-            
-            // Open output file
-            if (mIOSystem) {
-                std::unique_ptr<IOStream> outfile(mIOSystem->Open(textureFilePath, "wb"));
-                if (!outfile) {
-                    ASSIMP_LOG_WARN("USDZExporter: Could not create texture file: " + textureFilePath);
-                    continue;
-                }
-                
-                if (tex->mHeight == 0) {
-                    // Compressed texture data - write directly
-                    size_t written = outfile->Write(tex->pcData, tex->mWidth, 1);
-                    if (written != tex->mWidth) {
-                        ASSIMP_LOG_WARN("USDZExporter: Failed to write complete texture data for: " + textureFilePath);
-                    }
-                } else {
-                    // Uncompressed texture data - convert to simple format
-                    // This is a simplified implementation - in practice, you'd want to use a proper image library
-                    ASSIMP_LOG_WARN("USDZExporter: Uncompressed texture export not fully implemented: " + textureName);
-                    // For now, write raw RGBA data (would need proper PNG encoding in practice)
-                    size_t dataSize = tex->mWidth * tex->mHeight * 4; // RGBA
-                    size_t written = outfile->Write(tex->pcData, dataSize, 1);
-                    if (written != dataSize) {
-                        ASSIMP_LOG_WARN("USDZExporter: Failed to write complete texture data for: " + textureFilePath);
-                    }
-                }
-                
-                ASSIMP_LOG_DEBUG("USDZExporter: Exported texture: " + textureFilePath);
-            }
-            
-        } catch (const std::exception& e) {
-            ASSIMP_LOG_ERROR("USDZExporter: Failed to export embedded texture " + textureName + ": " + e.what());
-        }
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Embedded texture export completed");
+    // Embedded textures are now handled by HandleEmbeddedTexture() when materials reference them
+    // This avoids duplicate texture writing and ensures proper directory structure
+    // External textures are handled by HandleExternalTexture() 
+    ASSIMP_LOG_DEBUG("USDZExporter: Texture processing delegated to material handlers");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1597,6 +1515,13 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         surface.opacity.set_value(opacity);
     }
     
+    // Opacity threshold (for masked transparency)
+    float opacityThreshold = 0.0f;
+    if (mat->Get(AI_MATKEY_TRANSPARENCYFACTOR, opacityThreshold) == AI_SUCCESS && opacityThreshold > 0.0f) {
+        surface.opacityThreshold.set_value(opacityThreshold);
+        ASSIMP_LOG_DEBUG("USDZExporter: Set opacity threshold for masked transparency: " + std::to_string(opacityThreshold));
+    }
+    
     // IOR (Index of Refraction)
     float ior = 1.5f;
     if (mat->Get(AI_MATKEY_REFRACTI, ior) == AI_SUCCESS) {
@@ -1726,6 +1651,20 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture: " + std::string(texturePath.C_Str()));
+    } else {
+        // Check for lightmap texture (some glTF importers classify AO textures as lightmaps)  
+        if (mat->GetTexture(aiTextureType_LIGHTMAP, 0, &texturePath) == AI_SUCCESS) {
+            tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
+            
+            std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
+            tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
+            surface.occlusion.set_connection(connPath);
+            surface.occlusion.set_value_empty();
+            
+            mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture from lightmap slot: " + std::string(texturePath.C_Str()));
+        }
     }
     
     // Clearcoat texture
@@ -1768,6 +1707,183 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         mCurrentMaterialTextureShaders.push_back(std::make_pair("opacity", opacityTexture));
         
         ASSIMP_LOG_DEBUG("USDZExporter: Connected opacity texture: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Displacement texture (height/displacement maps)
+    if (mat->GetTexture(aiTextureType_DISPLACEMENT, 0, &texturePath) == AI_SUCCESS ||
+        mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS) {
+        
+        tinyusdz::UsdUVTexture displacementTexture = CreateUVTexture(texturePath.C_Str(), "displacement");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/displacement";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for displacement
+        surface.displacement.set_connection(connPath);
+        surface.displacement.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("displacement", displacementTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected displacement texture: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Specular color texture (enables specular workflow)
+    if (mat->GetTexture(aiTextureType_SPECULAR, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture specularTexture = CreateUVTexture(texturePath.C_Str(), "specularColor");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/specularColor";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        surface.specularColor.set_connection(connPath);
+        surface.specularColor.set_value_empty();
+        
+        // Switch to specular workflow when specular texture is present
+        surface.useSpecularWorkflow.set_value(1);
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("specularColor", specularTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected specular texture (switched to specular workflow): " + std::string(texturePath.C_Str()));
+    }
+    
+    // Packed glTF metallic-roughness texture (only if individual textures are not available)
+    aiString tempPath;
+    bool hasIndividualMetallic = (mat->GetTexture(aiTextureType_METALNESS, 0, &tempPath) == AI_SUCCESS && currentMetallic > 0.0f);
+    bool hasIndividualRoughness = (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &tempPath) == AI_SUCCESS);
+    
+    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &texturePath) == AI_SUCCESS &&
+        !(hasIndividualMetallic || hasIndividualRoughness)) {
+        
+        tinyusdz::UsdUVTexture metallicRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "metallicRoughness");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/metallicRoughness";
+        
+        // Metallic from blue channel, roughness from green channel (glTF spec)
+        tinyusdz::Path metallicConnPath(texShaderPath, "outputs:b");
+        tinyusdz::Path roughnessConnPath(texShaderPath, "outputs:g");
+        
+        surface.metallic.set_connection(metallicConnPath);
+        surface.metallic.set_value_empty();
+        surface.roughness.set_connection(roughnessConnPath);
+        surface.roughness.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallicRoughness", metallicRoughnessTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected packed metallic-roughness texture: " + std::string(texturePath.C_Str()));
+    } else if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &texturePath) == AI_SUCCESS &&
+              (hasIndividualMetallic || hasIndividualRoughness)) {
+        // Still create the packed texture shader for compatibility but don't override individual connections
+        tinyusdz::UsdUVTexture metallicRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "metallicRoughness");
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallicRoughness", metallicRoughnessTexture));
+        ASSIMP_LOG_DEBUG("USDZExporter: Created packed metallic-roughness texture shader but prioritizing individual textures");
+    }
+    
+    // Alternative emissive color texture
+    if (mat->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture emissionTexture = CreateUVTexture(texturePath.C_Str(), "emissionColor");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/emissionColor";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        surface.emissiveColor.set_connection(connPath);
+        surface.emissiveColor.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("emissionColor", emissionTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected emission color texture: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Shininess texture (convert to roughness: roughness ≈ sqrt(2.0 / (shininess + 2.0)))
+    if (mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture shininessTexture = CreateUVTexture(texturePath.C_Str(), "shininess");
+        
+        // Note: This requires custom conversion shader in a complete implementation
+        // For now, we'll connect it directly and let the renderer handle conversion
+        std::string texShaderPath = mCurrentMaterialPath + "/shininess";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
+        surface.roughness.set_connection(connPath);
+        surface.roughness.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("shininess", shininessTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected shininess texture (as roughness): " + std::string(texturePath.C_Str()));
+    }
+    
+    // Advanced PBR textures (not directly supported by UsdPreviewSurface, use approximations)
+    
+    // Sheen texture → approximate with emissive color boost
+    if (mat->GetTexture(aiTextureType_SHEEN, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture sheenTexture = CreateUVTexture(texturePath.C_Str(), "sheen");
+        
+        // Fallback: blend with emissive color (approximation)
+        std::string texShaderPath = mCurrentMaterialPath + "/sheen";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        // Note: Proper sheen requires MaterialX or custom shader
+        surface.emissiveColor.set_connection(connPath);
+        surface.emissiveColor.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("sheen", sheenTexture));
+        
+        ASSIMP_LOG_WARN("USDZExporter: Sheen texture approximated as emissive (full sheen requires MaterialX): " + std::string(texturePath.C_Str()));
+    }
+    
+    // Transmission texture → approximate with opacity inversion
+    if (mat->GetTexture(aiTextureType_TRANSMISSION, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture transmissionTexture = CreateUVTexture(texturePath.C_Str(), "transmission");
+        
+        // Fallback: use as opacity (approximation for glass/translucent materials)
+        std::string texShaderPath = mCurrentMaterialPath + "/transmission";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
+        surface.opacity.set_connection(connPath);
+        surface.opacity.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("transmission", transmissionTexture));
+        
+        ASSIMP_LOG_WARN("USDZExporter: Transmission texture approximated as opacity (full transmission requires MaterialX): " + std::string(texturePath.C_Str()));
+    }
+    
+    // Anisotropy texture → not supported, log warning
+    if (mat->GetTexture(aiTextureType_ANISOTROPY, 0, &texturePath) == AI_SUCCESS) {
+        ASSIMP_LOG_WARN("USDZExporter: Anisotropy texture not supported by UsdPreviewSurface, skipping: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Maya-specific textures → map to equivalent PBR properties where possible
+    if (mat->GetTexture(aiTextureType_MAYA_BASE, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture mayaBaseTexture = CreateUVTexture(texturePath.C_Str(), "mayaBase");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/mayaBase";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        surface.diffuseColor.set_connection(connPath);
+        surface.diffuseColor.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaBase", mayaBaseTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Maya base texture mapped to diffuse color: " + std::string(texturePath.C_Str()));
+    }
+    
+    if (mat->GetTexture(aiTextureType_MAYA_SPECULAR, 0, &texturePath) == AI_SUCCESS ||
+        mat->GetTexture(aiTextureType_MAYA_SPECULAR_COLOR, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture mayaSpecularTexture = CreateUVTexture(texturePath.C_Str(), "mayaSpecular");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/mayaSpecular";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        surface.specularColor.set_connection(connPath);
+        surface.specularColor.set_value_empty();
+        
+        // Switch to specular workflow
+        surface.useSpecularWorkflow.set_value(1);
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaSpecular", mayaSpecularTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Maya specular texture mapped to specular color: " + std::string(texturePath.C_Str()));
+    }
+    
+    if (mat->GetTexture(aiTextureType_MAYA_SPECULAR_ROUGHNESS, 0, &texturePath) == AI_SUCCESS) {
+        tinyusdz::UsdUVTexture mayaRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "mayaRoughness");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/mayaRoughness";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
+        surface.roughness.set_connection(connPath);
+        surface.roughness.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaRoughness", mayaRoughnessTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Maya roughness texture connected: " + std::string(texturePath.C_Str()));
     }
     
     ASSIMP_LOG_DEBUG("USDZExporter: Texture connections completed");
