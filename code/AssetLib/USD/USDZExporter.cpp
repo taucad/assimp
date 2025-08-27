@@ -2046,6 +2046,12 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
             baseTextureName = "embedded_texture_" + ai_to_string(textureIndex);
         }
         
+        // Generate descriptive name based on texture usage context
+        std::string descriptiveName = GenerateDescriptiveTextureName(textureIndex, baseTextureName);
+        if (descriptiveName != baseTextureName) {
+            baseTextureName = descriptiveName;
+        }
+        
         // Add appropriate extension if not present
         std::string extension = ".png"; // Default extension
         if (tex->mHeight == 0 && tex->achFormatHint[0] != '\0') {
@@ -2063,8 +2069,8 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
         }
         std::string textureName = SanitizeFilename(baseTextureName);
         
-        // Set asset path using Apple's pattern with ./ prefix for USDA/USDZ compatibility
-        std::string texturePath = "./" + textureName;
+        // Set asset path using Apple's pattern with textures/ subdirectory for USDA/USDZ compatibility
+        std::string texturePath = "./textures/" + textureName;
         tinyusdz::value::AssetPath assetPath(texturePath);
         uvTexture.file.set_value(assetPath);
         
@@ -2095,9 +2101,9 @@ void USDZExporter::HandleExternalTexture(const std::string& texPath, tinyusdz::U
     
     std::string sanitizedFilename = SanitizeFilename(filename);
     
-    // Set asset path for the texture with ./ prefix for USDA/USDZ compatibility
-    // Apple's files reference textures with ./ prefix for iOS Quick Look compatibility
-    std::string texturePath = "./" + sanitizedFilename;
+    // Set asset path for the texture with textures/ subdirectory for USDA/USDZ compatibility
+    // Apple's files reference textures with ./textures/ prefix for iOS Quick Look compatibility
+    std::string texturePath = "./textures/" + sanitizedFilename;
     tinyusdz::value::AssetPath assetPath(texturePath);
     uvTexture.file.set_value(assetPath);
     
@@ -3432,18 +3438,27 @@ void USDZExporter::WriteTextureFilesAlongsideMainFile(const std::string& mainFil
         return;
     }
     
-    // Extract directory from main filename (Apple's pattern - textures alongside main file)
+    // Extract directory from main filename and create textures subdirectory
     std::string outputDir;
     size_t lastSlash = mainFilename.find_last_of("/\\");
     if (lastSlash != std::string::npos) {
         outputDir = mainFilename.substr(0, lastSlash + 1);
     }
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Writing " + ai_to_string(mTexturesToWrite.size()) + " texture files alongside main file");
+    // Create textures subdirectory (following Apple's USDZ pattern)
+    std::string texturesDir = outputDir + "textures/";
+    
+    // Create directory if it doesn't exist (using portable method)
+    if (!CreateTexturesDirectory(texturesDir)) {
+        ReportError("Failed to create textures directory: " + texturesDir);
+        return;
+    }
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Writing " + ai_to_string(mTexturesToWrite.size()) + " texture files to textures subdirectory");
     
     for (const auto& textureToWrite : mTexturesToWrite) {
         try {
-            std::string outputPath = outputDir + textureToWrite.sanitizedFilename;
+            std::string outputPath = texturesDir + textureToWrite.sanitizedFilename;
             
             if (textureToWrite.isEmbedded) {
                 // Write embedded texture from aiScene->mTextures (like glTF2 buffer writing)
@@ -3739,6 +3754,105 @@ void USDZExporter::ReportError(const std::string& message) {
 void USDZExporter::ReportWarning(const std::string& message) {
     mWarnings.push_back(message);
     ASSIMP_LOG_WARN("USDZExporter: " + message);
+}
+
+// ------------------------------------------------------------------------------------------------  
+// Create textures directory with proper cross-platform support
+bool USDZExporter::CreateTexturesDirectory(const std::string& dirPath) {
+    // Use IOSystem if available for cross-platform directory creation
+    if (mIOSystem) {
+        // Note: The default IOSystem::CreateDirectory has inverted logic, so we need to work around it
+        bool result = mIOSystem->CreateDirectory(dirPath);
+        
+        // If creation failed, check if directory already exists
+        if (!result && mIOSystem->Exists(dirPath.c_str())) {
+            return true; // Directory already exists, that's fine
+        }
+        
+        return result;
+    }
+    
+    // Fallback: use system-specific directory creation with correct return logic
+    #ifdef _WIN32
+        return CreateDirectoryA(dirPath.c_str(), NULL) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+    #else
+        return mkdir(dirPath.c_str(), 0755) == 0 || errno == EEXIST;
+    #endif
+}
+
+// ------------------------------------------------------------------------------------------------  
+// Generate descriptive texture names based on usage context and material analysis
+std::string USDZExporter::GenerateDescriptiveTextureName(int textureIndex, const std::string& baseTextureName) {
+    // If we already have a good filename, use it
+    if (!baseTextureName.empty() && baseTextureName.find("embedded_texture_") != 0) {
+        return baseTextureName;
+    }
+    
+    // Analyze material usage to generate descriptive names like the reference USDZ
+    // We need to track which texture indices are used for which purposes
+    static std::map<int, std::string> textureUsageMap;
+    
+    // First pass: collect texture usage information from materials
+    if (textureUsageMap.empty() && mScene && mScene->mNumMaterials > 0) {
+        for (unsigned int matIdx = 0; matIdx < mScene->mNumMaterials; ++matIdx) {
+            const aiMaterial* material = mScene->mMaterials[matIdx];
+            if (!material) continue;
+            
+            aiString texPath;
+            
+            // Check each texture type and map to descriptive names
+            if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == aiReturn_SUCCESS ||
+                material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == aiReturn_SUCCESS) {
+                std::string path(texPath.C_Str());
+                if (path.length() > 0 && path[0] == '*') {
+                    int idx = std::stoi(path.substr(1));
+                    textureUsageMap[idx] = "Default_albedo";
+                }
+            }
+            
+            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == aiReturn_SUCCESS) {
+                std::string path(texPath.C_Str());
+                if (path.length() > 0 && path[0] == '*') {
+                    int idx = std::stoi(path.substr(1));
+                    textureUsageMap[idx] = "Default_normal";
+                }
+            }
+            
+            if (material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == aiReturn_SUCCESS ||
+                material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == aiReturn_SUCCESS) {
+                std::string path(texPath.C_Str());
+                if (path.length() > 0 && path[0] == '*') {
+                    int idx = std::stoi(path.substr(1));
+                    textureUsageMap[idx] = "Default_metalRoughness";
+                }
+            }
+            
+            if (material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == aiReturn_SUCCESS ||
+                material->GetTexture(aiTextureType_LIGHTMAP, 0, &texPath) == aiReturn_SUCCESS) {
+                std::string path(texPath.C_Str());
+                if (path.length() > 0 && path[0] == '*') {
+                    int idx = std::stoi(path.substr(1));
+                    textureUsageMap[idx] = "Default_AO";
+                }
+            }
+            
+            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == aiReturn_SUCCESS) {
+                std::string path(texPath.C_Str());
+                if (path.length() > 0 && path[0] == '*') {
+                    int idx = std::stoi(path.substr(1));
+                    textureUsageMap[idx] = "Default_emissive";
+                }
+            }
+        }
+    }
+    
+    // Return descriptive name if we found usage, otherwise fallback to generic
+    auto it = textureUsageMap.find(textureIndex);
+    if (it != textureUsageMap.end()) {
+        return it->second;
+    }
+    
+    return "embedded_texture_" + ai_to_string(textureIndex);
 }
 
 // ------------------------------------------------------------------------------------------------

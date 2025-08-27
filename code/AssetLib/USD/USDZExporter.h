@@ -215,6 +215,12 @@ private:
     // Error handling
     void ReportError(const std::string& message);
     void ReportWarning(const std::string& message);
+    
+    // Directory utilities
+    bool CreateTexturesDirectory(const std::string& dirPath);
+    
+    // Texture naming utilities  
+    std::string GenerateDescriptiveTextureName(int textureIndex, const std::string& baseTextureName);
 
     // Core members
     std::unique_ptr<tinyusdz::Stage> mStage;
