@@ -1483,6 +1483,51 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         surface.diffuseColor.set_value(color);
     }
     
+    // Specular workflow detection - check for specular factor, glossiness factor, or specular color
+    float specularFactor = 1.0f;
+    float glossinessFactor = 1.0f;
+    aiColor3D specularColor(1.0f, 1.0f, 1.0f);
+    
+    bool hasSpecularFactor = mat->Get(AI_MATKEY_SPECULAR_FACTOR, specularFactor) == AI_SUCCESS;
+    bool hasGlossinessFactor = mat->Get(AI_MATKEY_GLOSSINESS_FACTOR, glossinessFactor) == AI_SUCCESS;
+    bool hasSpecularColor = mat->Get(AI_MATKEY_COLOR_SPECULAR, specularColor) == AI_SUCCESS;
+    
+    // Use specular workflow if any specular-related properties are present
+    if (hasSpecularFactor || hasGlossinessFactor || hasSpecularColor) {
+        surface.useSpecularWorkflow.set_value(1);
+        
+        // Set specular color (either from material or computed from factor)
+        if (hasSpecularColor) {
+            if (hasSpecularFactor) {
+                // Apply specular factor scaling to specular color
+                tinyusdz::value::color3f scaledSpecular{
+                    specularColor.r * specularFactor,
+                    specularColor.g * specularFactor, 
+                    specularColor.b * specularFactor
+                };
+                surface.specularColor.set_value(scaledSpecular);
+            } else {
+                // Use specular color as-is
+                tinyusdz::value::color3f color{specularColor.r, specularColor.g, specularColor.b};
+                surface.specularColor.set_value(color);
+            }
+        } else if (hasSpecularFactor) {
+            // Use grayscale specular factor if no color is available
+            tinyusdz::value::color3f grayscaleSpecular{specularFactor, specularFactor, specularFactor};
+            surface.specularColor.set_value(grayscaleSpecular);
+        }
+        
+        // Convert glossiness to roughness if available (roughness = 1 - glossiness)
+        if (hasGlossinessFactor) {
+            float roughnessFromGlossiness = 1.0f - glossinessFactor;
+            surface.roughness.set_value(roughnessFromGlossiness);
+            ASSIMP_LOG_DEBUG("USDZExporter: Converted glossiness to roughness: " + std::to_string(roughnessFromGlossiness));
+        }
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Set specular workflow - specularFactor: " + std::to_string(specularFactor) + 
+                        ", glossinessFactor: " + std::to_string(glossinessFactor));
+    }
+    
     // Metallic factor
     float metallic = 0.0f;
     if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS) {
@@ -1502,9 +1547,22 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         }
     }
     
-    // Emissive color
+    // Emissive color with intensity support
     aiColor3D emissive(0.0f, 0.0f, 0.0f);
-    if (mat->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS) {
+    float emissiveIntensity = 1.0f;
+    
+    bool hasEmissiveColor = mat->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS;
+    bool hasEmissiveIntensity = mat->Get(AI_MATKEY_EMISSIVE_INTENSITY, emissiveIntensity) == AI_SUCCESS;
+    
+    if (hasEmissiveColor || hasEmissiveIntensity) {
+        // Apply intensity scaling to emissive color
+        if (hasEmissiveIntensity && emissiveIntensity != 1.0f) {
+            emissive.r *= emissiveIntensity;
+            emissive.g *= emissiveIntensity;
+            emissive.b *= emissiveIntensity;
+            ASSIMP_LOG_DEBUG("USDZExporter: Applied emissive intensity: " + std::to_string(emissiveIntensity));
+        }
+        
         tinyusdz::value::color3f color{emissive.r, emissive.g, emissive.b};
         surface.emissiveColor.set_value(color);
     }
@@ -1522,14 +1580,30 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         ASSIMP_LOG_DEBUG("USDZExporter: Set opacity threshold for masked transparency: " + std::to_string(opacityThreshold));
     }
     
+    // Opacity mode (USD 2.6 feature for transparent vs presence modes) 
+    // Check if material has transparency requirements
+    if (opacity < 1.0f || opacityThreshold > 0.0f) {
+        // Check if material should use "presence" mode (fully transparent materials receive no lighting)
+        // vs "transparent" mode (fully transparent materials still receive specular reflection)
+        if (opacity == 0.0f) {
+            // For fully transparent materials, use "presence" mode to disable lighting response
+            surface.opacityMode.set_value(tinyusdz::UsdPreviewSurface::OpacityMode::Presence);
+            ASSIMP_LOG_DEBUG("USDZExporter: Set opacity mode to 'presence' for fully transparent material");
+        } else {
+            // For partially transparent materials, use "transparent" mode (default behavior)
+            surface.opacityMode.set_value(tinyusdz::UsdPreviewSurface::OpacityMode::Transparent);
+            ASSIMP_LOG_DEBUG("USDZExporter: Set opacity mode to 'transparent' for partially transparent material");
+        }
+    }
+    
     // IOR (Index of Refraction)
     float ior = 1.5f;
     if (mat->Get(AI_MATKEY_REFRACTI, ior) == AI_SUCCESS) {
         surface.ior.set_value(ior);
     }
     
-    // Set useSpecularWorkflow to 0 (metallic workflow) - matches reference
-    surface.useSpecularWorkflow.set_value(0);
+    // Note: useSpecularWorkflow is now set dynamically based on material properties above
+    // Default metallic workflow (useSpecularWorkflow = 0) unless specular properties are detected
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1575,9 +1649,20 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected diffuse texture: " + std::string(texturePath.C_Str()));
     }
     
-    // Normal texture
-    if (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS) {
+    // Normal texture (with fallbacks for different normal map slots)
+    if (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS ||
+        mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS) {
+        
+        bool isHeightMap = (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) != AI_SUCCESS && 
+                           mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS);
+        
         tinyusdz::UsdUVTexture normalTexture = CreateUVTexture(texturePath.C_Str(), "normal");
+        
+        if (isHeightMap) {
+            // Height maps need different processing - they represent displacement values
+            // For now, we'll treat them as normal maps but note the difference
+            ASSIMP_LOG_DEBUG("USDZExporter: Using height map as normal map (may require special processing)");
+        }
         
         // Set proper bias and scale for normal maps as per USD specification
         // For 8-bit normal maps: bias=(-1,-1,-1,0), scale=(2,2,2,1)
@@ -1594,11 +1679,19 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected normal texture: " + std::string(texturePath.C_Str()));
     }
     
-    // Metallic texture (only create connection if metallic factor > 0)
+    // Check for packed metallic-roughness texture (glTF format) - will be handled comprehensively later
+    bool hasPackedMetallicRoughness = false;
+    aiString packedTexturePath;
+    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &packedTexturePath) == AI_SUCCESS) {
+        hasPackedMetallicRoughness = true;
+    }
+    
+    // Metallic texture (check for separate metallic texture first)
     float currentMetallic = 0.0f;
     mat->Get(AI_MATKEY_METALLIC_FACTOR, currentMetallic);
     
     if (mat->GetTexture(aiTextureType_METALNESS, 0, &texturePath) == AI_SUCCESS && currentMetallic > 0.0f) {
+        // Use dedicated metallic texture - this takes priority over packed textures
         tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(texturePath.C_Str(), "metallic");
         
         std::string texShaderPath = mCurrentMaterialPath + "/metallic";
@@ -1608,12 +1701,50 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         
         mCurrentMaterialTextureShaders.push_back(std::make_pair("metallic", metallicTexture));
         
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected metallic texture: " + std::string(texturePath.C_Str()));
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate metallic texture: " + std::string(texturePath.C_Str()));
+    } else if (hasPackedMetallicRoughness && currentMetallic > 0.0f) {
+        // Fall back to packed texture only if no dedicated metallic texture exists
+        tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(packedTexturePath.C_Str(), "metallic");
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallic", metallicTexture));
+        
+        std::string metallicShaderPath = mCurrentMaterialPath + "/metallic";
+        tinyusdz::Path metallicConnPath(metallicShaderPath, "outputs:b");
+        surface.metallic.set_connection(metallicConnPath);
+        surface.metallic.set_value_empty();
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected metallic from packed texture (blue channel): " + std::string(packedTexturePath.C_Str()));
     }
     
-    // Roughness texture
-    if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) == AI_SUCCESS) {
+    // Specular texture (for specular workflow materials)
+    float currentSpecularFactor = 1.0f;
+    mat->Get(AI_MATKEY_SPECULAR_FACTOR, currentSpecularFactor);
+    
+    if (mat->GetTexture(aiTextureType_SPECULAR, 0, &texturePath) == AI_SUCCESS && currentSpecularFactor > 0.0f) {
+        tinyusdz::UsdUVTexture specularTexture = CreateUVTexture(texturePath.C_Str(), "specularColor");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/specularColor";
+        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
+        surface.specularColor.set_connection(connPath);
+        surface.specularColor.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("specularColor", specularTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected specular color texture: " + std::string(texturePath.C_Str()));
+    }
+    
+    // Roughness texture (check for separate roughness texture first)
+    if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) == AI_SUCCESS ||
+        mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS) {
+        // Use dedicated roughness texture - this takes priority over packed textures
         tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(texturePath.C_Str(), "roughness");
+        
+        // If using shininess texture, we need to invert it (roughness = 1 - glossiness)
+        if (mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS && 
+            mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) != AI_SUCCESS) {
+            // Set scale and bias to convert glossiness to roughness: roughness = 1 - glossiness
+            roughnessTexture.scale.set_value(tinyusdz::value::float4{-1.0f, -1.0f, -1.0f, 1.0f});
+            roughnessTexture.bias.set_value(tinyusdz::value::float4{1.0f, 1.0f, 1.0f, 0.0f});
+            ASSIMP_LOG_DEBUG("USDZExporter: Converting shininess/glossiness texture to roughness");
+        }
         
         std::string texShaderPath = mCurrentMaterialPath + "/roughness";
         tinyusdz::Path connPath(texShaderPath, "outputs:g"); // Use green channel for roughness (matches reference)
@@ -1622,11 +1753,23 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         
         mCurrentMaterialTextureShaders.push_back(std::make_pair("roughness", roughnessTexture));
         
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected roughness texture: " + std::string(texturePath.C_Str()));
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate roughness texture: " + std::string(texturePath.C_Str()));
+    } else if (hasPackedMetallicRoughness) {
+        // Fall back to packed texture only if no dedicated roughness texture exists
+        tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(packedTexturePath.C_Str(), "roughness");
+        
+        std::string roughnessShaderPath = mCurrentMaterialPath + "/roughness";
+        tinyusdz::Path roughnessConnPath(roughnessShaderPath, "outputs:g");
+        surface.roughness.set_connection(roughnessConnPath);
+        surface.roughness.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("roughness", roughnessTexture));
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected roughness from packed texture (green channel): " + std::string(packedTexturePath.C_Str()));
     }
     
-    // Emissive texture
-    if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &texturePath) == AI_SUCCESS) {
+    // Emissive texture (with fallback to emission color)
+    if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &texturePath) == AI_SUCCESS ||
+        mat->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture emissiveTexture = CreateUVTexture(texturePath.C_Str(), "emissiveColor");
         
         std::string texShaderPath = mCurrentMaterialPath + "/emissiveColor";
@@ -1639,8 +1782,9 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected emissive texture: " + std::string(texturePath.C_Str()));
     }
     
-    // Ambient occlusion texture
+    // Ambient occlusion texture (check for separate AO texture first)
     if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
+        // Use dedicated AO texture - this takes priority over packed textures
         tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
         
         std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
@@ -1650,21 +1794,31 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         
         mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
         
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture: " + std::string(texturePath.C_Str()));
-    } else {
-        // Check for lightmap texture (some glTF importers classify AO textures as lightmaps)  
-        if (mat->GetTexture(aiTextureType_LIGHTMAP, 0, &texturePath) == AI_SUCCESS) {
-            tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
-            
-            std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
-            tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
-            surface.occlusion.set_connection(connPath);
-            surface.occlusion.set_value_empty();
-            
-            mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
-            
-            ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture from lightmap slot: " + std::string(texturePath.C_Str()));
-        }
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate occlusion texture: " + std::string(texturePath.C_Str()));
+    } else if (mat->GetTexture(aiTextureType_LIGHTMAP, 0, &texturePath) == AI_SUCCESS) {
+        // Check for lightmap texture (glTF importers often classify AO textures as lightmaps)
+        // This takes priority over packed textures since it's a dedicated AO map
+        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
+        
+        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
+        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
+        surface.occlusion.set_connection(connPath);
+        surface.occlusion.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture from lightmap slot: " + std::string(texturePath.C_Str()));
+    } else if (hasPackedMetallicRoughness) {
+        // Fall back to packed texture only if no dedicated AO texture exists
+        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(packedTexturePath.C_Str(), "occlusion");
+        
+        std::string occlusionShaderPath = mCurrentMaterialPath + "/occlusion";
+        tinyusdz::Path occlusionConnPath(occlusionShaderPath, "outputs:r");
+        surface.occlusion.set_connection(occlusionConnPath);
+        surface.occlusion.set_value_empty();
+        
+        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
+        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion from packed texture (red channel): " + std::string(packedTexturePath.C_Str()));
     }
     
     // Clearcoat texture
@@ -1742,104 +1896,25 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected specular texture (switched to specular workflow): " + std::string(texturePath.C_Str()));
     }
     
-    // Packed glTF metallic-roughness texture (only if individual textures are not available)
+    // Packed metallic-roughness handling is now done in individual sections above
+    
+    // Additional fallback: Alternative emissive color texture (handled above with emissive texture section already)
+    
+    // Advanced PBR textures - Note: These are NOT directly supported by UsdPreviewSurface
+    // Per USD specification, we should only write valid USD Preview Surface properties
+    
+    // Log warnings for unsupported texture types that would create invalid USD files
     aiString tempPath;
-    bool hasIndividualMetallic = (mat->GetTexture(aiTextureType_METALNESS, 0, &tempPath) == AI_SUCCESS && currentMetallic > 0.0f);
-    bool hasIndividualRoughness = (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &tempPath) == AI_SUCCESS);
-    
-    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &texturePath) == AI_SUCCESS &&
-        !(hasIndividualMetallic || hasIndividualRoughness)) {
-        
-        tinyusdz::UsdUVTexture metallicRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "metallicRoughness");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/metallicRoughness";
-        
-        // Metallic from blue channel, roughness from green channel (glTF spec)
-        tinyusdz::Path metallicConnPath(texShaderPath, "outputs:b");
-        tinyusdz::Path roughnessConnPath(texShaderPath, "outputs:g");
-        
-        surface.metallic.set_connection(metallicConnPath);
-        surface.metallic.set_value_empty();
-        surface.roughness.set_connection(roughnessConnPath);
-        surface.roughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallicRoughness", metallicRoughnessTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected packed metallic-roughness texture: " + std::string(texturePath.C_Str()));
-    } else if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &texturePath) == AI_SUCCESS &&
-              (hasIndividualMetallic || hasIndividualRoughness)) {
-        // Still create the packed texture shader for compatibility but don't override individual connections
-        tinyusdz::UsdUVTexture metallicRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "metallicRoughness");
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallicRoughness", metallicRoughnessTexture));
-        ASSIMP_LOG_DEBUG("USDZExporter: Created packed metallic-roughness texture shader but prioritizing individual textures");
+    if (mat->GetTexture(aiTextureType_SHEEN, 0, &tempPath) == AI_SUCCESS) {
+        ASSIMP_LOG_WARN("USDZExporter: Sheen texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
     }
     
-    // Alternative emissive color texture
-    if (mat->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture emissionTexture = CreateUVTexture(texturePath.C_Str(), "emissionColor");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/emissionColor";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.emissiveColor.set_connection(connPath);
-        surface.emissiveColor.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("emissionColor", emissionTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected emission color texture: " + std::string(texturePath.C_Str()));
+    if (mat->GetTexture(aiTextureType_TRANSMISSION, 0, &tempPath) == AI_SUCCESS) {
+        ASSIMP_LOG_WARN("USDZExporter: Transmission texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
     }
     
-    // Shininess texture (convert to roughness: roughness ≈ sqrt(2.0 / (shininess + 2.0)))
-    if (mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture shininessTexture = CreateUVTexture(texturePath.C_Str(), "shininess");
-        
-        // Note: This requires custom conversion shader in a complete implementation
-        // For now, we'll connect it directly and let the renderer handle conversion
-        std::string texShaderPath = mCurrentMaterialPath + "/shininess";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
-        surface.roughness.set_connection(connPath);
-        surface.roughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("shininess", shininessTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected shininess texture (as roughness): " + std::string(texturePath.C_Str()));
-    }
-    
-    // Advanced PBR textures (not directly supported by UsdPreviewSurface, use approximations)
-    
-    // Sheen texture → approximate with emissive color boost
-    if (mat->GetTexture(aiTextureType_SHEEN, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture sheenTexture = CreateUVTexture(texturePath.C_Str(), "sheen");
-        
-        // Fallback: blend with emissive color (approximation)
-        std::string texShaderPath = mCurrentMaterialPath + "/sheen";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        // Note: Proper sheen requires MaterialX or custom shader
-        surface.emissiveColor.set_connection(connPath);
-        surface.emissiveColor.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("sheen", sheenTexture));
-        
-        ASSIMP_LOG_WARN("USDZExporter: Sheen texture approximated as emissive (full sheen requires MaterialX): " + std::string(texturePath.C_Str()));
-    }
-    
-    // Transmission texture → approximate with opacity inversion
-    if (mat->GetTexture(aiTextureType_TRANSMISSION, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture transmissionTexture = CreateUVTexture(texturePath.C_Str(), "transmission");
-        
-        // Fallback: use as opacity (approximation for glass/translucent materials)
-        std::string texShaderPath = mCurrentMaterialPath + "/transmission";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
-        surface.opacity.set_connection(connPath);
-        surface.opacity.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("transmission", transmissionTexture));
-        
-        ASSIMP_LOG_WARN("USDZExporter: Transmission texture approximated as opacity (full transmission requires MaterialX): " + std::string(texturePath.C_Str()));
-    }
-    
-    // Anisotropy texture → not supported, log warning
-    if (mat->GetTexture(aiTextureType_ANISOTROPY, 0, &texturePath) == AI_SUCCESS) {
-        ASSIMP_LOG_WARN("USDZExporter: Anisotropy texture not supported by UsdPreviewSurface, skipping: " + std::string(texturePath.C_Str()));
+    if (mat->GetTexture(aiTextureType_ANISOTROPY, 0, &tempPath) == AI_SUCCESS) {
+        ASSIMP_LOG_WARN("USDZExporter: Anisotropy texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
     }
     
     // Maya-specific textures → map to equivalent PBR properties where possible
@@ -1910,15 +1985,9 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
     // Add source color space (Apple's pattern)
     AddSourceColorSpace(uvTexture, paramName);
     
-    // UV coordinates will be connected to stTransform.outputs:result in NodeGraph structure
-    // This connection will be set when building the NodeGraph
-    
-    // Set wrap modes (Apple's pattern)
+    // Set wrap modes (Apple's pattern - default to repeat)
     uvTexture.wrapS.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
     uvTexture.wrapT.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
-    
-    // Note: NOT setting fallback on UsdUVTexture object to avoid color4f type issues
-    // Will be handled by explicit shader property with correct float4 type
     
     // Add appropriate outputs (Apple's pattern)
     AddTextureOutputs(uvTexture, paramName);
@@ -1927,7 +1996,7 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
 }
 
 // ------------------------------------------------------------------------------------------------
-// Convert texture using proper tinyusdz APIs
+// Convert texture using proper tinyusdz APIs  
 void USDZExporter::ConvertTexture(const aiMaterial* mat, aiTextureType type, 
                                  tinyusdz::UsdUVTexture& uvTexture) {
     if (!mat) return;
@@ -1945,6 +2014,7 @@ void USDZExporter::ConvertTexture(const aiMaterial* mat, aiTextureType type,
         HandleExternalTexture(texPath, uvTexture);
     }
 }
+
 
 // ------------------------------------------------------------------------------------------------
 // Handle embedded texture using tinyusdz APIs
