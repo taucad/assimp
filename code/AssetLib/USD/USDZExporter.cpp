@@ -1719,21 +1719,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         ASSIMP_LOG_DEBUG("USDZExporter: Connected emissive texture: " + std::string(texturePath.C_Str()));
     }
     
-    // Occlusion texture (ambient occlusion)
-    if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
-        surface.occlusion.set_connection(connPath);
-        surface.occlusion.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Occlusion texture
+    // Ambient occlusion texture
     if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
         tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
         
