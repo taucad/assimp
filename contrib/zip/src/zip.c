@@ -1107,8 +1107,18 @@ static int _zip_entry_open(struct zip_t *zip, const char *entryname,
   zip->entry.external_attr = 0;
 #endif
 
-  num_alignment_padding_bytes =
-      mz_zip_writer_compute_padding_needed_for_file_alignment(pzip);
+  // For USDZ: disable miniz's automatic archive alignment - USD expects consecutive entries
+  if (pzip->m_file_offset_alignment == 64) {
+    num_alignment_padding_bytes = 0;  // CRITICAL: USD parser can't handle archive-level gaps
+  } else {
+    num_alignment_padding_bytes =
+        mz_zip_writer_compute_padding_needed_for_file_alignment(pzip);
+  }
+
+  // Debug alignment calculation (comment out for production)
+  // printf("DEBUG: zip_entry_open alignment - file: %s, current_offset: %llu, alignment: %llu, padding: %u\n",
+  //        entryname, (unsigned long long)zip->entry.dir_offset, 
+  //        (unsigned long long)pzip->m_file_offset_alignment, num_alignment_padding_bytes);
 
   if (!pzip->m_pState || (pzip->m_zip_mode != MZ_ZIP_MODE_WRITING)) {
     // Invalid zip mode
@@ -1140,11 +1150,42 @@ static int _zip_entry_open(struct zip_t *zip, const char *entryname,
       extra_data, NULL, NULL,
       (local_dir_header_ofs >= MZ_UINT32_MAX) ? &local_dir_header_ofs : NULL);
 
+  // USDZ 64-byte alignment: simple approach to avoid size mismatches
+  if (pzip->m_file_offset_alignment == 64) {
+    // Calculate where data will start
+    size_t dataOffset = local_dir_header_ofs + 30 + entrylen + extra_size;
+    size_t remainder = dataOffset % 64;
+    
+    if (remainder != 0) {
+      // Only add small alignment padding to avoid size issues
+      size_t needed = 64 - remainder;
+      if (needed >= 4 && needed <= 20 && (extra_size + needed <= MZ_ZIP64_MAX_CENTRAL_EXTRA_FIELD_SIZE)) {
+        // Add minimal padding via extra field
+        extra_data[extra_size] = 0x86; // OpenUSD ID
+        extra_data[extra_size + 1] = 0x19;
+        extra_data[extra_size + 2] = (mz_uint8)((needed - 4) & 0xFF);
+        extra_data[extra_size + 3] = (mz_uint8)(((needed - 4) >> 8) & 0xFF);
+        memset(&extra_data[extra_size + 4], 0, needed - 4);
+        extra_size += needed;
+      }
+    }
+  }
+
+  // For USDZ compatibility, match OpenUSD's SdfZipFileWriter exactly
+  // OpenUSD zipFile.cpp line 1018: h.f.bits = 0 (NO FLAGS AT ALL)
+  mz_uint16 bit_flags = 0;  // OpenUSD uses NO flags for USDZ files
+  if (pzip->m_file_offset_alignment != 64) {
+    // Only use UTF8 and data descriptors for non-USDZ archives
+    bit_flags = MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_UTF8 | MZ_ZIP_LDH_BIT_FLAG_HAS_LOCATOR;
+  }
+  
+  // printf("DEBUG: zip_entry_open flags - alignment: %llu, bit_flags: 0x%x (should be 0x0000 for USDZ)\n",
+  //        (unsigned long long)pzip->m_file_offset_alignment, bit_flags);
+  
   if (!mz_zip_writer_create_local_dir_header(
           pzip, zip->entry.header, (mz_uint16) entrylen, (mz_uint16)extra_size, 0, 0, 0,
           zip->entry.method,
-          MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_UTF8 |
-              MZ_ZIP_LDH_BIT_FLAG_HAS_LOCATOR,
+          bit_flags,
           dos_time, dos_date)) {
     // Cannot create zip entry header
     err = ZIP_EMEMSET;
@@ -1955,4 +1996,263 @@ int zip_extract(const char *zipname, const char *dir,
   }
 
   return zip_archive_extract(&zip_archive, dir, on_extract, arg);
+}
+
+struct zip_t *zip_open_with_alignment(const char *zipname, int level, char mode, size_t alignment) {
+  struct zip_t *zip = NULL;
+
+  if (!zipname || strlen(zipname) < 1) {
+    return NULL;
+  }
+
+  // Validate alignment is power of 2
+  if (alignment != 0 && (alignment & (alignment - 1)) != 0) {
+    return NULL;
+  }
+
+  if (!(zip = (struct zip_t *)calloc((size_t)1, sizeof(struct zip_t)))) {
+    return NULL;
+  }
+
+  zip->level = (mz_uint)level;
+  
+  // Set alignment BEFORE initialization (critical for USDZ)
+  if (alignment != 0) {
+    zip->archive.m_file_offset_alignment = alignment;
+    
+
+  }
+
+  switch (mode) {
+  case 'w':
+    // Create a new archive with alignment already set
+    if (!mz_zip_writer_init_file_v2(&(zip->archive), zipname, 0,
+                                    MZ_ZIP_FLAG_WRITE_ZIP64)) {
+      goto cleanup;
+    }
+    break;
+
+  default:
+    // Only support write mode for alignment
+    goto cleanup;
+  }
+
+  return zip;
+
+cleanup:
+  if (zip) {
+    free(zip);
+  }
+  return NULL;
+}
+
+int zip_set_file_alignment(struct zip_t *zip, size_t alignment) {
+  if (!zip) {
+    return ZIP_ENOINIT;
+  }
+
+  // Validate alignment is power of 2
+  if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+    return ZIP_EINVMODE;
+  }
+
+  // Set alignment on underlying miniz archive
+  zip->archive.m_file_offset_alignment = alignment;
+
+  return 0;
+}
+
+int zip_patch_local_header_size(struct zip_t *zip, uint64_t header_offset, size_t file_size) {
+  mz_zip_archive *pzip = NULL;
+  mz_uint64 header_pos;
+  mz_uint8 size_bytes[4];
+  
+  if (!zip) {
+    return ZIP_ENOINIT;
+  }
+
+  pzip = &(zip->archive);
+  if (pzip->m_zip_mode != MZ_ZIP_MODE_WRITING) {
+    return ZIP_EINVMODE;
+  }
+
+  // Update the local header with the actual file size (AFTER writing is complete)
+  // This preserves CRC integrity while ensuring tinyusdz can read file sizes
+  
+  // The uncompressed size is at offset 22 in the local header
+  header_pos = header_offset + 22;
+  
+  // Write the uncompressed size (little-endian)
+  MZ_WRITE_LE32(size_bytes, (mz_uint32)file_size);
+  
+  if (pzip->m_pWrite(pzip->m_pIO_opaque, header_pos, size_bytes, 4) != 4) {
+    return ZIP_EWRTHDR;
+  }
+  
+  // Also update compressed size at offset 18 (same as uncompressed for USDZ)
+  header_pos = header_offset + 18;
+  if (pzip->m_pWrite(pzip->m_pIO_opaque, header_pos, size_bytes, 4) != 4) {
+    return ZIP_EWRTHDR;
+  }
+
+  return 0;
+}
+
+uint64_t zip_entry_get_header_offset(struct zip_t *zip) {
+  if (!zip) {
+    return 0;
+  }
+  
+  return zip->entry.header_offset;
+}
+
+int zip_entry_close_usd_compatible(struct zip_t *zip) {
+  mz_zip_archive *pzip = NULL;
+  mz_uint level;
+  tdefl_status done;
+  mz_uint16 entrylen;
+  mz_uint16 dos_time = 0, dos_date = 0;
+  int err = 0;
+  mz_uint8 *pExtra_data = NULL;
+  mz_uint32 extra_size = 0;
+  mz_uint8 extra_data[MZ_ZIP64_MAX_CENTRAL_EXTRA_FIELD_SIZE];
+
+  if (!zip) {
+    // zip_t handler is not initialized
+    err = ZIP_ENOINIT;
+    goto cleanup;
+  }
+
+  pzip = &(zip->archive);
+  if (pzip->m_zip_mode == MZ_ZIP_MODE_READING) {
+    goto cleanup;
+  }
+
+  level = zip->level & 0xF;
+  if (level) {
+    done = tdefl_compress_buffer(&(zip->entry.comp), "", 0, TDEFL_FINISH);
+    if (done != TDEFL_STATUS_DONE && done != TDEFL_STATUS_OKAY) {
+      // Cannot flush compressed buffer
+      err = ZIP_ETDEFLBUF;
+      goto cleanup;
+    }
+    zip->entry.comp_size = zip->entry.state.m_comp_size;
+    zip->entry.dir_offset = zip->entry.state.m_cur_archive_file_ofs;
+    zip->entry.method = MZ_DEFLATED;
+  }
+  
+          // For USDZ compatibility: Update local header with correct flags and sizes (since no data descriptors)
+        if (pzip->m_file_offset_alignment == 64) {
+          // First, patch the version to match OpenUSD (version 10)
+          mz_uint64 local_header_version_ofs = zip->entry.header_offset + 4;
+          mz_uint8 version_bytes[2] = {10, 0}; // Version 10 like OpenUSD
+          if (pzip->m_pWrite(pzip->m_pIO_opaque, local_header_version_ofs, version_bytes, 2) != 2) {
+            err = ZIP_EWRTHDR;
+            goto cleanup;
+          }
+          
+          // Then, patch the flags to remove data descriptor flag
+          mz_uint64 local_header_flags_ofs = zip->entry.header_offset + 6;
+          mz_uint8 flags_bytes[2] = {0, 0}; // No flags like OpenUSD
+          if (pzip->m_pWrite(pzip->m_pIO_opaque, local_header_flags_ofs, flags_bytes, 2) != 2) {
+            err = ZIP_EWRTHDR;
+            goto cleanup;
+          }
+          
+          // Calculate file offsets for patching the local header
+          mz_uint64 local_header_crc32_ofs = zip->entry.header_offset + 14;
+    mz_uint64 local_header_comp_size_ofs = zip->entry.header_offset + 18;
+    mz_uint64 local_header_uncomp_size_ofs = zip->entry.header_offset + 22;
+    
+    // Patch local header with correct CRC32 and sizes (no data descriptors)
+    
+    // Write CRC32 to local header (4 bytes, little endian)
+    mz_uint8 crc32_bytes[4];
+    crc32_bytes[0] = (mz_uint8)(zip->entry.uncomp_crc32 & 0xFF);
+    crc32_bytes[1] = (mz_uint8)((zip->entry.uncomp_crc32 >> 8) & 0xFF);
+    crc32_bytes[2] = (mz_uint8)((zip->entry.uncomp_crc32 >> 16) & 0xFF);
+    crc32_bytes[3] = (mz_uint8)((zip->entry.uncomp_crc32 >> 24) & 0xFF);
+    
+    if (pzip->m_pWrite(pzip->m_pIO_opaque, local_header_crc32_ofs, crc32_bytes, 4) != 4) {
+      err = ZIP_EWRTHDR;
+      goto cleanup;
+    }
+    
+    // Write compressed size to local header (4 bytes, little endian)
+    mz_uint8 comp_size_bytes[4];
+    comp_size_bytes[0] = (mz_uint8)(zip->entry.comp_size & 0xFF);
+    comp_size_bytes[1] = (mz_uint8)((zip->entry.comp_size >> 8) & 0xFF);
+    comp_size_bytes[2] = (mz_uint8)((zip->entry.comp_size >> 16) & 0xFF);
+    comp_size_bytes[3] = (mz_uint8)((zip->entry.comp_size >> 24) & 0xFF);
+    
+    if (pzip->m_pWrite(pzip->m_pIO_opaque, local_header_comp_size_ofs, comp_size_bytes, 4) != 4) {
+      err = ZIP_EWRTHDR;
+      goto cleanup;
+    }
+    
+    // Write uncompressed size to local header (4 bytes, little endian)  
+    mz_uint8 uncomp_size_bytes[4];
+    uncomp_size_bytes[0] = (mz_uint8)(zip->entry.uncomp_size & 0xFF);
+    uncomp_size_bytes[1] = (mz_uint8)((zip->entry.uncomp_size >> 8) & 0xFF);
+    uncomp_size_bytes[2] = (mz_uint8)((zip->entry.uncomp_size >> 16) & 0xFF);
+    uncomp_size_bytes[3] = (mz_uint8)((zip->entry.uncomp_size >> 24) & 0xFF);
+    
+    if (pzip->m_pWrite(pzip->m_pIO_opaque, local_header_uncomp_size_ofs, uncomp_size_bytes, 4) != 4) {
+      err = ZIP_EWRTHDR;
+      goto cleanup;
+    }
+  }
+
+  entrylen = (mz_uint16)strlen(zip->entry.name);
+#ifndef MINIZ_NO_TIME
+  mz_zip_time_t_to_dos_time(zip->entry.m_time, &dos_time, &dos_date);
+#endif
+
+  // Skip writing data descriptor for USD compatibility - sizes will be in central directory
+
+  pExtra_data = extra_data;
+  extra_size = mz_zip_writer_create_zip64_extra_data(
+      extra_data,
+      (zip->entry.uncomp_size >= MZ_UINT32_MAX) ? &zip->entry.uncomp_size
+                                                : NULL,
+      (zip->entry.comp_size >= MZ_UINT32_MAX) ? &zip->entry.comp_size : NULL,
+      (zip->entry.header_offset >= MZ_UINT32_MAX) ? &zip->entry.header_offset
+                                                  : NULL);
+
+  if ((entrylen) && (zip->entry.name[entrylen - 1] == '/') &&
+      !zip->entry.uncomp_size) {
+    /* Set DOS Subdirectory attribute bit. */
+    zip->entry.external_attr |= MZ_ZIP_DOS_DIR_ATTRIBUTE_BITFLAG;
+  }
+
+  // For USDZ: Use no flags (0x0000) to match OpenUSD's implementation exactly
+  // OpenUSD zipFile.cpp line 1073: h.f.bits = localHeader.bits (which is 0)
+  mz_uint16 central_dir_flags = 0;  // OpenUSD uses no flags for USDZ files
+  if (pzip->m_file_offset_alignment != 64) {
+    // Only use UTF8 flag for non-USDZ archives  
+    central_dir_flags = MZ_ZIP_GENERAL_PURPOSE_BIT_FLAG_UTF8;
+  }
+  
+  if (!mz_zip_writer_add_to_central_dir(
+          pzip, zip->entry.name, entrylen, pExtra_data, (mz_uint16)extra_size,
+          "", 0, zip->entry.uncomp_size, zip->entry.comp_size,
+          zip->entry.uncomp_crc32, zip->entry.method,
+          central_dir_flags,
+          dos_time, dos_date, zip->entry.header_offset,
+          zip->entry.external_attr, NULL, 0)) {
+    // Cannot write to zip central dir
+    err = ZIP_EWRTDIR;
+    goto cleanup;
+  }
+
+  pzip->m_total_files++;
+  // Update archive size for next entry positioning
+  pzip->m_archive_size = zip->entry.dir_offset;
+
+cleanup:
+  if (zip) {
+    zip->entry.m_time = 0;
+    CLEANUP(zip->entry.name);
+  }
+  return err;
 }

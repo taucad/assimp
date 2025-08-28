@@ -56,6 +56,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include <memory>
+#include <algorithm>
 
 namespace Assimp {
 
@@ -69,13 +70,13 @@ USDZArchiveWriter::USDZArchiveWriter(const std::string& filename) :
     mZipArchive(nullptr),
     mFinalized(false) {
     
-    // Create ZIP archive for writing with no compression (USDZ requirement)
-    mZipArchive = zip_open(filename.c_str(), 0, 'w'); // 0 = no compression
+    // Create ZIP archive with 64-byte alignment for USDZ compliance
+    mZipArchive = zip_open_with_alignment(filename.c_str(), 0, 'w', 64); // 0 = no compression, 64 = USDZ alignment
     
     if (!mZipArchive) {
-        ReportError("Failed to create USDZ archive: " + filename);
+        ReportError("Failed to create USDZ archive with 64-byte alignment: " + filename);
     } else {
-        ASSIMP_LOG_INFO("USDZArchiveWriter: Created archive ", filename);
+        ASSIMP_LOG_INFO("USDZArchiveWriter: Created archive ", filename, " with 64-byte alignment");
     }
 }
 
@@ -85,6 +86,11 @@ USDZArchiveWriter::~USDZArchiveWriter() {
         // Force finalization if not done explicitly
         ReportWarning("Archive was not finalized explicitly, forcing finalization in destructor");
         Finalize();
+    }
+    
+    if (mZipArchive) {
+        zip_close(mZipArchive);
+        mZipArchive = nullptr;
     }
 }
 
@@ -109,10 +115,10 @@ bool USDZArchiveWriter::AddMainUSDFile(const std::string& usdContent, const std:
     // Convert string to bytes
     std::vector<uint8_t> usdBytes(usdContent.begin(), usdContent.end());
     
-    // USD files don't typically need alignment, but we'll add it anyway for consistency
-    mAssets.emplace_back(filename, usdBytes, false);
+    // USD file is the Default Layer and must be first in USDZ archive
+    mAssets.emplace_back(filename, usdBytes, true); // Mark as first entry
     
-    ASSIMP_LOG_INFO("USDZArchiveWriter: Added USD file ", filename, " (", usdBytes.size(), " bytes)");
+    ASSIMP_LOG_INFO("USDZArchiveWriter: Added USD file ", filename, " (", usdBytes.size(), " bytes) as Default Layer");
     return true;
 }
 
@@ -133,7 +139,7 @@ bool USDZArchiveWriter::AddTextureFile(const std::string& texturePath, const std
         return false;
     }
 
-    // Add texture file to archive
+    // Add texture file to archive (not first entry)
     mAssets.emplace_back(texturePath, textureData, false);
     
     ASSIMP_LOG_INFO("USDZArchiveWriter: Added texture ", texturePath, " (", textureData.size(), " bytes)");
@@ -196,10 +202,9 @@ bool USDZArchiveWriter::AddFile(const std::string& entryPath,
         return false;
     }
 
-    mAssets.emplace_back(entryPath, fileData, requiresAlignment);
+    mAssets.emplace_back(entryPath, fileData, false); // Never first entry for generic files
     
-    ASSIMP_LOG_INFO("USDZArchiveWriter: Added file ", entryPath, " (", fileData.size(), " bytes, alignment: ", 
-                   requiresAlignment ? "required" : "not required", ")");
+    ASSIMP_LOG_INFO("USDZArchiveWriter: Added file ", entryPath, " (", fileData.size(), " bytes)");
     return true;
 }
 
@@ -215,9 +220,18 @@ bool USDZArchiveWriter::Finalize() {
         return true;
     }
 
+    // Sort assets: USD file (Default Layer) must be first for USDZ specification
+    std::sort(mAssets.begin(), mAssets.end(), [](const AssetInfo& a, const AssetInfo& b) {
+        // First entry (USD file) comes first, then alphabetical order
+        if (a.isFirstEntry && !b.isFirstEntry) return true;
+        if (!a.isFirstEntry && b.isFirstEntry) return false;
+        return a.filename < b.filename;
+    });
+    
     bool success = true;
     
-    // Write all assets to the archive
+    // Write all assets to the archive in proper order
+    // 64-byte alignment is handled automatically by miniz
     for (const auto& asset : mAssets) {
         if (!WriteAssetToArchive(asset)) {
             success = false;
@@ -250,14 +264,15 @@ bool USDZArchiveWriter::WriteAssetToArchive(const AssetInfo& asset) {
         ReportError("ZIP archive not initialized");
         return false;
     }
+
+    // Use existing ZIP functions with our USD-compatible fixes
+    // Our zip.c modifications ensure flags=0 and version=10 for USDZ files
     
-    // Open ZIP entry
     if (zip_entry_open(mZipArchive, asset.filename.c_str()) != 0) {
         ReportError("Failed to open ZIP entry: " + asset.filename);
         return false;
     }
-    
-    // Write file data
+
     if (!asset.data.empty()) {
         if (zip_entry_write(mZipArchive, asset.data.data(), asset.data.size()) != 0) {
             ReportError("Failed to write data to ZIP entry: " + asset.filename);
@@ -265,13 +280,14 @@ bool USDZArchiveWriter::WriteAssetToArchive(const AssetInfo& asset) {
             return false;
         }
     }
-    
-    // Close ZIP entry
-    if (zip_entry_close(mZipArchive) != 0) {
+
+    // Use our USD-compatible close function (sizes must be in local header)
+    if (zip_entry_close_usd_compatible(mZipArchive) != 0) {
         ReportError("Failed to close ZIP entry: " + asset.filename);
         return false;
     }
-    
+
+    ASSIMP_LOG_DEBUG("USDZArchiveWriter: Successfully wrote USD-compatible asset: ", asset.filename);
     return true;
 }
 

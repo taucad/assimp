@@ -71,15 +71,17 @@ class ASSIMP_API USDZArchiveWriter {
 public:
     /// Asset information for USDZ archive entries
     struct AssetInfo {
-        std::string filename;       ///< Entry path in archive
-        std::vector<uint8_t> data; ///< File content
-        bool requiresAlignment;     ///< Whether this file needs 64-byte alignment
+        std::string filename;           ///< Entry path in archive
+        std::vector<uint8_t> data;     ///< File content (may include padding for alignment)
+        size_t originalSize;            ///< Original file size (before padding)
+        bool isFirstEntry;              ///< Whether this is the first USD file (Default Layer)
+        mutable uint64_t headerOffset; ///< ZIP local header offset (set during writing)
         
-        AssetInfo(const std::string& name, const std::vector<uint8_t>& content, bool align = false)
-            : filename(name), data(content), requiresAlignment(align) {}
+        AssetInfo(const std::string& name, const std::vector<uint8_t>& content, bool isFirst = false)
+            : filename(name), data(content), originalSize(content.size()), isFirstEntry(isFirst), headerOffset(0) {}
             
-        AssetInfo(const std::string& name, const char* content, size_t size, bool align = false)
-            : filename(name), data(content, content + size), requiresAlignment(align) {}
+        AssetInfo(const std::string& name, const char* content, size_t size, bool isFirst = false)
+            : filename(name), data(content, content + size), originalSize(size), isFirstEntry(isFirst), headerOffset(0) {}
     };
 
     /// Constructor
@@ -132,6 +134,7 @@ public:
     const std::vector<std::string>& GetWarnings() const { return mWarnings; }
 
 private:
+    
     /// Write asset to ZIP archive with proper error handling
     /// @param asset Asset information to write
     /// @return true on success

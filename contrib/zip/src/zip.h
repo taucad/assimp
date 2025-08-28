@@ -532,6 +532,80 @@ extern ZIP_EXPORT int zip_extract(const char *zipname, const char *dir,
                                   int (*on_extract_entry)(const char *filename,
                                                           void *arg),
                                   void *arg);
+
+/**
+ * @brief Opens ZIP archive with file offset alignment
+ *
+ * This function opens a ZIP archive with the specified file offset alignment for USDZ compliance.
+ * 
+ * @param zipname zip archive file name.
+ * @param level compression level (0-9).
+ * @param mode file access mode.
+ * @param alignment alignment boundary in bytes (must be power of 2, e.g. 64 for USDZ).
+ *
+ * @return the zip archive handler or NULL on error.
+ */
+extern ZIP_EXPORT struct zip_t *zip_open_with_alignment(const char *zipname, int level, char mode, size_t alignment);
+
+/**
+ * @brief Sets file offset alignment for ZIP archive writing
+ *
+ * This function sets the alignment boundary for file data within the ZIP archive.
+ * Must be called BEFORE zip_open() or zip_stream_open().
+ *
+ * @param zip zip archive handler.
+ * @param alignment alignment boundary in bytes (must be power of 2, e.g. 64 for USDZ)
+ * @return 0 on success, negative value on error.
+ */
+extern ZIP_EXPORT int zip_set_file_alignment(struct zip_t *zip, size_t alignment);
+
+/**
+ * @brief Pre-sets the uncompressed file size for ZIP entry
+ *
+ * This function sets the known uncompressed file size before writing data.
+ * Must be called AFTER zip_entry_open() but BEFORE zip_entry_write().
+ * This allows the local ZIP header to contain the correct file size for USDZ compliance.
+ *
+ * @param zip zip archive handler.
+ * @param size known uncompressed file size in bytes
+ * @return 0 on success, negative value on error.
+ */
+extern ZIP_EXPORT int zip_patch_local_header_size(struct zip_t *zip, uint64_t header_offset, size_t file_size);
+
+/**
+ * @brief Gets the current ZIP entry's local header offset
+ *
+ * Returns the file offset where the current entry's local header starts.
+ * Must be called AFTER zip_entry_open() and BEFORE zip_entry_close().
+ *
+ * @param zip zip archive handler.
+ * @return header offset on success, 0 on error.
+ */
+extern ZIP_EXPORT uint64_t zip_entry_get_header_offset(struct zip_t *zip);
+
+/**
+ * Close a zip entry without writing data descriptors (for USD compatibility).
+ * This version writes file sizes directly in the central directory header.
+ *
+ * @param zip zip archive handler.
+ *
+ * @return the return code - 0 on success, negative number (< 0) on error.
+ */
+extern ZIP_EXPORT int zip_entry_close_usd_compatible(struct zip_t *zip);
+
+/**
+ * Direct USD-compatible ZIP entry writer (bypasses miniz data descriptor logic).
+ * Writes ZIP entry directly like OpenUSD's SdfZipFileWriter.
+ *
+ * @param zip zip archive handler.
+ * @param entryname entry name.
+ * @param buf entry data buffer.
+ * @param bufsize entry data buffer size.
+ *
+ * @return the return code - 0 on success, negative number (< 0) on error.
+ */
+extern ZIP_EXPORT int zip_entry_add_mem_usd_compatible(struct zip_t *zip, const char *entryname, const void *buf, size_t bufsize);
+
 /** @} */
 #ifdef __cplusplus
 }

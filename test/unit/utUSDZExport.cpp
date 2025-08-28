@@ -528,15 +528,13 @@ TEST_F(utUSDZExport, importGltfBoxTexturedExportUsda) {
     }
 }
 
-TEST_F(utUSDZExport, DISABLED_importGltfBoxTexturedExportUsdz) {
+TEST_F(utUSDZExport, importGltfBoxTexturedExportUsdz) {
     EXPECT_TRUE(performRoundTripTest(
         ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF/BoxTextured.gltf",
         "usd/basic/BoxTextured_out.usdz",
         "usdz"
     ));
 }
-
-// USDC export removed - not supported by current tinyusdz version
 
 // =============================================================================
 // PBR MATERIAL TESTS
@@ -556,7 +554,7 @@ TEST_F(utUSDZExport, importGltfPbrSpecularGlossinessExportUsda) {
     }
 }
 
-TEST_F(utUSDZExport, DISABLED_importGltfPbrSpecularGlossinessExportUsdz) {
+TEST_F(utUSDZExport, importGltfPbrSpecularGlossinessExportUsdz) {
     const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-pbrSpecularGlossiness/BoxTextured.gltf";
     const std::string outputPath = "usd/pbr/BoxTextured_PbrSpecGloss_out.usdz";
     
@@ -629,7 +627,7 @@ TEST_F(utUSDZExport, importGltfDamagedHelmetExportUsda) {
     }
 }
 
-TEST_F(utUSDZExport, DISABLED_importGltfDamagedHelmetExportUsdz) {
+TEST_F(utUSDZExport, importGltfDamagedHelmetExportUsdz) {
     const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/PBR/damaged-helmet.glb";
     const std::string outputPath = "usd/damaged-helmet/DamagedHelmet_out.usdz";
     
