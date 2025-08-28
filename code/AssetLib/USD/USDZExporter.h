@@ -138,7 +138,6 @@ private:
     void ExportMaterialX();
     void ExportSubdivisionSurfaces();
     void ExportVolumeRendering();
-    void AddARAnchoring();
 
     // Mesh conversion helpers
     bool IsPointPrimitive(const aiMesh* mesh);

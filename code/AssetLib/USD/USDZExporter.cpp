@@ -78,7 +78,6 @@ namespace {
     // Export configuration keys
     static const char* PROP_EXPORT_ANIMATIONS = "USDZ_EXPORT_ANIMATIONS";
     static const char* PROP_EXPORT_CLEARCOAT = "USDZ_EXPORT_CLEARCOAT";
-    static const char* PROP_EXPORT_AR_ANCHORING = "USDZ_EXPORT_AR_ANCHORING";
     static const char* PROP_EXPORT_MATERIALX = "USDZ_EXPORT_MATERIALX";
     static const char* PROP_EXPORT_SUBDIVISION = "USDZ_EXPORT_SUBDIVISION";
     static const char* PROP_EXPORT_VOLUMES = "USDZ_EXPORT_VOLUMES";
@@ -97,7 +96,6 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
     mIsPackaged(isPackaged),
     mExportAnimations(true),
     mExportClearcoat(true),
-    mExportARAnchoring(false),
     mExportMaterialX(false),
     mExportSubdivision(false),
     mExportVolumes(false),
@@ -107,7 +105,6 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
     if (mProperties) {
         mExportAnimations = mProperties->GetPropertyBool(PROP_EXPORT_ANIMATIONS, true);
         mExportClearcoat = mProperties->GetPropertyBool(PROP_EXPORT_CLEARCOAT, true);
-        mExportARAnchoring = mProperties->GetPropertyBool(PROP_EXPORT_AR_ANCHORING, false);
         mExportMaterialX = mProperties->GetPropertyBool(PROP_EXPORT_MATERIALX, false);
         mExportSubdivision = mProperties->GetPropertyBool(PROP_EXPORT_SUBDIVISION, false);
         mExportVolumes = mProperties->GetPropertyBool(PROP_EXPORT_VOLUMES, false);
@@ -149,12 +146,6 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
         ExportCameras();
         ExportLights();
 
-        // Advanced features
-        if (mExportARAnchoring) {
-            ExportARAnchoring();
-            ExportQuickLookMetadata();
-        }
-        
         if (mExportMaterialX) {
             ExportMaterialX();
         }
@@ -167,11 +158,6 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
             ExportVolumeRendering();
         }
         
-        // Add AR anchoring for iOS Quick Look (USDZ only)
-        if (mIsPackaged) {
-            AddARAnchoring();
-        }
-
         // Save the file
         if (mIsPackaged) {
             SaveAsUSDZ(filename);
@@ -208,13 +194,6 @@ void USDZExporter::ExportMetadata() {
     
     // Set defaultPrim to root scene node (will be set after scene structure is created)
     // This follows Apple's pattern of having a single root prim containing everything
-    
-    // Add iOS Quick Look compatibility metadata using tinyusdz APIs
-    if (mIsPackaged) {
-        stageMeta.customLayerData["quickLook:compatible"] = tinyusdz::MetaVariable(std::string("true"));
-        stageMeta.customLayerData["quickLook:version"] = tinyusdz::MetaVariable(std::string("1.0"));
-        ASSIMP_LOG_DEBUG("USDZExporter: Added Quick Look compatibility metadata");
-    }
     
     if (mExportAnimations && mScene->mNumAnimations > 0) {
         // Find the highest frame count across all animations
@@ -1033,19 +1012,6 @@ void USDZExporter::ExportARAnchoring() {
     // This requires a deeper understanding of tinyusdz Property API
     
     ASSIMP_LOG_DEBUG("USDZExporter: AR anchoring metadata exported");
-}
-
-// ------------------------------------------------------------------------------------------------
-// Export Quick Look metadata  
-void USDZExporter::ExportQuickLookMetadata() {
-    auto& stageMeta = mStage->metas();
-    
-    stageMeta.doc = "Exported by Assimp USDZ Exporter - Compatible with iOS Quick Look";
-    
-    // Add Quick Look compatibility metadata through comment
-    stageMeta.comment = "quickLook:compatible=true quickLook:version=1.0";
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Quick Look metadata exported");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3121,27 +3087,6 @@ void USDZExporter::ConvertLight(const aiLight* light) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Add AR anchoring setup for iOS Quick Look using tinyusdz APIs
-void USDZExporter::AddARAnchoring() {
-    ASSIMP_LOG_DEBUG("USDZExporter: AR anchoring setup for iOS Quick Look");
-    
-    // The main AR support is implemented through metadata in ExportMetadata():
-    // - quickLook:compatible = "true"
-    // - quickLook:version = "1.0"  
-    // - metersPerUnit = 1.0 (for realistic AR scaling)
-    // - upAxis = "Y" (for AR coordinate system)
-    
-    // Note: Advanced AR anchoring properties (preliminary:anchoring:type, etc.)
-    // would require more complex tinyusdz prim property manipulation that is
-    // beyond the current API access patterns. The metadata approach provides
-    // the essential iOS Quick Look compatibility.
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: AR anchoring configuration completed");
-    ASSIMP_LOG_DEBUG("  - iOS Quick Look compatibility metadata: ENABLED");
-    ASSIMP_LOG_DEBUG("  - Proper coordinate system and scaling: CONFIGURED");
-}
-
-// ------------------------------------------------------------------------------------------------
 // Convert node
 tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim) {
     if (!node) return nullptr;
@@ -3645,10 +3590,19 @@ bool USDZExporter::EmbedTextures(USDZArchiveWriter& archive) {
     bool allSuccess = true;
     size_t textureCount = 0;
     
+    // Track added textures to prevent duplicates (same file added multiple times for metallic/roughness)
+    std::set<std::string> addedTextureFilenames;
+    
     // Process all queued textures
     for (const auto& textureToWrite : mTexturesToWrite) {
         try {
             std::string archivePath = "textures/" + textureToWrite.sanitizedFilename;
+            
+            // Check if this texture file has already been added (prevents duplicate files for metallic/roughness)
+            if (addedTextureFilenames.find(archivePath) != addedTextureFilenames.end()) {
+                ASSIMP_LOG_DEBUG("USDZExporter: Skipping duplicate texture file: ", archivePath);
+                continue;
+            }
             
             if (textureToWrite.isEmbedded && textureToWrite.embeddedTexture) {
                 // Handle embedded texture from aiScene->mTextures
@@ -3711,6 +3665,7 @@ bool USDZExporter::EmbedTextures(USDZArchiveWriter& archive) {
             }
             
             textureCount++;
+            addedTextureFilenames.insert(archivePath);
             ASSIMP_LOG_DEBUG("USDZExporter: Successfully embedded texture ", archivePath);
             
         } catch (const std::exception& e) {
