@@ -134,7 +134,6 @@ public:
     const std::vector<std::string>& GetWarnings() const { return mWarnings; }
 
 private:
-    
     /// Write asset to ZIP archive with proper error handling
     /// @param asset Asset information to write
     /// @return true on success
