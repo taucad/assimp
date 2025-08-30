@@ -1107,9 +1107,9 @@ static int _zip_entry_open(struct zip_t *zip, const char *entryname,
   zip->entry.external_attr = 0;
 #endif
 
-  // For USDZ: disable miniz's automatic archive alignment - USD expects consecutive entries
+  // For USDZ: Use pure extra-field approach like fflate (no archive-level padding)
   if (pzip->m_file_offset_alignment == 64) {
-    num_alignment_padding_bytes = 0;  // CRITICAL: USD parser can't handle archive-level gaps
+    num_alignment_padding_bytes = 0;  // fflate uses ONLY extra fields, never archive-level padding
   } else {
     num_alignment_padding_bytes =
         mz_zip_writer_compute_padding_needed_for_file_alignment(pzip);
@@ -1145,29 +1145,41 @@ static int _zip_entry_open(struct zip_t *zip, const char *entryname,
 #endif
 
   // ZIP64 header with NULL sizes (sizes will be in the data descriptor, just
-  // after file data)
-  extra_size = mz_zip_writer_create_zip64_extra_data(
-      extra_data, NULL, NULL,
-      (local_dir_header_ofs >= MZ_UINT32_MAX) ? &local_dir_header_ofs : NULL);
-
-  // USDZ 64-byte alignment: simple approach to avoid size mismatches
+  // after file data) - Skip for USDZ files to match OpenUSD exactly  
   if (pzip->m_file_offset_alignment == 64) {
-    // Calculate where data will start
-    size_t dataOffset = local_dir_header_ofs + 30 + entrylen + extra_size;
-    size_t remainder = dataOffset % 64;
+    // OpenUSD doesn't use ZIP64 extra fields for USDZ - only custom padding
+    extra_size = 0;
+  } else {
+    extra_size = mz_zip_writer_create_zip64_extra_data(
+        extra_data, NULL, NULL,
+        (local_dir_header_ofs >= MZ_UINT32_MAX) ? &local_dir_header_ofs : NULL);
+  }
+
+  // USDZ 64-byte alignment: Exact OpenUSD approach (zipFile.cpp:1027-1029)
+  if (pzip->m_file_offset_alignment == 64) {
+    // OpenUSD: dataOffset = offset + _LocalFileHeader::FixedSize + h.f.filenameLength
+    // Calculate where data would start WITHOUT any extra fields (critical!)
+    const size_t dataOffsetWithoutExtra = local_dir_header_ofs + 30 + entrylen;
     
-    if (remainder != 0) {
-      // Only add small alignment padding to avoid size issues
-      size_t needed = 64 - remainder;
-      if (needed >= 4 && needed <= 20 && (extra_size + needed <= MZ_ZIP64_MAX_CENTRAL_EXTRA_FIELD_SIZE)) {
-        // Add minimal padding via extra field
-        extra_data[extra_size] = 0x86; // OpenUSD ID
-        extra_data[extra_size + 1] = 0x19;
-        extra_data[extra_size + 2] = (mz_uint8)((needed - 4) & 0xFF);
-        extra_data[extra_size + 3] = (mz_uint8)(((needed - 4) >> 8) & 0xFF);
-        memset(&extra_data[extra_size + 4], 0, needed - 4);
-        extra_size += needed;
-      }
+    // OpenUSD: _ComputeExtraFieldPaddingSize(dataOffset) - lines 436-449
+    size_t requiredPadding = 64 - (dataOffsetWithoutExtra % 64);
+    if (requiredPadding == 64) {
+      requiredPadding = 0;  // Already aligned
+    }
+    else if (requiredPadding < 4) {
+      // Not enough space for extra field header, add full 64-byte block
+      requiredPadding += 64;
+    }
+    
+    // Add the padding as extra field if needed (OpenUSD approach)
+    if (requiredPadding > 0) {
+      // OpenUSD uses header ID 0x1986 (zipFile.cpp:466)
+      extra_data[extra_size] = 0x86; // ID low byte (0x1986)
+      extra_data[extra_size + 1] = 0x19; // ID high byte  
+      extra_data[extra_size + 2] = (mz_uint8)((requiredPadding - 4) & 0xFF);  // Data size
+      extra_data[extra_size + 3] = (mz_uint8)(((requiredPadding - 4) >> 8) & 0xFF);
+      memset(&extra_data[extra_size + 4], 0, requiredPadding - 4);
+      extra_size += requiredPadding;
     }
   }
 
