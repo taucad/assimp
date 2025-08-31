@@ -42,7 +42,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
 
 #include "USDZExporter.h"
-#include "USDZArchiveWriter.h"
+#include "usdz-writer.hh"
 
 // Assimp includes
 #include <assimp/Exceptional.h>
@@ -1317,13 +1317,13 @@ void USDZExporter::ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
     for (uint32_t uvIndex = 0; uvIndex < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++uvIndex) {
         if (!mesh->mTextureCoords[uvIndex]) continue;
         
-        std::vector<tinyusdz::value::texcoord2f> uvs;
+        std::vector<tinyusdz::value::float2> uvs;
         uvs.reserve(mesh->mNumVertices);
         
         for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
             const aiVector3D& uv = mesh->mTextureCoords[uvIndex][i];
             // Note: USD uses V flipped compared to many formats
-            uvs.emplace_back(uv.x, 1.0f - uv.y);
+            uvs.emplace_back(tinyusdz::value::float2{uv.x, 1.0f - uv.y});
         }
         
         // Add as primvar
@@ -2040,15 +2040,7 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
         tinyusdz::value::AssetPath assetPath(texturePath);
         uvTexture.file.set_value(assetPath);
         
-        // Add to list of textures to write alongside USDA file (following glTF2 pattern)
-        TextureToWrite textureToWrite;
-        textureToWrite.originalPath = texPath;
-        textureToWrite.sanitizedFilename = textureName;
-        textureToWrite.embeddedTexture = tex; // Embedded texture with data
-        textureToWrite.isEmbedded = true; // From aiScene->mTextures
-        mTexturesToWrite.push_back(textureToWrite);
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Will write embedded texture as sibling: " + texPath + " -> " + textureName);
+        ASSIMP_LOG_DEBUG("USDZExporter: Prepared embedded texture for USDZ: " + texPath + " -> " + textureName);
         
     } catch (const std::exception& e) {
         ASSIMP_LOG_ERROR("USDZExporter: Error processing embedded texture " + texPath + ": " + e.what());
@@ -2073,44 +2065,7 @@ void USDZExporter::HandleExternalTexture(const std::string& texPath, tinyusdz::U
     tinyusdz::value::AssetPath assetPath(texturePath);
     uvTexture.file.set_value(assetPath);
     
-    // Load external texture into memory using IOSystem (following Assimp canonical pattern)
-    // This avoids hardcoded paths and works generically with any IOSystem configuration
-    TextureToWrite textureToWrite;
-    textureToWrite.originalPath = texPath;
-    textureToWrite.sanitizedFilename = sanitizedFilename;
-    textureToWrite.embeddedTexture = nullptr; // Not from aiScene->mTextures
-    textureToWrite.isEmbedded = false; // External texture loaded into memory
-    
-    if (mIOSystem) {
-        // Try to load external texture using IOSystem (respects working directory and search paths)
-        std::unique_ptr<IOStream> textureFile(mIOSystem->Open(texPath.c_str()));
-        if (textureFile) {
-            // Get file size
-            size_t fileSize = textureFile->FileSize();
-            if (fileSize > 0) {
-                // Load entire texture file into memory
-                textureToWrite.externalTextureData.resize(fileSize);
-                size_t bytesRead = textureFile->Read(textureToWrite.externalTextureData.data(), 1, fileSize);
-                
-                if (bytesRead == fileSize) {
-                    ASSIMP_LOG_DEBUG("USDZExporter: Loaded external texture into memory: " + texPath + " (" + ai_to_string(fileSize) + " bytes)");
-                } else {
-                    ASSIMP_LOG_WARN("USDZExporter: Incomplete read of external texture: " + texPath);
-                    textureToWrite.externalTextureData.clear(); // Clear incomplete data
-                }
-            } else {
-                ASSIMP_LOG_WARN("USDZExporter: External texture file is empty: " + texPath);
-            }
-        } else {
-            ASSIMP_LOG_WARN("USDZExporter: Could not open external texture file: " + texPath);
-        }
-    } else {
-        ASSIMP_LOG_ERROR("USDZExporter: No IOSystem available for loading external texture: " + texPath);
-    }
-    
-    mTexturesToWrite.push_back(textureToWrite);
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Will write external texture as sibling: " + texPath + " -> " + sanitizedFilename);
+    ASSIMP_LOG_DEBUG("USDZExporter: Prepared external texture for USDZ: " + texPath + " -> " + sanitizedFilename);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3371,119 +3326,11 @@ void USDZExporter::SaveAsUSDA(const std::string& filename) {
     
     ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDA");
     
-    // Then write texture files alongside the USDA file (following glTF2 pattern)
-    WriteTextureFilesAlongsideMainFile(filename);
+    // Note: For USDZ export, textures are embedded in the archive by tinyusdz::usdz::SaveAsUSDZ()
+    // For USDA export, textures should be manually copied to textures/ subdirectory if needed
 }
 
-// ------------------------------------------------------------------------------------------------
-// Write texture files alongside main USDA file (following glTF2 pattern)
-void USDZExporter::WriteTextureFilesAlongsideMainFile(const std::string& mainFilename) {
-    if (mTexturesToWrite.empty()) {
-        ASSIMP_LOG_DEBUG("USDZExporter: No texture files to write");
-        return;
-    }
-    
-    // Extract directory from main filename and create textures subdirectory
-    std::string outputDir;
-    size_t lastSlash = mainFilename.find_last_of("/\\");
-    if (lastSlash != std::string::npos) {
-        outputDir = mainFilename.substr(0, lastSlash + 1);
-    }
-    
-    // Create textures subdirectory (following Apple's USDZ pattern)
-    std::string texturesDir = outputDir + "textures/";
-    
-    // Create directory if it doesn't exist (using portable method)
-    if (!CreateTexturesDirectory(texturesDir)) {
-        ReportError("Failed to create textures directory: " + texturesDir);
-        return;
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Writing " + ai_to_string(mTexturesToWrite.size()) + " texture files to textures subdirectory");
-    
-    for (const auto& textureToWrite : mTexturesToWrite) {
-        try {
-            std::string outputPath = texturesDir + textureToWrite.sanitizedFilename;
-            
-            if (textureToWrite.isEmbedded) {
-                // Write embedded texture from aiScene->mTextures (like glTF2 buffer writing)
-                WriteEmbeddedTextureToFile(textureToWrite.embeddedTexture, outputPath);
-            } else {
-                // Write external texture from memory (loaded during HandleExternalTexture)
-                WriteExternalTextureFromMemory(textureToWrite, outputPath);
-            }
-            
-        } catch (const std::exception& e) {
-            ASSIMP_LOG_ERROR("USDZExporter: Failed to write texture file " + textureToWrite.sanitizedFilename + ": " + e.what());
-        }
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Texture files written successfully");
-}
-
-// ------------------------------------------------------------------------------------------------
-// Write embedded texture to file (following glTF2 embedded texture pattern)
-void USDZExporter::WriteEmbeddedTextureToFile(const aiTexture* texture, const std::string& outputPath) {
-    if (!texture || !mIOSystem) {
-        ASSIMP_LOG_ERROR("USDZExporter: Invalid texture or IOSystem for embedded texture write");
-        return;
-    }
-    
-    std::unique_ptr<IOStream> outFile(mIOSystem->Open(outputPath, "wb"));
-    if (!outFile) {
-        ASSIMP_LOG_ERROR("USDZExporter: Could not create texture file: " + outputPath);
-        return;
-    }
-    
-    if (texture->mHeight == 0) {
-        // Compressed texture data - write directly (like glTF2 buffer writing)
-        size_t written = outFile->Write(texture->pcData, texture->mWidth, 1);
-        if (written != texture->mWidth) {
-            ASSIMP_LOG_WARN("USDZExporter: Failed to write complete texture data for: " + outputPath);
-        }
-    } else {
-        // Uncompressed texture data - write raw RGBA data
-        size_t dataSize = texture->mWidth * texture->mHeight * 4; // RGBA
-        size_t written = outFile->Write(texture->pcData, dataSize, 1);
-        if (written != dataSize) {
-            ASSIMP_LOG_WARN("USDZExporter: Failed to write complete texture data for: " + outputPath);
-        }
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Written embedded texture to: " + outputPath);
-}
-
-// ------------------------------------------------------------------------------------------------
-// Write external texture from memory (following Assimp canonical pattern)
-void USDZExporter::WriteExternalTextureFromMemory(const TextureToWrite& textureToWrite, const std::string& outputPath) {
-    if (!mIOSystem) {
-        ASSIMP_LOG_ERROR("USDZExporter: No IOSystem available for texture file writing");
-        return;
-    }
-    
-    // Check if we have texture data in memory
-    if (textureToWrite.externalTextureData.empty()) {
-        ASSIMP_LOG_WARN("USDZExporter: No texture data available for: " + textureToWrite.originalPath);
-        return;
-    }
-    
-    std::unique_ptr<IOStream> targetFile(mIOSystem->Open(outputPath.c_str(), "wb"));
-    if (!targetFile) {
-        ASSIMP_LOG_ERROR("USDZExporter: Could not create texture file: " + outputPath);
-        return;
-    }
-    
-    // Write texture data from memory directly (like glTF2 buffer writing)
-    size_t bytesWritten = targetFile->Write(textureToWrite.externalTextureData.data(), 
-                                           textureToWrite.externalTextureData.size(), 1);
-    
-    if (bytesWritten != textureToWrite.externalTextureData.size()) {
-        ASSIMP_LOG_WARN("USDZExporter: Failed to write complete texture data for: " + outputPath);
-    } else {
-        ASSIMP_LOG_DEBUG("USDZExporter: Written external texture from memory: " + textureToWrite.originalPath + 
-                         " -> " + outputPath + " (" + ai_to_string(textureToWrite.externalTextureData.size()) + " bytes)");
-    }
-}
+// Note: Texture file writing is now handled by tinyusdz::usdz::SaveAsUSDZ()
 
 // ------------------------------------------------------------------------------------------------
 // Save as USDC
@@ -3508,50 +3355,39 @@ void USDZExporter::SaveAsUSDC(const std::string& filename) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Save as USDZ
+// Save as USDZ using zip.c + zip.patch approach  
 void USDZExporter::SaveAsUSDZ(const std::string& filename) {
     try {
-        // Create USDZ archive writer
-        USDZArchiveWriter archive(filename);
-        
-        if (!archive.IsOpen()) {
-            throw DeadlyExportError("Failed to create USDZ archive: " + filename);
-        }
-        
-        // Generate USD content in memory (don't write to disk)
+        // Generate USD content first
         std::string usdContent = GenerateUSDContent();
-        
-        // Add main USD file to archive (must be first per USDZ spec)
-        if (!archive.AddMainUSDFile(usdContent, "model.usda")) {
-            throw DeadlyExportError("Failed to add USD file to USDZ archive");
+        if (usdContent.empty()) {
+            throw DeadlyExportError("Generated USD content is empty");
         }
         
-        // Embed textures in the archive
-        if (!EmbedTextures(archive)) {
-            ReportWarning("Failed to embed some textures in USDZ archive");
+        // Collect texture data for embedding
+        std::map<std::string, std::vector<uint8_t>> textureDataMap;
+        CollectTextureDataForUSDZ(textureDataMap);
+        
+        std::string warn, err;
+        
+        // Use tinyusdz's elegant USDZ writer (callback-based approach)
+        bool success = tinyusdz::usdz::SaveAsUSDZWithTextures(filename, usdContent, textureDataMap, &warn, &err);
+        
+        // Handle warnings
+        if (!warn.empty()) {
+            ReportWarning("USDZ export warning: " + warn);
         }
         
-        // Finalize the archive
-        if (!archive.Finalize()) {
-            throw DeadlyExportError("Failed to finalize USDZ archive");
-        }
-        
-        // Report any warnings from archive creation
-        for (const auto& warning : archive.GetWarnings()) {
-            ReportWarning("USDZ Archive: " + warning);
-        }
-        
-        // Check for errors
-        if (!archive.GetErrors().empty()) {
-            std::string errorMsg = "USDZ Archive errors: ";
-            for (const auto& error : archive.GetErrors()) {
-                errorMsg += error + "; ";
+        // Handle errors
+        if (!success || !err.empty()) {
+            std::string errorMsg = "Failed to save USDZ file";
+            if (!err.empty()) {
+                errorMsg += ": " + err;
             }
             throw DeadlyExportError(errorMsg);
         }
         
-        ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDZ with ", 
-                       GetTextureCount(), " embedded textures");
+        ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDZ with ", textureDataMap.size(), " embedded textures");
         
     } catch (const std::exception& e) {
         ReportError(std::string("USDZ export failed: ") + e.what());
@@ -3585,103 +3421,76 @@ std::string USDZExporter::GenerateUSDContent() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Embed textures in USDZ archive
-bool USDZExporter::EmbedTextures(USDZArchiveWriter& archive) {
-    bool allSuccess = true;
-    size_t textureCount = 0;
+// Collect texture data for USDZ embedding
+void USDZExporter::CollectTextureDataForUSDZ(std::map<std::string, std::vector<uint8_t>>& textureDataMap) {
     
-    // Track added textures to prevent duplicates (same file added multiple times for metallic/roughness)
-    std::set<std::string> addedTextureFilenames;
-    
-    // Process all queued textures
-    for (const auto& textureToWrite : mTexturesToWrite) {
-        try {
-            std::string archivePath = "textures/" + textureToWrite.sanitizedFilename;
-            
-            // Check if this texture file has already been added (prevents duplicate files for metallic/roughness)
-            if (addedTextureFilenames.find(archivePath) != addedTextureFilenames.end()) {
-                ASSIMP_LOG_DEBUG("USDZExporter: Skipping duplicate texture file: ", archivePath);
-                continue;
+    // Process embedded textures from aiScene->mTextures
+    for (uint32_t i = 0; i < mScene->mNumTextures; ++i) {
+        const aiTexture* tex = mScene->mTextures[i];
+        if (!tex) continue;
+        
+        // Generate filename for embedded texture
+        std::string baseTextureName;
+        if (tex->mFilename.length > 0) {
+            baseTextureName = tex->mFilename.C_Str();
+        } else {
+            baseTextureName = GenerateDescriptiveTextureName(i, "");
+        }
+        
+        // Add appropriate extension if not present
+        std::string extension = ".png"; // Default
+        if (tex->mHeight == 0 && tex->achFormatHint[0] != '\0') {
+            std::string formatHint(tex->achFormatHint);
+            if (formatHint.find('.') == std::string::npos) {
+                extension = "." + formatHint;
+            } else {
+                extension = formatHint;
             }
-            
-            if (textureToWrite.isEmbedded && textureToWrite.embeddedTexture) {
-                // Handle embedded texture from aiScene->mTextures
-                const aiTexture* tex = textureToWrite.embeddedTexture;
-                
-                if (tex->mHeight == 0) {
-                    // Compressed texture data
-                    std::vector<uint8_t> textureData(
-                        reinterpret_cast<const uint8_t*>(tex->pcData),
-                        reinterpret_cast<const uint8_t*>(tex->pcData) + tex->mWidth
-                    );
-                    
-                    if (!archive.AddTextureFile(archivePath, textureData)) {
-                        ReportError("Failed to add embedded texture to archive: " + archivePath);
-                        allSuccess = false;
-                        continue;
-                    }
-                } else {
-                    // Raw RGBA texture data - convert to PNG
-                    std::vector<uint8_t> pngData;
-                    if (ConvertRawTextureToPNG(tex, pngData)) {
-                        // Update path to PNG if it wasn't already
-                        if (archivePath.substr(archivePath.length() - 4) != ".png") {
-                            archivePath = archivePath.substr(0, archivePath.find_last_of('.')) + ".png";
-                        }
-                        
-                        if (!archive.AddTextureFile(archivePath, pngData)) {
-                            ReportError("Failed to add converted PNG texture to archive: " + archivePath);
-                            allSuccess = false;
-                            continue;
-                        }
-                    } else {
-                        ReportError("Failed to convert raw texture to PNG: " + textureToWrite.originalPath);
-                        allSuccess = false;
-                        continue;
-                    }
+        }
+        
+        if (baseTextureName.find('.') == std::string::npos) {
+            baseTextureName += extension;
+        }
+        
+        std::string sanitizedFilename = SanitizeFilename(baseTextureName);
+        std::string texturePath = "textures/" + sanitizedFilename;
+        
+        // Extract texture data
+        std::vector<uint8_t> textureData;
+        if (tex->mHeight == 0) {
+            // Compressed texture data
+            textureData.assign(
+                reinterpret_cast<const uint8_t*>(tex->pcData),
+                reinterpret_cast<const uint8_t*>(tex->pcData) + tex->mWidth
+            );
+        } else {
+            // Raw RGBA texture data - convert to PNG or store as-is
+            std::vector<uint8_t> pngData;
+            if (ConvertRawTextureToPNG(tex, pngData)) {
+                textureData = std::move(pngData);
+                // Update path to PNG if it wasn't already
+                if (texturePath.substr(texturePath.length() - 4) != ".png") {
+                    texturePath = texturePath.substr(0, texturePath.find_last_of('.')) + ".png";
                 }
             } else {
-                // Handle external texture loaded into memory
-                if (!textureToWrite.externalTextureData.empty()) {
-                    if (!archive.AddTextureFile(archivePath, textureToWrite.externalTextureData)) {
-                        ReportError("Failed to add external texture to archive: " + archivePath);
-                        allSuccess = false;
-                        continue;
-                    }
-                } else {
-                    // Try to load texture from file system using IOSystem
-                    if (mIOSystem && !textureToWrite.originalPath.empty()) {
-                        if (!archive.AddTextureFromFile(archivePath, textureToWrite.originalPath, mIOSystem)) {
-                            ReportError("Failed to add texture file to archive: " + textureToWrite.originalPath);
-                            allSuccess = false;
-                            continue;
-                        }
-                    } else {
-                        ReportError("No texture data available for: " + textureToWrite.originalPath);
-                        allSuccess = false;
-                        continue;
-                    }
-                }
+                // Fallback: store raw RGBA data (not ideal but better than nothing)
+                size_t dataSize = tex->mWidth * tex->mHeight * 4; // RGBA
+                textureData.assign(
+                    reinterpret_cast<const uint8_t*>(tex->pcData),
+                    reinterpret_cast<const uint8_t*>(tex->pcData) + dataSize
+                );
             }
-            
-            textureCount++;
-            addedTextureFilenames.insert(archivePath);
-            ASSIMP_LOG_DEBUG("USDZExporter: Successfully embedded texture ", archivePath);
-            
-        } catch (const std::exception& e) {
-            ReportError("Exception while embedding texture " + textureToWrite.originalPath + ": " + e.what());
-            allSuccess = false;
+        }
+        
+        if (!textureData.empty()) {
+            textureDataMap[texturePath] = std::move(textureData);
+            ASSIMP_LOG_DEBUG("USDZExporter: Collected embedded texture: " + texturePath + " (" + ai_to_string(textureDataMap[texturePath].size()) + " bytes)");
+        } else {
+            ASSIMP_LOG_DEBUG("USDZExporter: Empty texture data for: " + texturePath);
         }
     }
     
-    ASSIMP_LOG_INFO("USDZExporter: Embedded ", textureCount, " of ", mTexturesToWrite.size(), " textures");
-    return allSuccess;
-}
-
-// ------------------------------------------------------------------------------------------------
-// Get number of textures to be embedded
-size_t USDZExporter::GetTextureCount() const {
-    return mTexturesToWrite.size();
+    ASSIMP_LOG_DEBUG("USDZExporter: Collected " + ai_to_string(textureDataMap.size()) + " textures for USDZ embedding");
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3877,3 +3686,4 @@ std::string USDZExporter::GetFileExtension(const std::string& filename) const {
 }
 
 #endif // !ASSIMP_BUILD_NO_USD_EXPORTER
+

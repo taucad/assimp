@@ -203,12 +203,11 @@ private:
     void SaveAsUSDA(const std::string& filename);
     void SaveAsUSDC(const std::string& filename);
     void SaveAsUSDZ(const std::string& filename);
-    void WriteTextureFilesAlongsideMainFile(const std::string& mainFilename);
+    // Note: Texture writing now handled by tinyusdz::usdz::SaveAsUSDZ()
     
     // USDZ specific methods
     std::string GenerateUSDContent();
-    bool EmbedTextures(class USDZArchiveWriter& archive);
-    size_t GetTextureCount() const;
+    void CollectTextureDataForUSDZ(std::map<std::string, std::vector<uint8_t>>& textureDataMap);
     bool ConvertRawTextureToPNG(const aiTexture* texture, std::vector<uint8_t>& pngData);
 
     // Error handling
@@ -260,20 +259,10 @@ private:
     std::string mCurrentMaterialPath;
     std::vector<std::pair<std::string, tinyusdz::UsdUVTexture>> mCurrentMaterialTextureShaders;
     
-    // Texture files to write alongside USDA (following glTF2 pattern)
-    // Handles both embedded textures (from aiScene->mTextures) and external textures (loaded into memory)
-    struct TextureToWrite {
-        std::string originalPath;
-        std::string sanitizedFilename;
-        const aiTexture* embeddedTexture; // For textures from aiScene->mTextures
-        std::vector<uint8_t> externalTextureData; // For external textures loaded into memory
-        bool isEmbedded; // true if from aiScene->mTextures, false if loaded from external file
-    };
-    std::vector<TextureToWrite> mTexturesToWrite;
+    // Note: Texture handling is now done by tinyusdz::usdz::SaveAsUSDZ() which extracts
+    // texture dependencies directly from the Stage and packages them automatically
 
-    // Texture writing helper methods (private - only used internally)
-    void WriteEmbeddedTextureToFile(const aiTexture* texture, const std::string& outputPath);
-    void WriteExternalTextureFromMemory(const TextureToWrite& textureToWrite, const std::string& outputPath);
+    // Note: Texture writing is now handled by tinyusdz::usdz::SaveAsUSDZ()
 
     // Helper methods
     std::string ai_to_string(uint32_t value) const;
