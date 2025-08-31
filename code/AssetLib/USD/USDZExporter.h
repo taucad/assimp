@@ -58,6 +58,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <map>
 #include <vector>
 #include <string>
+#include <array>
+#include <functional>
 
 struct aiScene;
 struct aiNode;
@@ -142,13 +144,8 @@ private:
     // Mesh conversion helpers
     bool IsPointPrimitive(const aiMesh* mesh);
     void ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertVertices(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertFaces(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertNormals(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertVertexColors(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertTangents(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
-    void ConvertMeshAttributes(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
+
+
 
     // Material conversion helpers
     void ConvertMaterial(const aiMaterial* mat, tinyusdz::Material& usdMaterial, 
@@ -164,6 +161,226 @@ private:
                        tinyusdz::UsdUVTexture& uvTexture);
     void HandleEmbeddedTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture);
     void HandleExternalTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture);
+
+    // Enhanced texture processing system
+    struct TextureConfig {
+        std::vector<aiTextureType> fallbackTypes;  // Fallback types to check in order
+        std::string outputChannel = "rgb";         // Output channel (r, g, b, rgb, a) 
+        std::string paramName;                     // USD parameter name
+        std::array<float, 4> bias = {0.0f, 0.0f, 0.0f, 0.0f};     // Texture bias
+        std::array<float, 4> scale = {1.0f, 1.0f, 1.0f, 1.0f};    // Texture scale
+        bool requiresNonZeroFactor = false;       // Check material factor > 0
+        std::string factorKey;                    // Material key for factor check
+        
+        TextureConfig(const std::string& name, const std::string& channel = "rgb") 
+            : outputChannel(channel), paramName(name) {}
+    };
+    
+    template<typename SurfacePropertyType>
+    bool ProcessTextureProperty(const aiMaterial* mat, const TextureConfig& config, 
+                               SurfacePropertyType& surfaceProperty, tinyusdz::UsdPreviewSurface& surface);
+    
+    // Advanced Shader Builder utility for consistent shader creation
+    class ShaderBuilder {
+    public:
+        explicit ShaderBuilder(const std::string& materialPath) : mMaterialPath(materialPath) {}
+        
+        // Template method for creating and connecting shaders with move semantics
+        template<typename ShaderType>
+        tinyusdz::Shader CreateShader(const std::string& name, const std::string& infoId, ShaderType&& shaderValue);
+        
+        // Create surface shader with proper connections
+        tinyusdz::Shader CreateSurfaceShader(tinyusdz::UsdPreviewSurface&& surface);
+        
+        // Create material with surface connections
+        tinyusdz::Material CreateMaterial(const std::string& name, const std::string& surfaceShaderName);
+        
+    private:
+        std::string mMaterialPath;
+    };
+    
+    // Thread-safe NameRegistry for efficient unique name generation
+    class NameRegistry {
+    public:
+        NameRegistry() = default;
+        
+        // Generate unique name with efficient lookup and minimal allocations
+        std::string GenerateUnique(const std::string& baseName) {
+            if (baseName.empty()) {
+                return GenerateUnique("Unnamed");
+            }
+            
+            // Use operator[] for efficient insertion/lookup
+            auto& counter = mCounters[baseName];
+            if (counter == 0) {
+                ++counter;
+                return baseName; // First use, no suffix needed
+            }
+            
+            // Generate suffixed name with minimal string operations
+            std::string uniqueName;
+            uniqueName.reserve(baseName.size() + 10); // Reserve space for suffix
+            uniqueName = baseName + "_" + std::to_string(counter);
+            ++counter;
+            
+            return uniqueName;
+        }
+        
+        // Sanitize name with comprehensive USD compliance
+        static std::string Sanitize(const std::string& name) {
+            if (name.empty()) return "Unnamed";
+            
+            std::string sanitized;
+            sanitized.reserve(name.size()); // Pre-allocate for performance
+            
+            // First character must be letter or underscore
+            if (std::isalpha(name[0]) || name[0] == '_') {
+                sanitized += name[0];
+            } else {
+                sanitized += '_';
+            }
+            
+            // Subsequent characters can be alphanumeric or underscore
+            for (size_t i = 1; i < name.size(); ++i) {
+                char c = name[i];
+                if (std::isalnum(c) || c == '_') {
+                    sanitized += c;
+                } else {
+                    sanitized += '_';
+                }
+            }
+            
+            return sanitized;
+        }
+        
+        // Combined sanitize and unique generation for common workflow
+        std::string SanitizeAndGenerateUnique(const std::string& name) {
+            return GenerateUnique(Sanitize(name));
+        }
+        
+        void Clear() { mCounters.clear(); }
+        
+    private:
+        std::map<std::string, uint32_t> mCounters;
+    };
+    
+    // RAII-based Mesh Converter Pipeline for efficient and safe mesh processing
+        class MeshConverterPipeline {
+    public:
+        using BoneNameConverter = std::function<std::string(const std::string&)>;
+        
+        explicit MeshConverterPipeline(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh, const aiScene* scene, 
+                                     NameRegistry& nameRegistry, tinyusdz::Stage& stage)
+            : mMesh(mesh), mUsdMesh(usdMesh), mScene(scene), mNameRegistry(nameRegistry), mStage(stage), mValid(mesh != nullptr) {}
+        
+        // Pipeline methods with fluent interface and RAII guarantees
+        MeshConverterPipeline& ConvertVertices() { 
+            if (mValid && mMesh->mVertices) ExecuteVertexConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertFaces() { 
+            if (mValid && mMesh->mFaces) ExecuteFaceConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertNormals() { 
+            if (mValid && mMesh->mNormals) ExecuteNormalConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertUVs() { 
+            if (mValid && mMesh->mNumUVComponents[0] > 0) ExecuteUVConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertVertexColors() { 
+            if (mValid && mMesh->mColors[0]) ExecuteVertexColorConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertTangents() { 
+            if (mValid && mMesh->mTangents) ExecuteTangentConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertSkinning() { 
+            if (mValid && mMesh->mNumBones > 0) ExecuteSkinningConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertBlendShapes() { 
+            if (mValid && mMesh->mNumAnimMeshes > 0) ExecuteBlendShapeConversion(); 
+            return *this; 
+        }
+        
+        MeshConverterPipeline& ConvertAttributes() { 
+            if (mValid) ExecuteAttributeConversion(); 
+            return *this; 
+        }
+        
+        // Execute complete pipeline with single method call
+        MeshConverterPipeline& ExecuteFullPipeline(BoneNameConverter boneNameConverter = nullptr) {
+            if (!mValid) return *this;
+            
+            ExecuteVertexConversion();
+            ExecuteFaceConversion();
+            ExecuteNormalConversion();
+            ExecuteUVConversion();
+            ExecuteVertexColorConversion();
+            ExecuteTangentConversion();
+            ExecuteSkinningConversion(boneNameConverter);
+            ExecuteBlendShapeConversion();
+            ExecuteAttributeConversion();
+            
+            return *this;
+        }
+        
+        bool IsValid() const { return mValid; }
+        
+        // Public access to specific conversion steps for special cases
+        void ExecuteAttributeConversion();
+        
+    private:
+        const aiMesh* mMesh;
+        tinyusdz::GeomMesh& mUsdMesh;
+        const aiScene* mScene;
+        NameRegistry& mNameRegistry;
+        tinyusdz::Stage& mStage;
+        bool mValid;
+        
+        // Forward declarations for implementation methods
+        void ExecuteVertexConversion();
+        void ExecuteFaceConversion();
+        void ExecuteNormalConversion();
+        void ExecuteUVConversion();
+        void ExecuteVertexColorConversion();
+        void ExecuteTangentConversion();
+        void ExecuteSkinningConversion(BoneNameConverter boneNameConverter = nullptr);
+        void ExecuteBlendShapeConversion();
+    };
+    
+    // PrimFactory for consistent USD prim creation and hierarchy management
+    class PrimFactory {
+    public:
+        // Create prim with optimal construction and move semantics
+        template<typename PrimType>
+        static tinyusdz::Prim CreatePrim(PrimType&& primData);
+        
+        // Create and add child prim to parent with proper hierarchy management
+        template<typename PrimType>
+        static void AddChildPrim(tinyusdz::Prim& parent, PrimType&& primData);
+        
+        // Create scope prim for organizing related objects
+        static tinyusdz::Prim CreateScope(const std::string& name);
+        
+        // Create transform prim with identity transform
+        static tinyusdz::Prim CreateXform(const std::string& name);
+        
+        // Batch create and add multiple children efficiently
+        template<typename... PrimTypes>
+        static void AddChildren(tinyusdz::Prim& parent, PrimTypes&&... prims);
+    };
     
     // Shader creation helpers (Apple's NodeGraph pattern implementation)
     tinyusdz::Shader CreateTexCoordReader(const std::string& varName = "st");
@@ -179,7 +396,6 @@ private:
     void ConvertSkinning(const aiMesh* mesh);
     void ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertBlendShapes(const aiMesh* mesh);
-    void ConvertBlendShapesToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
 
     // Camera/Light conversion helpers
     void ConvertCamera(const aiCamera* camera);
@@ -248,8 +464,8 @@ private:
     std::map<const aiCamera*, std::string> mCameraIdMap;
     std::map<const aiLight*, std::string> mLightIdMap;
 
-    // Name tracking for uniqueness
-    mutable std::map<std::string, uint32_t> mNameCounters;
+    // Advanced name management system
+    mutable NameRegistry mNameRegistry;
     
     // Skeletal animation mapping: bone name → hierarchical USD path
     // Critical for ensuring mesh skel:joints references match skeleton joint paths exactly

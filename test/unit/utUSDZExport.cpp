@@ -898,6 +898,30 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
     }
 }
 
+TEST_F(utUSDZExport, importGltfSimpleMorphExportUsda) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/SimpleMorph/glTF/SimpleMorph.gltf";
+    const std::string outputPath = "usd/blendshapes/SimpleMorph_out.usda";
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Validate blend shape conversion by checking USD file content
+    // USD BlendShapes are separate prims, not aiAnimMesh data, so we check the file directly
+    std::ifstream usdFile(outputPath);
+    ASSERT_TRUE(usdFile.is_open()) << "Failed to open USD output file: " << outputPath;
+    
+    std::string usdContent((std::istreambuf_iterator<char>(usdFile)), std::istreambuf_iterator<char>());
+    usdFile.close();
+    
+    // Check for BlendShape prims in the USD file
+    bool foundBlendShapePrims = usdContent.find("def BlendShape") != std::string::npos;
+    
+    // Check for skel:blendShapes property on mesh
+    bool foundBlendShapeProperty = usdContent.find("skel:blendShapes") != std::string::npos;
+    
+    EXPECT_TRUE(foundBlendShapePrims) << "USD file should contain BlendShape prim definitions";
+    EXPECT_TRUE(foundBlendShapeProperty) << "Mesh should have skel:blendShapes property";
+}
+
 // =============================================================================
 // PRIMITIVE MODE TESTS
 // =============================================================================

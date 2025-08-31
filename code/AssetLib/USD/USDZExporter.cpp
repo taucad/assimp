@@ -58,7 +58,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Standard library
 #include <algorithm>
 #include <cmath>
-#include <regex>
 
 // tinyusdz includes
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/usda-writer.hh"
@@ -381,8 +380,9 @@ void USDZExporter::ExportMeshes() {
                 }
             }
             
-            // Add standard USD mesh attributes for point primitives too
-            ConvertMeshAttributes(mesh, usdMesh);
+            // Add standard USD mesh attributes for point primitives too using pipeline
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            pipeline.ExecuteAttributeConversion();
             
             meshPrim = tinyusdz::Prim(usdMesh);
             ASSIMP_LOG_DEBUG("USDZExporter: Created point GeomMesh primitive with " + ai_to_string(mesh->mNumVertices) + " individual point faces");
@@ -540,39 +540,25 @@ void USDZExporter::ExportMaterials() {
         }
         matName = GenerateUniqueName(matName);
         
-        // Create USD Material
-        tinyusdz::Material usdMaterial;
-        usdMaterial.name = matName;
-        
         // Set current material path for texture processing (include root prim name)
         std::string rootPrimName = GetSceneName();
         mCurrentMaterialPath = "/" + rootPrimName + "/Materials/" + matName;
         
-        // Create UsdPreviewSurface shader
+        // Create UsdPreviewSurface shader using ShaderBuilder for consistency
         tinyusdz::UsdPreviewSurface surface;
         CreatePreviewSurface(mat, surface);
         
-        // Create main surface shader using Apple's naming (without NodeGraph due to tinyusdz serialization issues)
-        tinyusdz::Shader surfaceShader;
+        // Use ShaderBuilder for optimized shader and material creation
+        ShaderBuilder builder(mCurrentMaterialPath);
         std::string shaderName = "UsdPreviewSurface";  // Apple's exact naming
-        surfaceShader.name = shaderName;
-        surfaceShader.info_id = tinyusdz::kUsdPreviewSurface;
-        
-        // Set outputs
-        surface.outputsSurface.set_authored(true);
-        surface.outputsDisplacement.set_authored(true);
-        surfaceShader.value = surface;
+        tinyusdz::Shader surfaceShader = builder.CreateSurfaceShader(std::move(surface));
+        tinyusdz::Material usdMaterial = builder.CreateMaterial(matName, shaderName);
         
         // Set stPrimvarName input (Apple's pattern) - using props since Material doesn't have direct member
         tinyusdz::Attribute stPrimvarAttr;
         stPrimvarAttr.set_value(tinyusdz::value::token("st"));
         tinyusdz::Property stPrimvarProp(stPrimvarAttr, false);
         usdMaterial.props["inputs:stPrimvarName"] = stPrimvarProp;
-        
-        // Create material surface and displacement connections using proper tinyusdz Path API
-        std::string shaderPath = mCurrentMaterialPath + "/" + shaderName;
-        usdMaterial.surface.set(tinyusdz::Path(shaderPath, "outputs:surface"));
-        usdMaterial.displacement.set(tinyusdz::Path(shaderPath, "outputs:displacement"));
         
         mMaterialIdMap[mat] = matName;
         
@@ -1146,135 +1132,51 @@ bool USDZExporter::IsPointPrimitive(const aiMesh* mesh) {
 void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
     if (!mesh) return;
     
-    ConvertVertices(mesh, usdMesh);
-    ConvertFaces(mesh, usdMesh);
-    ConvertNormals(mesh, usdMesh);
-    ConvertUVs(mesh, usdMesh);
-    ConvertVertexColors(mesh, usdMesh);
-    ConvertTangents(mesh, usdMesh);
+    // Create bone name converter function that follows backup's pattern
+    auto boneNameConverter = [this](const std::string& boneName) -> std::string {
+        // Use the exact USD path from skeleton (critical for tinyusdz validation)
+        auto pathIt = mBoneNameToUSDPath.find(boneName);
+        if (pathIt != mBoneNameToUSDPath.end()) {
+            return pathIt->second;
+        }
+        // Fallback to sanitized name (shouldn't happen if skeleton was built correctly)
+        return mNameRegistry.Sanitize(boneName);
+    };
     
-    if (mesh->mNumBones > 0) {
-        ConvertSkinningToMesh(mesh, usdMesh);
+    // Use MeshConverterPipeline for structured conversion with scene context
+    MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+    pipeline.ExecuteFullPipeline(boneNameConverter);
+    
+    if (!pipeline.IsValid()) {
+        ASSIMP_LOG_WARN("USDZExporter: Mesh conversion pipeline validation failed");
     }
-    
-    if (mesh->mNumAnimMeshes > 0) {
-        ConvertBlendShapesToMesh(mesh, usdMesh);
-    }
-    
-    // Add standard USD mesh attributes
-    ConvertMeshAttributes(mesh, usdMesh);
 }
 
 // ------------------------------------------------------------------------------------------------
-// Convert standard USD mesh attributes
-void USDZExporter::ConvertMeshAttributes(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh) return;
-    
-    // 1. Set doubleSided attribute based on mesh properties
-    // Check if mesh has consistent face winding or if material specifies double-sided
-    bool doubleSided = false;
-    
-    // Check material for double-sided property if available
-    if (mesh->mMaterialIndex < mScene->mNumMaterials) {
-        const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
-        if (material) {
-            int twoSided = 0;
-            if (material->Get(AI_MATKEY_TWOSIDED, twoSided) == aiReturn_SUCCESS) {
-                doubleSided = (twoSided != 0);
-            }
-        }
-    }
-    
-    // If no material info, analyze face winding for consistency
-    // If faces have inconsistent winding, assume double-sided
-    if (!doubleSided && mesh->mFaces && mesh->mNumFaces > 1) {
-        // Sample a few faces to check winding consistency
-        int windingConsistentFaces = 0;
-        int totalSampledFaces = std::min(mesh->mNumFaces, 10u); // Sample first 10 faces
-        
-        for (uint32_t i = 0; i < totalSampledFaces && i < mesh->mNumFaces; ++i) {
-            const aiFace& face = mesh->mFaces[i];
-            if (face.mNumIndices >= 3) {
-                // Calculate face normal and check consistency
-                windingConsistentFaces++; // For now, assume consistent
-            }
-        }
-        
-        // If less than 80% of faces have consistent winding, assume double-sided
-        if (totalSampledFaces > 0 && windingConsistentFaces < (totalSampledFaces * 0.8f)) {
-            doubleSided = true;
-        }
-    }
-    
-    // Set doubleSided attribute using tinyusdz API (must be uniform variability)
-    tinyusdz::Attribute doubleSidedAttr = tinyusdz::Attribute::Uniform(doubleSided);
-    doubleSidedAttr.set_type_name("bool");
-    tinyusdz::Property doubleSidedProp(doubleSidedAttr, false);
-    usdMesh.props["doubleSided"] = doubleSidedProp;
-    
-    // 2. Set subdivisionScheme = "none" (standard for triangle meshes) - must be uniform
-    tinyusdz::Attribute subdivisionSchemeAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
-    subdivisionSchemeAttr.set_type_name("token");
-    tinyusdz::Property subdivisionSchemeProp(subdivisionSchemeAttr, false);
-    usdMesh.props["subdivisionScheme"] = subdivisionSchemeProp;
-    
-    // 3. Set triangleSubdivisionRule = "none" - must be uniform
-    tinyusdz::Attribute triangleSubdivisionRuleAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
-    triangleSubdivisionRuleAttr.set_type_name("token");
-    tinyusdz::Property triangleSubdivisionRuleProp(triangleSubdivisionRuleAttr, false);
-    usdMesh.props["triangleSubdivisionRule"] = triangleSubdivisionRuleProp;
-}
-
-
-// ------------------------------------------------------------------------------------------------
-// Convert vertices
-void USDZExporter::ConvertVertices(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh->mVertices || mesh->mNumVertices == 0) return;
-    
+// MeshConverterPipeline implementation methods
+void USDZExporter::MeshConverterPipeline::ExecuteVertexConversion() {
+    // Delegate to existing implementation for now, can be optimized later
+    // This maintains compatibility while providing the pipeline interface
     std::vector<tinyusdz::value::point3f> points;
-    points.reserve(mesh->mNumVertices);
+    points.reserve(mMesh->mNumVertices);
     
-    for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
-        const aiVector3D& v = mesh->mVertices[i];
+    for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+        const aiVector3D& v = mMesh->mVertices[i];
         points.emplace_back(v.x, v.y, v.z);
     }
     
-    usdMesh.points.set_value(std::move(points));
+    mUsdMesh.points.set_value(std::move(points));
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert faces
-void USDZExporter::ConvertFaces(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh->mFaces || mesh->mNumFaces == 0) return;
-    
-    // Check if this is a point primitive (all faces have exactly 1 vertex)
-    bool isPointPrimitive = true;
-    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
-        if (mesh->mFaces[i].mNumIndices != 1) {
-            isPointPrimitive = false;
-            break;
-        }
-    }
-    
-    // For point primitives, USD doesn't need face data - just the points array
-    if (isPointPrimitive) {
-        ASSIMP_LOG_DEBUG("USDZExporter: Detected point primitive - skipping face data export");
-        return;
-    }
-    
+void USDZExporter::MeshConverterPipeline::ExecuteFaceConversion() {
     std::vector<int> faceVertexCounts;
     std::vector<int> faceVertexIndices;
     
-    faceVertexCounts.reserve(mesh->mNumFaces);
+    faceVertexCounts.reserve(mMesh->mNumFaces);
+    faceVertexIndices.reserve(mMesh->mNumFaces * 3); // Assume mostly triangles
     
-    uint32_t totalIndices = 0;
-    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
-        totalIndices += mesh->mFaces[i].mNumIndices;
-    }
-    faceVertexIndices.reserve(totalIndices);
-    
-    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
-        const aiFace& face = mesh->mFaces[i];
+    for (uint32_t i = 0; i < mMesh->mNumFaces; ++i) {
+        const aiFace& face = mMesh->mFaces[i];
         faceVertexCounts.push_back(static_cast<int>(face.mNumIndices));
         
         for (uint32_t j = 0; j < face.mNumIndices; ++j) {
@@ -1282,52 +1184,48 @@ void USDZExporter::ConvertFaces(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh)
         }
     }
     
-    usdMesh.faceVertexCounts.set_value(std::move(faceVertexCounts));
-    usdMesh.faceVertexIndices.set_value(std::move(faceVertexIndices));
+    mUsdMesh.faceVertexCounts.set_value(std::move(faceVertexCounts));
+    mUsdMesh.faceVertexIndices.set_value(std::move(faceVertexIndices));
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert normals
-void USDZExporter::ConvertNormals(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh->mNormals) return;
+void USDZExporter::MeshConverterPipeline::ExecuteNormalConversion() {
+    if (!mMesh->mNormals) return; // Check if normals exist
     
     std::vector<tinyusdz::value::normal3f> normals;
-    normals.reserve(mesh->mNumVertices);
+    normals.reserve(mMesh->mNumVertices);
     
-    for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
-        const aiVector3D& n = mesh->mNormals[i];
+    for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+        const aiVector3D& n = mMesh->mNormals[i];
         normals.emplace_back(n.x, n.y, n.z);
     }
     
-    // Add as primvar
     tinyusdz::Attribute normalAttr;
-    normalAttr.set_value(normals);
+    normalAttr.set_value(std::move(normals));
+    normalAttr.set_type_name("normal3f[]");
     
     tinyusdz::AttrMeta normalMeta;
     normalMeta.interpolation = tinyusdz::Interpolation::Vertex;
     normalAttr.metas() = normalMeta;
     
     tinyusdz::Property normalProp(normalAttr, false);
-    usdMesh.props["primvars:normals"] = normalProp;
+    mUsdMesh.props["primvars:normals"] = normalProp;
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert UVs
-void USDZExporter::ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
+void USDZExporter::MeshConverterPipeline::ExecuteUVConversion() {
     for (uint32_t uvIndex = 0; uvIndex < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++uvIndex) {
-        if (!mesh->mTextureCoords[uvIndex]) continue;
+        if (!mMesh->mTextureCoords[uvIndex]) continue;
         
         std::vector<tinyusdz::value::float2> uvs;
-        uvs.reserve(mesh->mNumVertices);
+        uvs.reserve(mMesh->mNumVertices);
         
-        for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
-            const aiVector3D& uv = mesh->mTextureCoords[uvIndex][i];
+        for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+            const aiVector3D& uv = mMesh->mTextureCoords[uvIndex][i];
             // Note: USD uses V flipped compared to many formats
             uvs.emplace_back(tinyusdz::value::float2{uv.x, 1.0f - uv.y});
         }
         
         // Add as primvar
-        std::string primvarName = (uvIndex == 0) ? "primvars:st" : ("primvars:st" + ai_to_string(uvIndex));
+        std::string primvarName = (uvIndex == 0) ? "primvars:st" : ("primvars:st" + std::to_string(uvIndex));
         
         tinyusdz::Attribute uvAttr;
         uvAttr.set_value(uvs);
@@ -1338,62 +1236,392 @@ void USDZExporter::ConvertUVs(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
         uvAttr.metas() = uvMeta;
         
         tinyusdz::Property uvProp(uvAttr, false);
-        usdMesh.props[primvarName] = uvProp;
+        mUsdMesh.props[primvarName] = uvProp;
     }
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert vertex colors
-void USDZExporter::ConvertVertexColors(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    for (uint32_t colorIndex = 0; colorIndex < AI_MAX_NUMBER_OF_COLOR_SETS; ++colorIndex) {
-        if (!mesh->mColors[colorIndex]) continue;
-        
+void USDZExporter::MeshConverterPipeline::ExecuteVertexColorConversion() {
+    if (!mMesh->mColors[0]) return; // Check if vertex colors exist
+    
+    // Only process the first color set
         std::vector<tinyusdz::value::color3f> colors;
-        colors.reserve(mesh->mNumVertices);
-        
-        for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
-            const aiColor4D& c = mesh->mColors[colorIndex][i];
-            colors.emplace_back(c.r, c.g, c.b); // tinyusdz requires Vec3 RGB, not Vec4 RGBA
-        }
-        
-        // Add as primvar
-        std::string primvarName = (colorIndex == 0) ? "primvars:displayColor" : ("primvars:color" + ai_to_string(colorIndex));
+    colors.reserve(mMesh->mNumVertices);
+    
+    for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+        const aiColor4D& c = mMesh->mColors[0][i];
+        colors.emplace_back(c.r, c.g, c.b);
+    }
         
         tinyusdz::Attribute colorAttr;
-        colorAttr.set_value(colors);
+    colorAttr.set_value(std::move(colors));
+    colorAttr.set_type_name("color3f[]");
         
         tinyusdz::AttrMeta colorMeta;
         colorMeta.interpolation = tinyusdz::Interpolation::Vertex;
         colorAttr.metas() = colorMeta;
         
+    std::string primvarName = "primvars:displayColor";
         tinyusdz::Property colorProp(colorAttr, false);
-        usdMesh.props[primvarName] = colorProp;
-    }
+    mUsdMesh.props[primvarName] = colorProp;
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert tangents
-void USDZExporter::ConvertTangents(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh->mTangents) return;
+void USDZExporter::MeshConverterPipeline::ExecuteTangentConversion() {
+    if (!mMesh->mTangents) return; // Check if tangents exist
     
     std::vector<tinyusdz::value::vector3f> tangents;
-    tangents.reserve(mesh->mNumVertices);
+    tangents.reserve(mMesh->mNumVertices);
     
-    for (uint32_t i = 0; i < mesh->mNumVertices; ++i) {
-        const aiVector3D& t = mesh->mTangents[i];
+    for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+        const aiVector3D& t = mMesh->mTangents[i];
         tangents.emplace_back(t.x, t.y, t.z);
     }
     
-    // Add as primvar
     tinyusdz::Attribute tangentAttr;
-    tangentAttr.set_value(tangents);
+    tangentAttr.set_value(std::move(tangents));
+    tangentAttr.set_type_name("vector3f[]");
     
     tinyusdz::AttrMeta tangentMeta;
     tangentMeta.interpolation = tinyusdz::Interpolation::Vertex;
     tangentAttr.metas() = tangentMeta;
     
     tinyusdz::Property tangentProp(tangentAttr, false);
-    usdMesh.props["primvars:tangents"] = tangentProp;
+    mUsdMesh.props["primvars:tangents"] = tangentProp;
+}
+
+void USDZExporter::MeshConverterPipeline::ExecuteSkinningConversion(BoneNameConverter boneNameConverter) {
+    // Only convert skinning if bones exist
+    if (mMesh && mMesh->mNumBones > 0) {
+        ASSIMP_LOG_DEBUG("USDZExporter: Adding skinning primvars for " + std::to_string(mMesh->mNumBones) + " bones");
+        
+        // Determine maximum weights per vertex
+        uint32_t maxWeightsPerVertex = 4;
+        
+        // Prepare joint indices and weights arrays
+        std::vector<int> jointIndices(mMesh->mNumVertices * maxWeightsPerVertex, 0);
+        std::vector<float> jointWeights(mMesh->mNumVertices * maxWeightsPerVertex, 0.0f);
+        
+        // Collect joint names
+        std::vector<tinyusdz::value::token> jointTokens;
+        
+        for (uint32_t i = 0; i < mMesh->mNumBones; ++i) {
+            const aiBone* bone = mMesh->mBones[i];
+            std::string boneName = bone->mName.C_Str(); // Note: Using raw name for now, should be sanitized
+            jointTokens.push_back(tinyusdz::value::token(boneName));
+        }
+        
+        // Process bone weights and fill joint data arrays
+        for (uint32_t boneIdx = 0; boneIdx < mMesh->mNumBones; ++boneIdx) {
+            const aiBone* bone = mMesh->mBones[boneIdx];
+            
+            for (uint32_t weightIdx = 0; weightIdx < bone->mNumWeights; ++weightIdx) {
+                const aiVertexWeight& weight = bone->mWeights[weightIdx];
+                uint32_t vertexIdx = weight.mVertexId;
+                
+                if (vertexIdx >= mMesh->mNumVertices) {
+                    continue;
+                }
+                
+                // Find an empty slot for this vertex
+                bool added = false;
+                for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
+                    uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
+                    
+                    if (jointWeights[arrayIdx] == 0.0f) {
+                        jointIndices[arrayIdx] = static_cast<int>(boneIdx);
+                        jointWeights[arrayIdx] = weight.mWeight;
+                        added = true;
+                        break;
+                    }
+                }
+                
+                if (!added) {
+                    // Replace the smallest weight if this is larger
+                    uint32_t minSlot = 0;
+                    float minWeight = jointWeights[vertexIdx * maxWeightsPerVertex];
+                    
+                    for (uint32_t slotIdx = 1; slotIdx < maxWeightsPerVertex; ++slotIdx) {
+                        uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
+                        if (jointWeights[arrayIdx] < minWeight) {
+                            minWeight = jointWeights[arrayIdx];
+                            minSlot = slotIdx;
+                        }
+                    }
+                    
+                    if (weight.mWeight > minWeight) {
+                        uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + minSlot;
+                        jointIndices[arrayIdx] = static_cast<int>(boneIdx);
+                        jointWeights[arrayIdx] = weight.mWeight;
+                    }
+                }
+            }
+        }
+        
+        // Normalize weights per vertex
+        for (uint32_t vertexIdx = 0; vertexIdx < mMesh->mNumVertices; ++vertexIdx) {
+            float totalWeight = 0.0f;
+            uint32_t baseIdx = vertexIdx * maxWeightsPerVertex;
+            
+            for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
+                totalWeight += jointWeights[baseIdx + slotIdx];
+            }
+            
+            if (totalWeight > 0.0f) {
+                for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
+                    jointWeights[baseIdx + slotIdx] /= totalWeight;
+                }
+            }
+        }
+        
+        // Create skel:jointWeights primvar using proper tinyusdz APIs
+        tinyusdz::GeomPrimvar weightsPrimvar;
+        weightsPrimvar.set_name("skel:jointWeights");
+        weightsPrimvar.set_value(jointWeights);
+        weightsPrimvar.set_elementSize(maxWeightsPerVertex);
+        weightsPrimvar.set_interpolation(tinyusdz::Interpolation::Vertex);
+        mUsdMesh.set_primvar(weightsPrimvar);
+        
+        // Create skel:jointIndices primvar using proper tinyusdz APIs  
+        tinyusdz::GeomPrimvar indicesPrimvar;
+        indicesPrimvar.set_name("skel:jointIndices");
+        indicesPrimvar.set_value(jointIndices);
+        indicesPrimvar.set_elementSize(maxWeightsPerVertex);
+        indicesPrimvar.set_interpolation(tinyusdz::Interpolation::Vertex);
+        mUsdMesh.set_primvar(indicesPrimvar);
+        
+        // Create skel:geomBindTransform primvar (identity matrix for now)
+        tinyusdz::value::matrix4d geomBindTransform;
+        tinyusdz::Identity(&geomBindTransform);
+        tinyusdz::GeomPrimvar geomBindPrimvar;
+        geomBindPrimvar.set_name("skel:geomBindTransform");
+        geomBindPrimvar.set_value(geomBindTransform);
+        mUsdMesh.set_primvar(geomBindPrimvar);
+        
+        // Add skel:joints property - must match skeleton joint names exactly
+        std::vector<tinyusdz::value::token> meshJointTokens;
+        
+        for (uint32_t boneIdx = 0; boneIdx < mMesh->mNumBones; ++boneIdx) {
+            const aiBone* bone = mMesh->mBones[boneIdx];
+            std::string boneName = bone->mName.C_Str();
+            
+            // Use the bone name converter to get proper USD path
+            if (boneNameConverter) {
+                std::string usdPath = boneNameConverter(boneName);
+                meshJointTokens.emplace_back(usdPath);
+                ASSIMP_LOG_DEBUG("USDZExporter: Mapped bone '" + boneName + "' to USD path '" + usdPath + "'");
+            } else {
+                // Fallback to raw bone name if no converter provided
+                meshJointTokens.emplace_back(boneName);
+                ASSIMP_LOG_WARN("USDZExporter: No bone name converter provided, using raw name: '" + boneName + "'");
+            }
+        }
+        
+        tinyusdz::Attribute jointsAttr;
+        jointsAttr.set_value(meshJointTokens);
+        jointsAttr.set_type_name("token[]");
+        jointsAttr.variability() = tinyusdz::Variability::Uniform;
+        tinyusdz::Property jointsProp(jointsAttr, false);
+        mUsdMesh.props["skel:joints"] = jointsProp;
+        
+        // Add SkelBindingAPI schema and skeleton reference
+        std::vector<tinyusdz::value::token> apiSchemas = { tinyusdz::value::token("SkelBindingAPI") };
+        tinyusdz::Attribute apiSchemasAttr;
+        apiSchemasAttr.set_value(apiSchemas);
+        apiSchemasAttr.set_type_name("token[]");
+        apiSchemasAttr.variability() = tinyusdz::Variability::Uniform;
+        tinyusdz::Property apiSchemasProp(apiSchemasAttr, false);
+        mUsdMesh.props["apiSchemas"] = apiSchemasProp;
+        
+        // Reference the skeleton
+        tinyusdz::Relationship skelRel;
+        tinyusdz::Path skelPath("/SkelRoot/Skeleton", "");
+        skelRel.set(skelPath);
+        tinyusdz::Property skelProp(skelRel);
+        mUsdMesh.props["skel:skeleton"] = skelProp;
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added skinning primvars to USD mesh: " + 
+                         std::to_string(jointTokens.size()) + " joints, " +
+                         std::to_string(maxWeightsPerVertex) + " weights per vertex");
+    }
+}
+
+void USDZExporter::MeshConverterPipeline::ExecuteBlendShapeConversion() {
+    if (!mMesh || mMesh->mNumAnimMeshes == 0) {
+        return;
+    }
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Converting " + std::to_string(mMesh->mNumAnimMeshes) + " blend shapes");
+    
+    // Store created BlendShape names for later reference
+    std::vector<std::string> createdBlendShapeNames;
+    
+    // Process each animation mesh as a blend shape target
+    for (uint32_t animMeshIdx = 0; animMeshIdx < mMesh->mNumAnimMeshes; ++animMeshIdx) {
+        const aiAnimMesh* animMesh = mMesh->mAnimMeshes[animMeshIdx];
+        if (!animMesh) continue;
+        
+        // Create BlendShape prim using proper tinyusdz APIs
+        tinyusdz::BlendShape blendShape;
+        std::string blendShapeName = mNameRegistry.Sanitize(animMesh->mName.C_Str());
+        if (blendShapeName.empty()) {
+            blendShapeName = "BlendShape_" + std::to_string(animMeshIdx);
+        }
+        blendShapeName = mNameRegistry.GenerateUnique(blendShapeName);
+        blendShape.set_name(blendShapeName);
+        
+        // Calculate offsets and collect affected vertices
+        std::vector<tinyusdz::value::vector3f> offsets;
+        std::vector<tinyusdz::value::vector3f> normalOffsets;
+        std::vector<int> pointIndices;
+        
+        // Compare with base mesh to find vertex offsets
+        if (animMesh->mVertices && mMesh->mVertices && mMesh->mNumVertices == animMesh->mNumVertices) {
+            for (uint32_t vertIdx = 0; vertIdx < mMesh->mNumVertices; ++vertIdx) {
+                const aiVector3D& baseVertex = mMesh->mVertices[vertIdx];
+                const aiVector3D& animVertex = animMesh->mVertices[vertIdx];
+                
+                // Calculate vertex offset
+                aiVector3D offset = animVertex - baseVertex;
+                
+                // Only include vertices with significant offsets
+                const float threshold = 1e-6f;
+                if (offset.SquareLength() > threshold) {
+                    pointIndices.push_back(static_cast<int>(vertIdx));
+                    
+                    tinyusdz::value::vector3f usdOffset;
+                    usdOffset[0] = offset.x;
+                    usdOffset[1] = offset.y;
+                    usdOffset[2] = offset.z;
+                    offsets.push_back(usdOffset);
+                }
+            }
+        }
+        
+        // Calculate normal offsets if available
+        if (animMesh->mNormals && mMesh->mNormals && offsets.size() > 0) {
+            normalOffsets.resize(pointIndices.size());
+            
+            for (size_t i = 0; i < pointIndices.size(); ++i) {
+                uint32_t vertIdx = static_cast<uint32_t>(pointIndices[i]);
+                if (vertIdx < mMesh->mNumVertices && vertIdx < animMesh->mNumVertices) {
+                    const aiVector3D& baseNormal = mMesh->mNormals[vertIdx];
+                    const aiVector3D& animNormal = animMesh->mNormals[vertIdx];
+                    
+                    aiVector3D normalOffset = animNormal - baseNormal;
+                    
+                    tinyusdz::value::vector3f usdNormalOffset;
+                    usdNormalOffset[0] = normalOffset.x;
+                    usdNormalOffset[1] = normalOffset.y;
+                    usdNormalOffset[2] = normalOffset.z;
+                    normalOffsets[i] = usdNormalOffset;
+                }
+            }
+        }
+        
+        // Set BlendShape attributes using proper tinyusdz APIs
+        if (!pointIndices.empty()) {
+            blendShape.pointIndices.set_value(pointIndices);
+            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " point indices: " + std::to_string(pointIndices.size()));
+        }
+        
+        if (!offsets.empty()) {
+            blendShape.offsets.set_value(offsets);
+            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " offsets: " + std::to_string(offsets.size()));
+        }
+        
+        if (!normalOffsets.empty()) {
+            blendShape.normalOffsets.set_value(normalOffsets);
+            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " normal offsets: " + std::to_string(normalOffsets.size()));
+        }
+        
+        // Convert to Prim and add as child to stage
+        // Note: BlendShapes are typically added as separate prims, not directly to the mesh
+        if (!pointIndices.empty() && !offsets.empty()) {
+            tinyusdz::Prim blendShapePrim(blendShape);
+            mStage.root_prims().emplace_back(std::move(blendShapePrim));
+            
+            // Store the actual created name for reference building
+            createdBlendShapeNames.push_back(blendShapeName);
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Created BlendShape prim: " + blendShapeName + " at path: /" + blendShapeName);
+        }
+    }
+    
+    // After creating all BlendShape prims, add skel:blendShapes property to mesh using stored names
+    if (!createdBlendShapeNames.empty()) {
+        std::vector<tinyusdz::value::token> blendShapePathTokens;
+        
+        // Use the actual created names we stored during creation
+        for (const std::string& blendShapeName : createdBlendShapeNames) {
+            std::string blendShapePath = "/" + blendShapeName;
+            blendShapePathTokens.push_back(tinyusdz::value::token(blendShapePath));
+        }
+    
+        // Set skel:blendShapes property on the mesh with USD paths
+        if (!blendShapePathTokens.empty()) {
+            tinyusdz::Attribute blendShapesAttr;
+            blendShapesAttr.set_value(blendShapePathTokens);
+            blendShapesAttr.set_type_name("token[]");
+            blendShapesAttr.variability() = tinyusdz::Variability::Uniform;
+            
+            tinyusdz::Property blendShapesProp(blendShapesAttr, false);
+            mUsdMesh.props["skel:blendShapes"] = blendShapesProp;
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Added skel:blendShapes property with " + std::to_string(blendShapePathTokens.size()) + " USD path references");
+        }
+    }
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Blend shape conversion completed");
+}
+
+void USDZExporter::MeshConverterPipeline::ExecuteAttributeConversion() {
+    // Standard USD mesh attributes - these are required for proper USD mesh operation
+    
+    // 1. Set doubleSided attribute based on mesh properties
+    bool doubleSided = false;
+    
+    // Check material for double-sided property if available
+    if (mScene && mMesh->mMaterialIndex < mScene->mNumMaterials) {
+        const aiMaterial* material = mScene->mMaterials[mMesh->mMaterialIndex];
+        if (material) {
+            int twoSided = 0;
+            if (material->Get(AI_MATKEY_TWOSIDED, twoSided) == aiReturn_SUCCESS) {
+                doubleSided = (twoSided != 0);
+            }
+        }
+    }
+    
+    tinyusdz::Attribute doubleSidedAttr = tinyusdz::Attribute::Uniform(doubleSided);
+    doubleSidedAttr.set_type_name("bool");
+    tinyusdz::Property doubleSidedProp(doubleSidedAttr, false);
+    mUsdMesh.props["doubleSided"] = doubleSidedProp;
+    
+    // 2. Set subdivisionScheme = "none" (standard for triangle meshes) - must be uniform
+    tinyusdz::Attribute subdivisionSchemeAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
+    subdivisionSchemeAttr.set_type_name("token");
+    tinyusdz::Property subdivisionSchemeProp(subdivisionSchemeAttr, false);
+    mUsdMesh.props["subdivisionScheme"] = subdivisionSchemeProp;
+    
+    // 3. Set triangleSubdivisionRule = "none" - must be uniform  
+    tinyusdz::Attribute triangleSubdivisionRuleAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
+    triangleSubdivisionRuleAttr.set_type_name("token");
+    tinyusdz::Property triangleSubdivisionRuleProp(triangleSubdivisionRuleAttr, false);
+    mUsdMesh.props["triangleSubdivisionRule"] = triangleSubdivisionRuleProp;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Utility method to convert uint to string
+std::string USDZExporter::ai_to_string(uint32_t value) const {
+    return std::to_string(value);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Utility method to get file extension
+std::string USDZExporter::GetFileExtension(const std::string& filename) const {
+    size_t lastDot = filename.find_last_of('.');
+    if (lastDot != std::string::npos && lastDot < filename.length() - 1) {
+        return filename.substr(lastDot + 1);
+    }
+    return "";
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1589,345 +1817,208 @@ void USDZExporter::MapClearcoatProperties(const aiMaterial* mat, tinyusdz::UsdPr
 }
 
 // ------------------------------------------------------------------------------------------------
-// Map texture properties with proper tinyusdz connections
+// Map texture properties with proper tinyusdz connections (using template system)
 void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPreviewSurface& surface) {
     if (!mat) return;
     
     // Store texture shaders to be added as children later
     mCurrentMaterialTextureShaders.clear();
     
-    // Base color / Diffuse texture
-    aiString texturePath;
-    if (mat->GetTexture(aiTextureType_BASE_COLOR, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_DIFFUSE, 0, &texturePath) == AI_SUCCESS) {
+    // Define texture configurations for all supported texture types
+    // Using initializer list for optimal performance and readability
+    std::vector<std::pair<TextureConfig, std::function<void()>>> textureConfigs = {
+    // Base color / Diffuse texture (includes Maya support)
+        {TextureConfig("diffuseColor", "rgb"), [&]() {
+            TextureConfig config("diffuseColor", "rgb");
+            config.fallbackTypes = {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE, aiTextureType_MAYA_BASE};
+            ProcessTextureProperty(mat, config, surface.diffuseColor, surface);
+        }},
         
-        tinyusdz::UsdUVTexture diffuseTexture = CreateUVTexture(texturePath.C_Str(), "diffuseColor");
+        // Normal texture (with special bias/scale for 8-bit normal maps)
+        {TextureConfig("normal", "rgb"), [&]() {
+            TextureConfig config("normal", "rgb");
+            config.fallbackTypes = {aiTextureType_NORMALS, aiTextureType_HEIGHT};
+            config.bias = {-1.0f, -1.0f, -1.0f, 0.0f};
+            config.scale = {2.0f, 2.0f, 2.0f, 1.0f};
+            ProcessTextureProperty(mat, config, surface.normal, surface);
+        }},
         
-        // Create connection path from texture to surface (using flat structure - no NodeGraph)
-        std::string texShaderPath = mCurrentMaterialPath + "/diffuseColor";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.diffuseColor.set_connection(connPath);
-        surface.diffuseColor.set_value_empty(); // Clear value when connected
+        // Metallic texture (requires non-zero metallic factor)
+        {TextureConfig("metallic", "b"), [&]() {
+            TextureConfig config("metallic", "b");
+            config.fallbackTypes = {aiTextureType_METALNESS, aiTextureType_GLTF_METALLIC_ROUGHNESS};
+            config.requiresNonZeroFactor = true;
+            config.factorKey = AI_MATKEY_METALLIC_FACTOR;
+            ProcessTextureProperty(mat, config, surface.metallic, surface);
+        }},
         
-        // Store texture shader to add as child later (using Apple's naming pattern)
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("diffuseColor", diffuseTexture));
+        // Roughness texture (with shininess fallback that needs inversion)
+        {TextureConfig("roughness", "g"), [&]() {
+            TextureConfig config("roughness", "g");
+            config.fallbackTypes = {aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_MAYA_SPECULAR_ROUGHNESS, aiTextureType_SHININESS, aiTextureType_GLTF_METALLIC_ROUGHNESS};
+            
+            // Check if using shininess (needs inversion: roughness = 1 - glossiness)
+            aiString shininessPath;
+            if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &shininessPath) != AI_SUCCESS &&
+                mat->GetTexture(aiTextureType_SHININESS, 0, &shininessPath) == AI_SUCCESS) {
+                config.scale = {-1.0f, -1.0f, -1.0f, 1.0f};
+                config.bias = {1.0f, 1.0f, 1.0f, 0.0f};
+            }
+            ProcessTextureProperty(mat, config, surface.roughness, surface);
+        }},
         
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected diffuse texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Normal texture (with fallbacks for different normal map slots)
-    if (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS) {
+        // Emissive texture
+        {TextureConfig("emissiveColor", "rgb"), [&]() {
+            TextureConfig config("emissiveColor", "rgb");
+            config.fallbackTypes = {aiTextureType_EMISSIVE, aiTextureType_EMISSION_COLOR};
+            ProcessTextureProperty(mat, config, surface.emissiveColor, surface);
+        }},
         
-        bool isHeightMap = (mat->GetTexture(aiTextureType_NORMALS, 0, &texturePath) != AI_SUCCESS && 
-                           mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS);
+        // Occlusion texture (with lightmap fallback)
+        {TextureConfig("occlusion", "r"), [&]() {
+            TextureConfig config("occlusion", "r");
+            config.fallbackTypes = {aiTextureType_AMBIENT_OCCLUSION, aiTextureType_LIGHTMAP, aiTextureType_GLTF_METALLIC_ROUGHNESS};
+            ProcessTextureProperty(mat, config, surface.occlusion, surface);
+        }},
         
-        tinyusdz::UsdUVTexture normalTexture = CreateUVTexture(texturePath.C_Str(), "normal");
+        // Opacity texture
+        {TextureConfig("opacity", "a"), [&]() {
+            TextureConfig config("opacity", "a");
+            config.fallbackTypes = {aiTextureType_OPACITY};
+            ProcessTextureProperty(mat, config, surface.opacity, surface);
+        }},
         
-        if (isHeightMap) {
-            // Height maps need different processing - they represent displacement values
-            // For now, we'll treat them as normal maps but note the difference
-            ASSIMP_LOG_DEBUG("USDZExporter: Using height map as normal map (may require special processing)");
-        }
+        // Displacement texture
+        {TextureConfig("displacement", "r"), [&]() {
+            TextureConfig config("displacement", "r");
+            config.fallbackTypes = {aiTextureType_DISPLACEMENT, aiTextureType_HEIGHT};
+            ProcessTextureProperty(mat, config, surface.displacement, surface);
+        }},
         
-        // Set proper bias and scale for normal maps as per USD specification
-        // For 8-bit normal maps: bias=(-1,-1,-1,0), scale=(2,2,2,1)
-        normalTexture.bias.set_value(tinyusdz::value::float4{-1.0f, -1.0f, -1.0f, 0.0f});
-        normalTexture.scale.set_value(tinyusdz::value::float4{2.0f, 2.0f, 2.0f, 1.0f});
+        // Specular texture (triggers specular workflow when present)
+        {TextureConfig("specularColor", "rgb"), [&]() {
+            TextureConfig config("specularColor", "rgb");
+            config.fallbackTypes = {aiTextureType_SPECULAR, aiTextureType_MAYA_SPECULAR, aiTextureType_MAYA_SPECULAR_COLOR};
+            if (ProcessTextureProperty(mat, config, surface.specularColor, surface)) {
+                // Switch to specular workflow when specular texture is present
+                surface.useSpecularWorkflow.set_value(1);
+                ASSIMP_LOG_DEBUG("USDZExporter: Switched to specular workflow due to specular texture");
+            }
+        }},
         
-        std::string texShaderPath = mCurrentMaterialPath + "/normal";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.normal.set_connection(connPath);
-        surface.normal.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("normal", normalTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected normal texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Check for packed metallic-roughness texture (glTF format) - will be handled comprehensively later
-    bool hasPackedMetallicRoughness = false;
-    aiString packedTexturePath;
-    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &packedTexturePath) == AI_SUCCESS) {
-        hasPackedMetallicRoughness = true;
-    }
-    
-    // Metallic texture (check for separate metallic texture first)
-    float currentMetallic = 0.0f;
-    mat->Get(AI_MATKEY_METALLIC_FACTOR, currentMetallic);
-    
-    if (mat->GetTexture(aiTextureType_METALNESS, 0, &texturePath) == AI_SUCCESS && currentMetallic > 0.0f) {
-        // Use dedicated metallic texture - this takes priority over packed textures
-        tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(texturePath.C_Str(), "metallic");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/metallic";
-        tinyusdz::Path connPath(texShaderPath, "outputs:b"); // Use blue channel for metallic (matches reference)
-        surface.metallic.set_connection(connPath);
-        surface.metallic.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallic", metallicTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate metallic texture: " + std::string(texturePath.C_Str()));
-    } else if (hasPackedMetallicRoughness && currentMetallic > 0.0f) {
-        // Fall back to packed texture only if no dedicated metallic texture exists
-        tinyusdz::UsdUVTexture metallicTexture = CreateUVTexture(packedTexturePath.C_Str(), "metallic");
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("metallic", metallicTexture));
-        
-        std::string metallicShaderPath = mCurrentMaterialPath + "/metallic";
-        tinyusdz::Path metallicConnPath(metallicShaderPath, "outputs:b");
-        surface.metallic.set_connection(metallicConnPath);
-        surface.metallic.set_value_empty();
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected metallic from packed texture (blue channel): " + std::string(packedTexturePath.C_Str()));
-    }
-    
-    // Specular texture (for specular workflow materials)
-    float currentSpecularFactor = 1.0f;
-    mat->Get(AI_MATKEY_SPECULAR_FACTOR, currentSpecularFactor);
-    
-    if (mat->GetTexture(aiTextureType_SPECULAR, 0, &texturePath) == AI_SUCCESS && currentSpecularFactor > 0.0f) {
-        tinyusdz::UsdUVTexture specularTexture = CreateUVTexture(texturePath.C_Str(), "specularColor");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/specularColor";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.specularColor.set_connection(connPath);
-        surface.specularColor.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("specularColor", specularTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected specular color texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Roughness texture (check for separate roughness texture first)
-    if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS) {
-        // Use dedicated roughness texture - this takes priority over packed textures
-        tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(texturePath.C_Str(), "roughness");
-        
-        // If using shininess texture, we need to invert it (roughness = 1 - glossiness)
-        if (mat->GetTexture(aiTextureType_SHININESS, 0, &texturePath) == AI_SUCCESS && 
-            mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texturePath) != AI_SUCCESS) {
-            // Set scale and bias to convert glossiness to roughness: roughness = 1 - glossiness
-            roughnessTexture.scale.set_value(tinyusdz::value::float4{-1.0f, -1.0f, -1.0f, 1.0f});
-            roughnessTexture.bias.set_value(tinyusdz::value::float4{1.0f, 1.0f, 1.0f, 0.0f});
-            ASSIMP_LOG_DEBUG("USDZExporter: Converting shininess/glossiness texture to roughness");
-        }
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/roughness";
-        tinyusdz::Path connPath(texShaderPath, "outputs:g"); // Use green channel for roughness (matches reference)
-        surface.roughness.set_connection(connPath);
-        surface.roughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("roughness", roughnessTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate roughness texture: " + std::string(texturePath.C_Str()));
-    } else if (hasPackedMetallicRoughness) {
-        // Fall back to packed texture only if no dedicated roughness texture exists
-        tinyusdz::UsdUVTexture roughnessTexture = CreateUVTexture(packedTexturePath.C_Str(), "roughness");
-        
-        std::string roughnessShaderPath = mCurrentMaterialPath + "/roughness";
-        tinyusdz::Path roughnessConnPath(roughnessShaderPath, "outputs:g");
-        surface.roughness.set_connection(roughnessConnPath);
-        surface.roughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("roughness", roughnessTexture));
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected roughness from packed texture (green channel): " + std::string(packedTexturePath.C_Str()));
-    }
-    
-    // Emissive texture (with fallback to emission color)
-    if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture emissiveTexture = CreateUVTexture(texturePath.C_Str(), "emissiveColor");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/emissiveColor";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.emissiveColor.set_connection(connPath);
-        surface.emissiveColor.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("emissiveColor", emissiveTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected emissive texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Ambient occlusion texture (check for separate AO texture first)
-    if (mat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texturePath) == AI_SUCCESS) {
-        // Use dedicated AO texture - this takes priority over packed textures
-        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
-        surface.occlusion.set_connection(connPath);
-        surface.occlusion.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected separate occlusion texture: " + std::string(texturePath.C_Str()));
-    } else if (mat->GetTexture(aiTextureType_LIGHTMAP, 0, &texturePath) == AI_SUCCESS) {
-        // Check for lightmap texture (glTF importers often classify AO textures as lightmaps)
-        // This takes priority over packed textures since it's a dedicated AO map
-        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(texturePath.C_Str(), "occlusion");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/occlusion";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for occlusion
-        surface.occlusion.set_connection(connPath);
-        surface.occlusion.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion texture from lightmap slot: " + std::string(texturePath.C_Str()));
-    } else if (hasPackedMetallicRoughness) {
-        // Fall back to packed texture only if no dedicated AO texture exists
-        tinyusdz::UsdUVTexture occlusionTexture = CreateUVTexture(packedTexturePath.C_Str(), "occlusion");
-        
-        std::string occlusionShaderPath = mCurrentMaterialPath + "/occlusion";
-        tinyusdz::Path occlusionConnPath(occlusionShaderPath, "outputs:r");
-        surface.occlusion.set_connection(occlusionConnPath);
-        surface.occlusion.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("occlusion", occlusionTexture));
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected occlusion from packed texture (red channel): " + std::string(packedTexturePath.C_Str()));
-    }
-    
-    // Clearcoat texture
-    if (mat->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(texturePath.C_Str(), "clearcoat");
-        
+        // Clearcoat texture (requires clearcoat export enabled)
+        {TextureConfig("clearcoat", "r"), [&]() {
+            if (!mExportClearcoat) return;
+            
+            aiString clearcoatTexPath;
+            if (mat->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &clearcoatTexPath) == AI_SUCCESS) {
+                tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(clearcoatTexPath.C_Str(), "clearcoat");
         std::string texShaderPath = mCurrentMaterialPath + "/clearcoat";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for clearcoat
-        surface.clearcoat.set_connection(connPath);
+                tinyusdz::Path connPath(std::move(texShaderPath), "outputs:r");
+                surface.clearcoat.set_connection(std::move(connPath));
         surface.clearcoat.set_value_empty();
+                mCurrentMaterialTextureShaders.emplace_back("clearcoat", std::move(clearcoatTexture));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat texture: " + std::string(clearcoatTexPath.C_Str()));
+            }
+        }},
         
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("clearcoat", clearcoatTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat texture: " + std::string(texturePath.C_Str()));
-    }
-    
-    // Clearcoat roughness texture
-    if (mat->GetTexture(AI_MATKEY_CLEARCOAT_ROUGHNESS_TEXTURE, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "clearcoatRoughness");
-        
+        // Clearcoat roughness texture (requires clearcoat export enabled)
+        {TextureConfig("clearcoatRoughness", "g"), [&]() {
+            if (!mExportClearcoat) return;
+            
+            aiString clearcoatRoughnessTexPath;
+            if (mat->GetTexture(AI_MATKEY_CLEARCOAT_ROUGHNESS_TEXTURE, &clearcoatRoughnessTexPath) == AI_SUCCESS) {
+                tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(clearcoatRoughnessTexPath.C_Str(), "clearcoatRoughness");
         std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
-        tinyusdz::Path connPath(texShaderPath, "outputs:g"); // Use green channel for clearcoat roughness (matches reference)
-        surface.clearcoatRoughness.set_connection(connPath);
-        surface.clearcoatRoughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("clearcoatRoughness", clearcoatRoughnessTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(texturePath.C_Str()));
+                tinyusdz::Path connPath(std::move(texShaderPath), "outputs:g");
+                surface.clearcoatRoughness.set_connection(std::move(connPath));
+                surface.clearcoatRoughness.set_value_empty();
+                mCurrentMaterialTextureShaders.emplace_back("clearcoatRoughness", std::move(clearcoatRoughnessTexture));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(clearcoatRoughnessTexPath.C_Str()));
+            }
+        }}
+    };
+    
+    
+    // Execute all texture processing with exception safety
+    for (const auto& [config, processor] : textureConfigs) {
+        try {
+            processor();
+        } catch (const std::exception& e) {
+            ASSIMP_LOG_WARN("USDZExporter: Failed to process " + config.paramName + " texture: " + e.what());
+        }
     }
     
-    // Opacity texture
-    if (mat->GetTexture(aiTextureType_OPACITY, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture opacityTexture = CreateUVTexture(texturePath.C_Str(), "opacity");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/opacity";
-        tinyusdz::Path connPath(texShaderPath, "outputs:a"); // Use alpha channel for opacity
-        surface.opacity.set_connection(connPath);
-        surface.opacity.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("opacity", opacityTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected opacity texture: " + std::string(texturePath.C_Str()));
-    }
+    ASSIMP_LOG_DEBUG("USDZExporter: All texture properties processed with template system");
+}
+
+// ------------------------------------------------------------------------------------------------
+// ShaderBuilder template implementation (needs to be in CPP due to incomplete types in header)
+template<typename ShaderType>
+tinyusdz::Shader USDZExporter::ShaderBuilder::CreateShader(const std::string& name, const std::string& infoId, ShaderType&& shaderValue) {
+    tinyusdz::Shader shader;
+    shader.name = name;
+    shader.info_id = infoId;
+    shader.value = std::forward<ShaderType>(shaderValue);
+    return shader;
+}
+
+// ------------------------------------------------------------------------------------------------
+// ShaderBuilder implementation for consistent shader creation
+tinyusdz::Shader USDZExporter::ShaderBuilder::CreateSurfaceShader(tinyusdz::UsdPreviewSurface&& surface) {
+    tinyusdz::Shader surfaceShader;
+    surfaceShader.name = "UsdPreviewSurface";  // Apple's exact naming
+    surfaceShader.info_id = tinyusdz::kUsdPreviewSurface;
     
-    // Displacement texture (height/displacement maps)
-    if (mat->GetTexture(aiTextureType_DISPLACEMENT, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS) {
-        
-        tinyusdz::UsdUVTexture displacementTexture = CreateUVTexture(texturePath.C_Str(), "displacement");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/displacement";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel for displacement
-        surface.displacement.set_connection(connPath);
-        surface.displacement.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("displacement", displacementTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected displacement texture: " + std::string(texturePath.C_Str()));
-    }
+    // Set outputs using move semantics for performance
+    surface.outputsSurface.set_authored(true);
+    surface.outputsDisplacement.set_authored(true);
+    surfaceShader.value = std::move(surface);
     
-    // Specular color texture (enables specular workflow)
-    if (mat->GetTexture(aiTextureType_SPECULAR, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture specularTexture = CreateUVTexture(texturePath.C_Str(), "specularColor");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/specularColor";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.specularColor.set_connection(connPath);
-        surface.specularColor.set_value_empty();
-        
-        // Switch to specular workflow when specular texture is present
-        surface.useSpecularWorkflow.set_value(1);
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("specularColor", specularTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Connected specular texture (switched to specular workflow): " + std::string(texturePath.C_Str()));
-    }
+    return surfaceShader;
+}
+
+tinyusdz::Material USDZExporter::ShaderBuilder::CreateMaterial(const std::string& name, const std::string& surfaceShaderName) {
+    tinyusdz::Material usdMaterial;
+    usdMaterial.name = name;
     
-    // Packed metallic-roughness handling is now done in individual sections above
+    // Create material surface and displacement connections using proper tinyusdz Path API
+    std::string shaderPath = mMaterialPath + "/" + surfaceShaderName;
+    usdMaterial.surface.set(tinyusdz::Path(shaderPath, "outputs:surface"));
+    usdMaterial.displacement.set(tinyusdz::Path(shaderPath, "outputs:displacement"));
     
-    // Additional fallback: Alternative emissive color texture (handled above with emissive texture section already)
-    
-    // Advanced PBR textures - Note: These are NOT directly supported by UsdPreviewSurface
-    // Per USD specification, we should only write valid USD Preview Surface properties
-    
-    // Log warnings for unsupported texture types that would create invalid USD files
-    aiString tempPath;
-    if (mat->GetTexture(aiTextureType_SHEEN, 0, &tempPath) == AI_SUCCESS) {
-        ASSIMP_LOG_WARN("USDZExporter: Sheen texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
-    }
-    
-    if (mat->GetTexture(aiTextureType_TRANSMISSION, 0, &tempPath) == AI_SUCCESS) {
-        ASSIMP_LOG_WARN("USDZExporter: Transmission texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
-    }
-    
-    if (mat->GetTexture(aiTextureType_ANISOTROPY, 0, &tempPath) == AI_SUCCESS) {
-        ASSIMP_LOG_WARN("USDZExporter: Anisotropy texture not supported by UsdPreviewSurface specification, skipping: " + std::string(tempPath.C_Str()));
-    }
-    
-    // Maya-specific textures → map to equivalent PBR properties where possible
-    if (mat->GetTexture(aiTextureType_MAYA_BASE, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture mayaBaseTexture = CreateUVTexture(texturePath.C_Str(), "mayaBase");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/mayaBase";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.diffuseColor.set_connection(connPath);
-        surface.diffuseColor.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaBase", mayaBaseTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Maya base texture mapped to diffuse color: " + std::string(texturePath.C_Str()));
-    }
-    
-    if (mat->GetTexture(aiTextureType_MAYA_SPECULAR, 0, &texturePath) == AI_SUCCESS ||
-        mat->GetTexture(aiTextureType_MAYA_SPECULAR_COLOR, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture mayaSpecularTexture = CreateUVTexture(texturePath.C_Str(), "mayaSpecular");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/mayaSpecular";
-        tinyusdz::Path connPath(texShaderPath, "outputs:rgb");
-        surface.specularColor.set_connection(connPath);
-        surface.specularColor.set_value_empty();
-        
-        // Switch to specular workflow
-        surface.useSpecularWorkflow.set_value(1);
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaSpecular", mayaSpecularTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Maya specular texture mapped to specular color: " + std::string(texturePath.C_Str()));
-    }
-    
-    if (mat->GetTexture(aiTextureType_MAYA_SPECULAR_ROUGHNESS, 0, &texturePath) == AI_SUCCESS) {
-        tinyusdz::UsdUVTexture mayaRoughnessTexture = CreateUVTexture(texturePath.C_Str(), "mayaRoughness");
-        
-        std::string texShaderPath = mCurrentMaterialPath + "/mayaRoughness";
-        tinyusdz::Path connPath(texShaderPath, "outputs:r"); // Use red channel
-        surface.roughness.set_connection(connPath);
-        surface.roughness.set_value_empty();
-        
-        mCurrentMaterialTextureShaders.push_back(std::make_pair("mayaRoughness", mayaRoughnessTexture));
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Maya roughness texture connected: " + std::string(texturePath.C_Str()));
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Texture connections completed");
+    return usdMaterial;
+}
+
+// ------------------------------------------------------------------------------------------------
+// PrimFactory template implementation (needs to be in CPP due to incomplete types in header)
+template<typename PrimType>
+tinyusdz::Prim USDZExporter::PrimFactory::CreatePrim(PrimType&& primData) {
+    return tinyusdz::Prim(std::forward<PrimType>(primData));
+}
+
+template<typename PrimType>
+void USDZExporter::PrimFactory::AddChildPrim(tinyusdz::Prim& parent, PrimType&& primData) {
+    parent.children().emplace_back(CreatePrim(std::forward<PrimType>(primData)));
+}
+
+template<typename... PrimTypes>
+void USDZExporter::PrimFactory::AddChildren(tinyusdz::Prim& parent, PrimTypes&&... prims) {
+    (parent.children().emplace_back(CreatePrim(std::forward<PrimTypes>(prims))), ...);
+}
+
+// ------------------------------------------------------------------------------------------------
+// PrimFactory static method implementations
+tinyusdz::Prim USDZExporter::PrimFactory::CreateScope(const std::string& name) {
+    tinyusdz::Scope scope;
+    scope.name = name;
+    return tinyusdz::Prim(std::move(scope));
+}
+
+tinyusdz::Prim USDZExporter::PrimFactory::CreateXform(const std::string& name) {
+    tinyusdz::Xform xform;
+    xform.name = name;
+    return tinyusdz::Prim(std::move(xform));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1962,25 +2053,59 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
 }
 
 // ------------------------------------------------------------------------------------------------
-// Convert texture using proper tinyusdz APIs  
-void USDZExporter::ConvertTexture(const aiMaterial* mat, aiTextureType type, 
-                                 tinyusdz::UsdUVTexture& uvTexture) {
-    if (!mat) return;
+// Template-based texture processing system for eliminating duplication
+template<typename SurfacePropertyType>
+bool USDZExporter::ProcessTextureProperty(const aiMaterial* mat, const TextureConfig& config, 
+                                          SurfacePropertyType& surfaceProperty, tinyusdz::UsdPreviewSurface& surface) {
+    if (!mat) return false;
     
+    // Check material factor if required
+    if (config.requiresNonZeroFactor && !config.factorKey.empty()) {
+        float factor = 0.0f;
+        if (mat->Get(config.factorKey.c_str(), 0, 0, factor) == AI_SUCCESS && factor <= 0.0f) {
+            return false; // Skip if factor is zero or negative
+        }
+    }
+    
+    // Try each fallback type in order until we find a texture
     aiString texturePath;
-    if (mat->GetTexture(type, 0, &texturePath) != AI_SUCCESS) {
-        return;
+    aiTextureType foundType = aiTextureType_NONE;
+    for (aiTextureType type : config.fallbackTypes) {
+        if (mat->GetTexture(type, 0, &texturePath) == AI_SUCCESS) {
+            foundType = type;
+            break;
+        }
     }
     
-    std::string texPath(texturePath.C_Str());
-    
-    if (IsEmbeddedTexture(texPath)) {
-        HandleEmbeddedTexture(texPath, uvTexture);
-    } else {
-        HandleExternalTexture(texPath, uvTexture);
+    if (foundType == aiTextureType_NONE) {
+        return false; // No texture found
     }
+    
+    // Create UV texture with optimized construction
+    tinyusdz::UsdUVTexture uvTexture = CreateUVTexture(texturePath.C_Str(), config.paramName);
+    
+    // Apply texture-specific transformations
+    if (config.bias[0] != 0.0f || config.bias[1] != 0.0f || config.bias[2] != 0.0f || config.bias[3] != 0.0f) {
+        uvTexture.bias.set_value(tinyusdz::value::float4{config.bias[0], config.bias[1], config.bias[2], config.bias[3]});
+    }
+    if (config.scale[0] != 1.0f || config.scale[1] != 1.0f || config.scale[2] != 1.0f || config.scale[3] != 1.0f) {
+        uvTexture.scale.set_value(tinyusdz::value::float4{config.scale[0], config.scale[1], config.scale[2], config.scale[3]});
+    }
+    
+    // Create connection path using move semantics for performance
+    std::string texShaderPath = mCurrentMaterialPath + "/" + config.paramName;
+    tinyusdz::Path connPath(std::move(texShaderPath), "outputs:" + config.outputChannel);
+    
+    // Connect to surface property and clear default value
+    surfaceProperty.set_connection(std::move(connPath));
+    surfaceProperty.set_value_empty();
+    
+    // Store texture shader for later addition with perfect forwarding
+    mCurrentMaterialTextureShaders.emplace_back(config.paramName, std::move(uvTexture));
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Connected " + config.paramName + " texture: " + texturePath.C_Str());
+    return true;
 }
-
 
 // ------------------------------------------------------------------------------------------------
 // Handle embedded texture using tinyusdz APIs
@@ -2482,386 +2607,11 @@ void USDZExporter::CreateMorphTargetSkelAnimation(const aiMeshMorphAnim* morphAn
 }
 
 // ------------------------------------------------------------------------------------------------
-// Convert skinning using tinyusdz GeomPrimvar APIs
-void USDZExporter::ConvertSkinning(const aiMesh* mesh) {
-    if (!mesh || mesh->mNumBones == 0) {
-        return;
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Converting skinning data for " + ai_to_string(mesh->mNumBones) + " bones");
-    
-    // Find the corresponding USD mesh to add skinning data to
-    auto meshIt = mMeshIdMap.find(mesh);
-    if (meshIt == mMeshIdMap.end()) {
-        ASSIMP_LOG_WARN("USDZExporter: Could not find USD mesh for skinning data");
-        return;
-    }
-    
-    // Determine maximum weights per vertex (common values: 4, 8)
-    uint32_t maxWeightsPerVertex = 4; // Default to 4 weights per vertex
-    
-    // Prepare joint indices and weights arrays
-    std::vector<int> jointIndices(mesh->mNumVertices * maxWeightsPerVertex, 0);
-    std::vector<float> jointWeights(mesh->mNumVertices * maxWeightsPerVertex, 0.0f);
-    
-    // Collect joint names for skel:joints property
-    std::vector<tinyusdz::value::token> jointTokens;
-    std::map<std::string, uint32_t> boneNameToIndex;
-    
-    for (uint32_t i = 0; i < mesh->mNumBones; ++i) {
-        const aiBone* bone = mesh->mBones[i];
-        std::string boneName = SanitizeName(bone->mName.C_Str());
-        jointTokens.push_back(tinyusdz::value::token(boneName));
-        boneNameToIndex[boneName] = i;
-    }
-    
-    // Process bone weights and fill joint data arrays
-    for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
-        const aiBone* bone = mesh->mBones[boneIdx];
-        
-        for (uint32_t weightIdx = 0; weightIdx < bone->mNumWeights; ++weightIdx) {
-            const aiVertexWeight& weight = bone->mWeights[weightIdx];
-            uint32_t vertexIdx = weight.mVertexId;
-            
-            if (vertexIdx >= mesh->mNumVertices) {
-                continue; // Skip invalid vertex indices
-            }
-            
-            // Find an empty slot for this vertex (up to maxWeightsPerVertex)
-            bool added = false;
-            for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
-                
-                if (jointWeights[arrayIdx] == 0.0f) {
-                    jointIndices[arrayIdx] = static_cast<int>(boneIdx);
-                    jointWeights[arrayIdx] = weight.mWeight;
-                    added = true;
-                    break;
-                }
-            }
-            
-            if (!added) {
-                // Find the slot with the smallest weight and replace it if this weight is larger
-                uint32_t minSlot = 0;
-                float minWeight = jointWeights[vertexIdx * maxWeightsPerVertex];
-                
-                for (uint32_t slotIdx = 1; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                    uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
-                    if (jointWeights[arrayIdx] < minWeight) {
-                        minWeight = jointWeights[arrayIdx];
-                        minSlot = slotIdx;
-                    }
-                }
-                
-                if (weight.mWeight > minWeight) {
-                    uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + minSlot;
-                    jointIndices[arrayIdx] = static_cast<int>(boneIdx);
-                    jointWeights[arrayIdx] = weight.mWeight;
-                }
-            }
-        }
-    }
-    
-    // Normalize weights per vertex
-    for (uint32_t vertexIdx = 0; vertexIdx < mesh->mNumVertices; ++vertexIdx) {
-        float totalWeight = 0.0f;
-        uint32_t baseIdx = vertexIdx * maxWeightsPerVertex;
-        
-        // Calculate total weight
-        for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-            totalWeight += jointWeights[baseIdx + slotIdx];
-        }
-        
-        // Normalize if total weight > 0
-        if (totalWeight > 0.0f) {
-            for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                jointWeights[baseIdx + slotIdx] /= totalWeight;
-            }
-        }
-    }
-    
-    // TODO: Access the USD mesh prim to add skinning primvars
-    // This requires modifying the mesh export to store references to created USD meshes
-    // For now, we'll create the skinning data structure but can't attach it until
-    // the mesh export architecture is updated
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Prepared skinning data: " + 
-                     ai_to_string(jointIndices.size()) + " joint indices, " +
-                     ai_to_string(jointWeights.size()) + " joint weights, " +
-                     ai_to_string(maxWeightsPerVertex) + " weights per vertex");
-}
-
-// ------------------------------------------------------------------------------------------------
-// Convert skinning to USD mesh using tinyusdz GeomPrimvar APIs
-void USDZExporter::ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh || mesh->mNumBones == 0) {
-        return;
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Adding skinning primvars for " + ai_to_string(mesh->mNumBones) + " bones");
-    
-    // Determine maximum weights per vertex
-    uint32_t maxWeightsPerVertex = 4;
-    
-    // Prepare joint indices and weights arrays
-    std::vector<int> jointIndices(mesh->mNumVertices * maxWeightsPerVertex, 0);
-    std::vector<float> jointWeights(mesh->mNumVertices * maxWeightsPerVertex, 0.0f);
-    
-    // Collect joint names
-    std::vector<tinyusdz::value::token> jointTokens;
-    
-    for (uint32_t i = 0; i < mesh->mNumBones; ++i) {
-        const aiBone* bone = mesh->mBones[i];
-        std::string boneName = SanitizeName(bone->mName.C_Str());
-        jointTokens.push_back(tinyusdz::value::token(boneName));
-    }
-    
-    // Process bone weights and fill joint data arrays
-    for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
-        const aiBone* bone = mesh->mBones[boneIdx];
-        
-        for (uint32_t weightIdx = 0; weightIdx < bone->mNumWeights; ++weightIdx) {
-            const aiVertexWeight& weight = bone->mWeights[weightIdx];
-            uint32_t vertexIdx = weight.mVertexId;
-            
-            if (vertexIdx >= mesh->mNumVertices) {
-                continue;
-            }
-            
-            // Find an empty slot for this vertex
-            bool added = false;
-            for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
-                
-                if (jointWeights[arrayIdx] == 0.0f) {
-                    jointIndices[arrayIdx] = static_cast<int>(boneIdx);
-                    jointWeights[arrayIdx] = weight.mWeight;
-                    added = true;
-                    break;
-                }
-            }
-            
-            if (!added) {
-                // Replace the smallest weight if this is larger
-                uint32_t minSlot = 0;
-                float minWeight = jointWeights[vertexIdx * maxWeightsPerVertex];
-                
-                for (uint32_t slotIdx = 1; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                    uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + slotIdx;
-                    if (jointWeights[arrayIdx] < minWeight) {
-                        minWeight = jointWeights[arrayIdx];
-                        minSlot = slotIdx;
-                    }
-                }
-                
-                if (weight.mWeight > minWeight) {
-                    uint32_t arrayIdx = vertexIdx * maxWeightsPerVertex + minSlot;
-                    jointIndices[arrayIdx] = static_cast<int>(boneIdx);
-                    jointWeights[arrayIdx] = weight.mWeight;
-                }
-            }
-        }
-    }
-    
-    // Normalize weights per vertex
-    for (uint32_t vertexIdx = 0; vertexIdx < mesh->mNumVertices; ++vertexIdx) {
-        float totalWeight = 0.0f;
-        uint32_t baseIdx = vertexIdx * maxWeightsPerVertex;
-        
-        for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-            totalWeight += jointWeights[baseIdx + slotIdx];
-        }
-        
-        if (totalWeight > 0.0f) {
-            for (uint32_t slotIdx = 0; slotIdx < maxWeightsPerVertex; ++slotIdx) {
-                jointWeights[baseIdx + slotIdx] /= totalWeight;
-            }
-        }
-    }
-    
-    // Create skel:jointWeights primvar using proper tinyusdz APIs
-    tinyusdz::GeomPrimvar weightsPrimvar;
-    weightsPrimvar.set_name("skel:jointWeights");
-    weightsPrimvar.set_value(jointWeights);
-    weightsPrimvar.set_elementSize(maxWeightsPerVertex);
-    weightsPrimvar.set_interpolation(tinyusdz::Interpolation::Vertex);
-    usdMesh.set_primvar(weightsPrimvar);
-    
-    // Create skel:jointIndices primvar using proper tinyusdz APIs  
-    tinyusdz::GeomPrimvar indicesPrimvar;
-    indicesPrimvar.set_name("skel:jointIndices");
-    indicesPrimvar.set_value(jointIndices);
-    indicesPrimvar.set_elementSize(maxWeightsPerVertex);
-    indicesPrimvar.set_interpolation(tinyusdz::Interpolation::Vertex);
-    usdMesh.set_primvar(indicesPrimvar);
-    
-    // Create skel:geomBindTransform primvar (identity matrix for now)
-    tinyusdz::value::matrix4d geomBindTransform;
-    tinyusdz::Identity(&geomBindTransform);
-    tinyusdz::GeomPrimvar geomBindPrimvar;
-    geomBindPrimvar.set_name("skel:geomBindTransform");
-    geomBindPrimvar.set_value(geomBindTransform);
-    usdMesh.set_primvar(geomBindPrimvar);
-    
-    // Add skel:joints property - must match skeleton joint names exactly
-    std::vector<tinyusdz::value::token> meshJointTokens;
-    
-    // Build mesh joint references using exact hierarchical USD paths from skeleton
-    for (uint32_t boneIdx = 0; boneIdx < mesh->mNumBones; ++boneIdx) {
-        const aiBone* bone = mesh->mBones[boneIdx];
-        std::string boneName = bone->mName.C_Str();
-        
-        // Use the exact USD path from skeleton (critical for tinyusdz validation)
-        auto pathIt = mBoneNameToUSDPath.find(boneName);
-        if (pathIt != mBoneNameToUSDPath.end()) {
-            const std::string& usdPath = pathIt->second;
-            meshJointTokens.emplace_back(usdPath);
-            
-            ASSIMP_LOG_DEBUG("USDZExporter: Mapped bone '" + boneName + "' to USD path '" + usdPath + "'");
-        } else {
-            // Fallback to sanitized name (shouldn't happen if skeleton was built correctly)
-            std::string sanitizedBoneName = SanitizeName(boneName);
-            meshJointTokens.emplace_back(sanitizedBoneName);
-            
-            ASSIMP_LOG_WARN("USDZExporter: Could not find USD path for bone '" + boneName + "', using fallback: '" + sanitizedBoneName + "'");
-        }
-    }
-    
-    tinyusdz::Attribute jointsAttr;
-    jointsAttr.set_value(meshJointTokens);
-    jointsAttr.set_type_name("token[]");
-    jointsAttr.variability() = tinyusdz::Variability::Uniform;
-    tinyusdz::Property jointsProp(jointsAttr, false);
-    usdMesh.props["skel:joints"] = jointsProp;
-    
-    // Add SkelBindingAPI schema and skeleton reference
-    // Add to apiSchemas to indicate this mesh uses skeletal binding
-    std::vector<tinyusdz::value::token> apiSchemas = { tinyusdz::value::token("SkelBindingAPI") };
-    tinyusdz::Attribute apiSchemasAttr;
-    apiSchemasAttr.set_value(apiSchemas);
-    apiSchemasAttr.set_type_name("token[]");
-    apiSchemasAttr.variability() = tinyusdz::Variability::Uniform;
-    tinyusdz::Property apiSchemasProp(apiSchemasAttr, false);
-    usdMesh.props["apiSchemas"] = apiSchemasProp;
-    
-    // Reference the skeleton
-    tinyusdz::Relationship skelRel;
-    tinyusdz::Path skelPath("/SkelRoot/Skeleton", "");
-    skelRel.set(skelPath);
-    tinyusdz::Property skelProp(skelRel);
-    usdMesh.props["skel:skeleton"] = skelProp;
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Added skinning primvars to USD mesh: " + 
-                     ai_to_string(jointTokens.size()) + " joints, " +
-                     ai_to_string(maxWeightsPerVertex) + " weights per vertex");
-}
-
-// ------------------------------------------------------------------------------------------------
 // Convert blend shapes (placeholder)
 void USDZExporter::ConvertBlendShapes(const aiMesh* mesh) {
     ASSIMP_LOG_DEBUG("USDZExporter: Blend shape conversion not yet implemented");
 }
 
-// ------------------------------------------------------------------------------------------------
-// Convert blend shapes to USD mesh using tinyusdz BlendShape APIs
-void USDZExporter::ConvertBlendShapesToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
-    if (!mesh || mesh->mNumAnimMeshes == 0) {
-        return;
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Converting " + ai_to_string(mesh->mNumAnimMeshes) + " blend shapes");
-    
-    // Process each animation mesh as a blend shape target
-    for (uint32_t animMeshIdx = 0; animMeshIdx < mesh->mNumAnimMeshes; ++animMeshIdx) {
-        const aiAnimMesh* animMesh = mesh->mAnimMeshes[animMeshIdx];
-        if (!animMesh) continue;
-        
-        // Create BlendShape prim using proper tinyusdz APIs
-        tinyusdz::BlendShape blendShape;
-        std::string blendShapeName = SanitizeName(animMesh->mName.C_Str());
-        if (blendShapeName.empty()) {
-            blendShapeName = "BlendShape_" + ai_to_string(animMeshIdx);
-        }
-        blendShapeName = GenerateUniqueName(blendShapeName);
-        blendShape.set_name(blendShapeName);
-        
-        // Calculate offsets and collect affected vertices
-        std::vector<tinyusdz::value::vector3f> offsets;
-        std::vector<tinyusdz::value::vector3f> normalOffsets;
-        std::vector<int> pointIndices;
-        
-        // Compare with base mesh to find vertex offsets
-        if (animMesh->mVertices && mesh->mVertices && mesh->mNumVertices == animMesh->mNumVertices) {
-            for (uint32_t vertIdx = 0; vertIdx < mesh->mNumVertices; ++vertIdx) {
-                const aiVector3D& baseVertex = mesh->mVertices[vertIdx];
-                const aiVector3D& animVertex = animMesh->mVertices[vertIdx];
-                
-                // Calculate vertex offset
-                aiVector3D offset = animVertex - baseVertex;
-                
-                // Only include vertices with significant offsets
-                const float threshold = 1e-6f;
-                if (offset.SquareLength() > threshold) {
-                    pointIndices.push_back(static_cast<int>(vertIdx));
-                    
-                    tinyusdz::value::vector3f usdOffset;
-                    usdOffset[0] = offset.x;
-                    usdOffset[1] = offset.y;
-                    usdOffset[2] = offset.z;
-                    offsets.push_back(usdOffset);
-                }
-            }
-        }
-        
-        // Calculate normal offsets if available
-        if (animMesh->mNormals && mesh->mNormals && offsets.size() > 0) {
-            normalOffsets.resize(pointIndices.size());
-            
-            for (size_t i = 0; i < pointIndices.size(); ++i) {
-                uint32_t vertIdx = static_cast<uint32_t>(pointIndices[i]);
-                if (vertIdx < mesh->mNumVertices && vertIdx < animMesh->mNumVertices) {
-                    const aiVector3D& baseNormal = mesh->mNormals[vertIdx];
-                    const aiVector3D& animNormal = animMesh->mNormals[vertIdx];
-                    
-                    aiVector3D normalOffset = animNormal - baseNormal;
-                    
-                    tinyusdz::value::vector3f usdNormalOffset;
-                    usdNormalOffset[0] = normalOffset.x;
-                    usdNormalOffset[1] = normalOffset.y;
-                    usdNormalOffset[2] = normalOffset.z;
-                    normalOffsets[i] = usdNormalOffset;
-                }
-            }
-        }
-        
-        // Set BlendShape attributes using proper tinyusdz APIs
-        if (!pointIndices.empty()) {
-            blendShape.pointIndices.set_value(pointIndices);
-            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " point indices: " + ai_to_string(pointIndices.size()));
-        }
-        
-        if (!offsets.empty()) {
-            blendShape.offsets.set_value(offsets);
-            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " offsets: " + ai_to_string(offsets.size()));
-        }
-        
-        if (!normalOffsets.empty()) {
-            blendShape.normalOffsets.set_value(normalOffsets);
-            ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " normal offsets: " + ai_to_string(normalOffsets.size()));
-        }
-        
-        // Convert to Prim and add as child to stage
-        // Note: BlendShapes are typically added as separate prims, not directly to the mesh
-        if (!pointIndices.empty() && !offsets.empty()) {
-            tinyusdz::Prim blendShapePrim(blendShape);
-            mStage->root_prims().emplace_back(std::move(blendShapePrim));
-            
-            ASSIMP_LOG_DEBUG("USDZExporter: Created BlendShape prim: " + blendShapeName);
-        }
-    }
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Blend shape conversion completed");
-}
 
 // ------------------------------------------------------------------------------------------------
 // Convert camera using tinyusdz GeomCamera API
@@ -3117,20 +2867,7 @@ void USDZExporter::SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform
 // ------------------------------------------------------------------------------------------------
 // Sanitize name for USD
 std::string USDZExporter::SanitizeName(const std::string& name) const {
-    if (name.empty()) return "";
-    
-    std::string result = name;
-    
-    // Replace invalid characters with underscores
-    std::regex invalidChars("[^a-zA-Z0-9_]");
-    result = std::regex_replace(result, invalidChars, "_");
-    
-    // Ensure it starts with a letter or underscore
-    if (!result.empty() && std::isdigit(result[0])) {
-        result = "_" + result;
-    }
-    
-    return result;
+    return NameRegistry::Sanitize(name);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3162,16 +2899,9 @@ std::string USDZExporter::SanitizeFilename(const std::string& filename) const {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Generate unique name
+// Generate unique name (delegated to NameRegistry for performance)
 std::string USDZExporter::GenerateUniqueName(const std::string& baseName) const {
-    auto it = mNameCounters.find(baseName);
-    if (it == mNameCounters.end()) {
-        mNameCounters[baseName] = 1;
-        return baseName;
-    } else {
-        uint32_t counter = ++it->second;
-        return baseName + "_" + ai_to_string(counter);
-    }
+    return mNameRegistry.GenerateUnique(baseName);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3663,26 +3393,6 @@ void Assimp::ExportSceneUSDZ(const char* pFile, IOSystem* pIOSystem, const aiSce
     }
     
     // USDZ file written with embedded textures in ZIP archive
-}
-
-// USDC export removed - not supported by current tinyusdz version
-
-// Post-processing removed - using proper tinyusdz APIs instead
-
-// ------------------------------------------------------------------------------------------------
-// Utility method to convert uint to string
-std::string USDZExporter::ai_to_string(uint32_t value) const {
-    return std::to_string(value);
-}
-
-// ------------------------------------------------------------------------------------------------
-// Utility method to get file extension
-std::string USDZExporter::GetFileExtension(const std::string& filename) const {
-    size_t lastDot = filename.find_last_of('.');
-    if (lastDot != std::string::npos && lastDot < filename.length() - 1) {
-        return filename.substr(lastDot + 1);
-    }
-    return "";
 }
 
 #endif // !ASSIMP_BUILD_NO_USD_EXPORTER
