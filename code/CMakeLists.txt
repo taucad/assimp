@@ -712,8 +712,8 @@ if (NOT ASSIMP_NO_EXPORT)
       AssetLib/USD/USDZExporter.cpp
       AssetLib/USD/USDZExporterHelper.h
       AssetLib/USD/USDZExporterHelper.cpp
-      AssetLib/USD/USDZArchiveWriter.h
-      AssetLib/USD/USDZArchiveWriter.cpp)
+      AssetLib/USD/usdz-writer.hh
+      AssetLib/USD/usdz-writer.cc)
   endif()
 
 endif()
