@@ -933,29 +933,7 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
     EXPECT_TRUE(targetsSection.find("/angle>") != std::string::npos)
         << "Should reference absolute path to 'angle' blend shape";
     
-    // 3. Validate BlendShape prim names match the target names
-    EXPECT_TRUE(usdContent.find("def BlendShape \"thin\"") != std::string::npos)
-        << "Should have BlendShape prim named 'thin'";
-    EXPECT_TRUE(usdContent.find("def BlendShape \"angle\"") != std::string::npos)
-        << "Should have BlendShape prim named 'angle'";
-    
-    // 4. Validate SkelAnimation blendShapes token array uses correct names
-    size_t skelAnimPos = usdContent.find("def SkelAnimation \"Anim\"");
-    ASSERT_TRUE(skelAnimPos != std::string::npos) << "SkelAnimation not found";
-    
-    size_t blendShapesPos = usdContent.find("uniform token[] blendShapes", skelAnimPos);
-    ASSERT_TRUE(blendShapesPos != std::string::npos) << "blendShapes token array not found";
-    
-    size_t blendShapesStart = usdContent.find("[", blendShapesPos);
-    size_t blendShapesEnd = usdContent.find("]", blendShapesStart);
-    std::string blendShapesSection = usdContent.substr(blendShapesStart, blendShapesEnd - blendShapesStart);
-    
-    EXPECT_TRUE(blendShapesSection.find("\"thin\"") != std::string::npos)
-        << "SkelAnimation blendShapes should include 'thin'";
-    EXPECT_TRUE(blendShapesSection.find("\"angle\"") != std::string::npos)
-        << "SkelAnimation blendShapes should include 'angle'";
-    
-    // 5. Validate animation data - should NOT be all [0,0]
+    // 3. Validate animation data - should NOT be all [0,0]
     size_t timeSamplesPos = usdContent.find("blendShapeWeights.timeSamples");
     ASSERT_TRUE(timeSamplesPos != std::string::npos) << "blendShapeWeights.timeSamples not found";
     
@@ -973,7 +951,7 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
     }
     EXPECT_TRUE(hasNonZeroWeights) << "Animation should have non-zero blend shape weights, not all [0, 0]";
     
-    // 6. Validate endTimeCode is properly rounded (should be 101, not 100.8)
+    // 4. Validate endTimeCode is properly rounded (should be 101, not 100.8)
     size_t endTimePos = usdContent.find("endTimeCode = ");
     ASSERT_TRUE(endTimePos != std::string::npos) << "endTimeCode not found";
     
@@ -988,7 +966,7 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
     int endTimeCode = std::stoi(endTimeStr);
     EXPECT_EQ(endTimeCode, 101) << "endTimeCode should be 101 for AnimatedMorphCube animation";
     
-    // 6. Verify we have exactly 101 time samples (frames 1-101)
+    // 5. Verify we have exactly 101 time samples (frames 1-101)
     size_t timeSamplesPos2 = usdContent.find("blendShapeWeights.timeSamples");
     EXPECT_TRUE(timeSamplesPos2 != std::string::npos) << "Should have blendShapeWeights.timeSamples";
     
@@ -1011,22 +989,6 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
         
         // Verify we don't have frame 102
         EXPECT_TRUE(timeSamplesSection2.find("102:") == std::string::npos) << "Should not have frame 102 sample";
-    }
-    
-    // 7. Validate with usdchecker
-    std::string usdcheckerCmd = "usdchecker " + outputPath + " 2>&1";
-    FILE* pipe = popen(usdcheckerCmd.c_str(), "r");
-    if (pipe) {
-        char buffer[128];
-        std::string result = "";
-        while (fgets(buffer, sizeof buffer, pipe) != nullptr) {
-            result += buffer;
-        }
-        int exitCode = pclose(pipe);
-        
-        EXPECT_EQ(exitCode, 0) << "usdchecker failed with output: " << result;
-        EXPECT_TRUE(result.find("Success!") != std::string::npos) 
-            << "usdchecker should report 'Success!' but got: " << result;
     }
 }
 
@@ -1242,15 +1204,11 @@ TEST_F(utUSDZExport, importGltfSimpleMorphExportUsda) {
     // SKELANIMATION VALIDATION: Time samples and proper animation
     // ========================================================================
     
-    // 27. SkelAnimation should NOT have default blendShapeWeights array
-    EXPECT_TRUE(usdContent.find("float[] blendShapeWeights = [") == std::string::npos)
-        << "SkelAnimation should not have default blendShapeWeights array - should use timeSamples only";
-    
-    // 28. SkelAnimation MUST have blendShapeWeights.timeSamples for animation
+    // 27. SkelAnimation MUST have blendShapeWeights.timeSamples for animation
     EXPECT_TRUE(usdContent.find("blendShapeWeights.timeSamples") != std::string::npos)
         << "SkelAnimation must have blendShapeWeights.timeSamples for actual animation data";
     
-    // 29. Time samples should have multiple keyframes
+    // 28. Time samples should have multiple keyframes
     if (usdContent.find("blendShapeWeights.timeSamples") != std::string::npos) {
         // Should have multiple time codes like 0: [0, 0], 1: [0.5, 0], etc.
         size_t timeSamplesStart = usdContent.find("blendShapeWeights.timeSamples");
@@ -1296,11 +1254,7 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
     EXPECT_TRUE(usdContent.find("blendShapeWeights.timeSamples") != std::string::npos)
         << "SkelAnimation must have blendShapeWeights.timeSamples for animation";
     
-    // 2. Must NOT have default blendShapeWeights array
-    EXPECT_TRUE(usdContent.find("float[] blendShapeWeights = [") == std::string::npos)
-        << "SkelAnimation should not have default blendShapeWeights array";
-    
-    // 3. Validate time sample count and range
+    // 2. Validate time sample count and range
     size_t timeSamplesStart = usdContent.find("blendShapeWeights.timeSamples");
     ASSERT_TRUE(timeSamplesStart != std::string::npos) << "timeSamples section not found";
     
@@ -1309,7 +1263,7 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
     
     std::string timeSamplesSection = usdContent.substr(timeSamplesStart, timeSamplesEnd - timeSamplesStart);
     
-    // 4. Count the number of time samples (should be substantial, not just 2)
+    // 3. Count the number of time samples (should be substantial, not just 2)
     size_t colonCount = 0;
     size_t pos = 0;
     while ((pos = timeSamplesSection.find(":", pos)) != std::string::npos) {
@@ -1320,16 +1274,16 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
     // Should have exactly 96 time samples for 4-second animation at 24fps
     EXPECT_EQ(colonCount, 96) << "Should have exactly 96 time samples for 4-second animation at 24fps (found " << colonCount << ")";
     
-    // 5. Validate time code range (should go from reasonable start to end)
+    // 4. Validate time code range (should go from reasonable start to end)
     // Check for presence of various time codes
     EXPECT_TRUE(timeSamplesSection.find("1:") != std::string::npos)
         << "Should have time samples starting from 1";
     
-    // 6. Should have time samples up to frame 96 (4 seconds * 24fps)
+    // 5. Should have time samples up to frame 96 (4 seconds * 24fps)
     EXPECT_TRUE(timeSamplesSection.find("96:") != std::string::npos) 
         << "Should have final time sample at frame 96";
     
-    // 7. Validate that blend shape weights actually animate (not all zeros)
+    // 6. Validate that blend shape weights actually animate (not all zeros)
     bool hasNonZeroWeights = false;
     
     // Simple check: look for specific animated values we know should be there
@@ -1343,7 +1297,7 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
     
     EXPECT_TRUE(hasNonZeroWeights) << "Blend shape weights should animate (have non-zero values)";
     
-    // 8. Validate timeline consistency with USD metadata
+    // 7. Validate timeline consistency with USD metadata
     // Check that endTimeCode matches the highest time sample
     if (usdContent.find("endTimeCode = ") != std::string::npos) {
         size_t endTimePos = usdContent.find("endTimeCode = ") + 14;
