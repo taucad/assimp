@@ -1661,6 +1661,7 @@ inline void Mesh::Read(Value &pJSON_Object, Asset &pAsset_Root) {
 
             if(this->targetNames.empty())
             {
+                // First try to get names from extras.targetNames (standard approach)
                 Value *curExtras = FindObject(primitive, "extras");
                 if (nullptr != curExtras) {
                     if (Value *curTargetNames = FindArray(*curExtras, "targetNames")) {
@@ -1669,6 +1670,20 @@ inline void Mesh::Read(Value &pJSON_Object, Asset &pAsset_Root) {
                             Value &targetNameValue = (*curTargetNames)[j];
                             if (targetNameValue.IsString()) {
                                 this->targetNames[j] = targetNameValue.GetString();
+                            }
+                        }
+                    }
+                }
+                
+                // If no names in extras, try to extract from accessor names
+                if (this->targetNames.empty() && !prim.targets.empty()) {
+                    this->targetNames.resize(prim.targets.size());
+                    for (unsigned int j = 0; j < prim.targets.size(); ++j) {
+                        // Try to get name from POSITION accessor
+                        if (!prim.targets[j].position.empty() && prim.targets[j].position[0]) {
+                            const std::string& accessorName = prim.targets[j].position[0]->name;
+                            if (!accessorName.empty()) {
+                                this->targetNames[j] = accessorName;
                             }
                         }
                     }
