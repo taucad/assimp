@@ -113,37 +113,27 @@ void USDImporterImplTinyusdz::InternReadFile(
     bool is_usdz{ false };
     
     // Always use memory-based loading (cleaner, more reliable, consistent with Assimp patterns)
-    ASSIMP_LOG_DEBUG("USD: Checking file type for: ", pFile);
-    ASSIMP_LOG_DEBUG("USD: File size: ", fileSize, " bytes");
-    
     if (isUsdc(pFile)) {
-        ASSIMP_LOG_DEBUG("USD: Loading as USDC");
         ret = LoadUSDCFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDCFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsda(pFile)) {
-        ASSIMP_LOG_DEBUG("USD: Loading as USDA");
         ret = LoadUSDAFromMemory(in_mem_data.data(), in_mem_data.size(), basePath, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDAFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsdz(pFile)) {
-        ASSIMP_LOG_DEBUG("USD: Loading as USDZ");
         ret = LoadUSDZFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         is_usdz = true;
         ss.str("");
-        ss << "InternReadFile(): LoadUSDZFromMemory() result: " << ret << ", warn: '" << warn << "', err: '" << err << "'";
-        ASSIMP_LOG_DEBUG(ss.str());
+        ss << "InternReadFile(): LoadUSDZFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsd(pFile)) {
-        ASSIMP_LOG_DEBUG("USD: Loading as USD");
         ret = LoadUSDFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
-    } else {
-        ASSIMP_LOG_ERROR("USD: Unknown file type for: ", pFile);
     }
     if (warn.empty() && err.empty()) {
         ss.str("");
@@ -213,32 +203,18 @@ void USDImporterImplTinyusdz::InternReadFile(
         }
     }
 
-    // Log stage content before conversion
-    ASSIMP_LOG_DEBUG("USD: Stage loaded, root prims count: ", stage.root_prims().size());
-    for (size_t i = 0; i < stage.root_prims().size(); ++i) {
-        ASSIMP_LOG_DEBUG("USD: Root prim [", i, "]: ", stage.root_prims()[i].element_name());
-    }
-    
-    ASSIMP_LOG_DEBUG("USD: Converting stage to render scene...");
     ret = converter.ConvertToRenderScene(env, &render_scene);
     if (!ret) {
         ss.str("");
         ss << "InternReadFile(): ConvertToRenderScene() failed! Error: " << converter.GetError();
-        ASSIMP_LOG_ERROR(ss.str());
         TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
         return;
     }
-    
-    ASSIMP_LOG_DEBUG("USD: Conversion successful, checking render scene content...");
-    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.nodes.size(), " nodes");
-    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.meshes.size(), " meshes");
-    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.materials.size(), " materials");
 
     // Validate render scene has required content
     if (render_scene.nodes.empty()) {
         ss.str("");
         ss << "InternReadFile(): ERROR: No nodes in render_scene! Cannot create root node.";
-        ASSIMP_LOG_ERROR(ss.str());
         TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
         return;
     }
