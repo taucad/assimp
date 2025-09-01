@@ -113,27 +113,37 @@ void USDImporterImplTinyusdz::InternReadFile(
     bool is_usdz{ false };
     
     // Always use memory-based loading (cleaner, more reliable, consistent with Assimp patterns)
+    ASSIMP_LOG_DEBUG("USD: Checking file type for: ", pFile);
+    ASSIMP_LOG_DEBUG("USD: File size: ", fileSize, " bytes");
+    
     if (isUsdc(pFile)) {
+        ASSIMP_LOG_DEBUG("USD: Loading as USDC");
         ret = LoadUSDCFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDCFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsda(pFile)) {
+        ASSIMP_LOG_DEBUG("USD: Loading as USDA");
         ret = LoadUSDAFromMemory(in_mem_data.data(), in_mem_data.size(), basePath, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDAFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsdz(pFile)) {
+        ASSIMP_LOG_DEBUG("USD: Loading as USDZ");
         ret = LoadUSDZFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         is_usdz = true;
         ss.str("");
-        ss << "InternReadFile(): LoadUSDZFromMemory() result: " << ret;
+        ss << "InternReadFile(): LoadUSDZFromMemory() result: " << ret << ", warn: '" << warn << "', err: '" << err << "'";
+        ASSIMP_LOG_DEBUG(ss.str());
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     } else if (isUsd(pFile)) {
+        ASSIMP_LOG_DEBUG("USD: Loading as USD");
         ret = LoadUSDFromMemory(in_mem_data.data(), in_mem_data.size(), pFile, &stage, &warn, &err, options);
         ss.str("");
         ss << "InternReadFile(): LoadUSDFromMemory() result: " << ret;
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+    } else {
+        ASSIMP_LOG_ERROR("USD: Unknown file type for: ", pFile);
     }
     if (warn.empty() && err.empty()) {
         ss.str("");
@@ -203,18 +213,32 @@ void USDImporterImplTinyusdz::InternReadFile(
         }
     }
 
+    // Log stage content before conversion
+    ASSIMP_LOG_DEBUG("USD: Stage loaded, root prims count: ", stage.root_prims().size());
+    for (size_t i = 0; i < stage.root_prims().size(); ++i) {
+        ASSIMP_LOG_DEBUG("USD: Root prim [", i, "]: ", stage.root_prims()[i].element_name());
+    }
+    
+    ASSIMP_LOG_DEBUG("USD: Converting stage to render scene...");
     ret = converter.ConvertToRenderScene(env, &render_scene);
     if (!ret) {
         ss.str("");
         ss << "InternReadFile(): ConvertToRenderScene() failed! Error: " << converter.GetError();
+        ASSIMP_LOG_ERROR(ss.str());
         TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
         return;
     }
+    
+    ASSIMP_LOG_DEBUG("USD: Conversion successful, checking render scene content...");
+    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.nodes.size(), " nodes");
+    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.meshes.size(), " meshes");
+    ASSIMP_LOG_DEBUG("USD: Render scene has ", render_scene.materials.size(), " materials");
 
     // Validate render scene has required content
     if (render_scene.nodes.empty()) {
         ss.str("");
         ss << "InternReadFile(): ERROR: No nodes in render_scene! Cannot create root node.";
+        ASSIMP_LOG_ERROR(ss.str());
         TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
         return;
     }
@@ -291,6 +315,7 @@ void USDImporterImplTinyusdz::animations(
 
         if (animation.channels_map.empty()) {
             newAiAnimation->mNumChannels = 0;
+            newAiAnimation->mNumMorphMeshChannels = 0;
             continue;
         }
 
@@ -298,7 +323,11 @@ void USDImporterImplTinyusdz::animations(
         newAiAnimation->mTicksPerSecond = render_scene.meta.framesPerSecond;
         newAiAnimation->mNumChannels = unsigned(animation.channels_map.size());
 
-        newAiAnimation->mChannels = new aiNodeAnim *[newAiAnimation->mNumChannels];
+        if (newAiAnimation->mNumChannels > 0) {
+            newAiAnimation->mChannels = new aiNodeAnim *[newAiAnimation->mNumChannels];
+        } else {
+            newAiAnimation->mChannels = nullptr;
+        }
         int channelIndex = 0;
         for (const auto &[jointName, animationChannelMap] : animation.channels_map) {
             auto newAiNodeAnim = new aiNodeAnim();
@@ -392,11 +421,72 @@ void USDImporterImplTinyusdz::animations(
 
             ++channelIndex;
         }
+        
+        // Convert blend shape animations from blendshape_weights_map
+        if (!animation.blendshape_weights_map.empty()) {
+            // Create separate morph mesh animations for each blend shape
+            newAiAnimation->mNumMorphMeshChannels = unsigned(animation.blendshape_weights_map.size());
+            newAiAnimation->mMorphMeshChannels = new aiMeshMorphAnim*[newAiAnimation->mNumMorphMeshChannels];
+            
+            int morphChannelIndex = 0;
+            for (const auto &[blendShapeName, weightSampler] : animation.blendshape_weights_map) {
+                auto newAiMorphAnim = new aiMeshMorphAnim();
+                newAiAnimation->mMorphMeshChannels[morphChannelIndex] = newAiMorphAnim;
+                
+                // Set the blend shape name
+                newAiMorphAnim->mName = blendShapeName;
+                
+                // Convert time samples to morph keys
+                if (!weightSampler.samples.empty()) {
+                    newAiMorphAnim->mNumKeys = unsigned(weightSampler.samples.size());
+                    newAiMorphAnim->mKeys = new aiMeshMorphKey[newAiMorphAnim->mNumKeys];
+                    
+                    for (size_t keyIndex = 0; keyIndex < weightSampler.samples.size(); ++keyIndex) {
+                        const auto& sample = weightSampler.samples[keyIndex];
+                        auto& morphKey = newAiMorphAnim->mKeys[keyIndex];
+                        morphKey.mTime = sample.t;
+                        
+                        // Each key affects only this blend shape (index 0 since it's per-blend-shape)
+                        morphKey.mNumValuesAndWeights = 1;
+                        morphKey.mValues = new unsigned int[1];
+                        morphKey.mWeights = new double[1];
+                        morphKey.mValues[0] = 0;  // Always index 0 for single blend shape
+                        morphKey.mWeights[0] = sample.value;
+                        
+                        // Update animation duration
+                        if (sample.t > newAiAnimation->mDuration) {
+                            newAiAnimation->mDuration = sample.t;
+                        }
+                    }
+                } else if (weightSampler.static_value.has_value()) {
+                    // Handle static value case
+                    newAiMorphAnim->mNumKeys = 1;
+                    newAiMorphAnim->mKeys = new aiMeshMorphKey[1];
+                    newAiMorphAnim->mKeys[0].mTime = 0.0;
+                    newAiMorphAnim->mKeys[0].mNumValuesAndWeights = 1;
+                    newAiMorphAnim->mKeys[0].mValues = new unsigned int[1];
+                    newAiMorphAnim->mKeys[0].mWeights = new double[1];
+                    newAiMorphAnim->mKeys[0].mValues[0] = 0;
+                    newAiMorphAnim->mKeys[0].mWeights[0] = weightSampler.static_value.value();
+                } else {
+                    // No animation data, create a single zero key
+                    newAiMorphAnim->mNumKeys = 1;
+                    newAiMorphAnim->mKeys = new aiMeshMorphKey[1];
+                    newAiMorphAnim->mKeys[0].mTime = 0.0;
+                    newAiMorphAnim->mKeys[0].mNumValuesAndWeights = 1;
+                    newAiMorphAnim->mKeys[0].mValues = new unsigned int[1];
+                    newAiMorphAnim->mKeys[0].mWeights = new double[1];
+                    newAiMorphAnim->mKeys[0].mValues[0] = 0;
+                    newAiMorphAnim->mKeys[0].mWeights[0] = 0.0;
+                }
+                
+                morphChannelIndex++;
+            }
+        } else {
+            newAiAnimation->mNumMorphMeshChannels = 0;
+            newAiAnimation->mMorphMeshChannels = nullptr;
+        }
     }
-    
-    // ENHANCEMENT: Future expansion point for SkelAnimation direct parsing
-    // TODO: Add direct SkelAnimation prim parsing here for proper morph animation support
-    // This would traverse the USD Stage and extract time-sampled blendShapeWeights attributes
 }
 
 void USDImporterImplTinyusdz::meshes(

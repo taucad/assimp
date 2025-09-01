@@ -86,5 +86,60 @@ TEST_F(utUSDImport, singleAnimationTest) {
     EXPECT_EQ(2, scene->mAnimations[0]->mNumChannels);  // 2 bones. 1 channel for each bone
 }
 
+TEST_F(utUSDImport, blendShapeAnimationTest) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/USD/usda/AnimatedMorphCube_blendshapes.usda", aiProcess_ValidateDataStructure);
+    EXPECT_NE(nullptr, scene);
+    
+    // Should have animations (blend shape animations)
+    EXPECT_TRUE(scene->HasAnimations());
+    EXPECT_GT(scene->mNumAnimations, 0u);
+    
+    const aiAnimation* animation = scene->mAnimations[0];
+    EXPECT_NE(nullptr, animation);
+    
+    // Should have at least one animation channel (node or morph)
+    EXPECT_GT(animation->mNumChannels + animation->mNumMorphMeshChannels, 0u);
+    
+    // Should have morph mesh channels for blend shapes
+    EXPECT_GT(animation->mNumMorphMeshChannels, 0u);
+    
+    // Check that we have the correct number of morph channels (2 blend shapes: "thin", "angle")
+    EXPECT_EQ(2u, animation->mNumMorphMeshChannels);
+    
+    // Verify morph channel names
+    bool foundThin = false, foundAngle = false;
+    for (unsigned int i = 0; i < animation->mNumMorphMeshChannels; ++i) {
+        const aiMeshMorphAnim* morphAnim = animation->mMorphMeshChannels[i];
+        EXPECT_NE(nullptr, morphAnim);
+        
+        std::string meshName = morphAnim->mName.C_Str();
+        if (meshName.find("thin") != std::string::npos) {
+            foundThin = true;
+        }
+        if (meshName.find("angle") != std::string::npos) {
+            foundAngle = true;
+        }
+        
+        // Should have time samples (101 frames)
+        EXPECT_GT(morphAnim->mNumKeys, 50u);  // At least 50+ keyframes
+    }
+    
+    EXPECT_TRUE(foundThin) << "Should find 'thin' blend shape animation";
+    EXPECT_TRUE(foundAngle) << "Should find 'angle' blend shape animation";
+    
+    // Should have meshes with blend shapes
+    EXPECT_TRUE(scene->HasMeshes());
+    bool foundMeshWithBlendShapes = false;
+    for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
+        if (scene->mMeshes[i]->mNumAnimMeshes > 0) {
+            foundMeshWithBlendShapes = true;
+            EXPECT_EQ(2u, scene->mMeshes[i]->mNumAnimMeshes);  // "thin" and "angle"
+            break;
+        }
+    }
+    EXPECT_TRUE(foundMeshWithBlendShapes) << "Should find at least one mesh with blend shapes";
+}
+
 // Note: Add multi-animation test once supported by USD
 // See https://github.com/lighttransport/tinyusdz/issues/122 for details.
