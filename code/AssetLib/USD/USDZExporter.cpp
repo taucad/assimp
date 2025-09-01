@@ -471,6 +471,9 @@ void USDZExporter::ExportMeshes() {
         
         // Check if this mesh needs skeletal treatment (bones or blend shapes)
         bool needsSkeletal = NeedsSkeletalTreatment(mesh);
+        bool hasSkinnedBones = mesh->mNumBones > 0;
+        bool hasBlendShapesOnly = mesh->mNumAnimMeshes > 0 && mesh->mNumBones == 0;
+        
         tinyusdz::Prim finalMeshPrim = std::move(meshPrim);
         
         // Find the parent nodes that reference this mesh and add it as their child
@@ -480,9 +483,15 @@ void USDZExporter::ExportMeshes() {
             const aiNode* firstParentNode = meshToNodes[i][0];
             std::string firstParentNodeName = SanitizeName(firstParentNode->mName.C_Str());
             
-            // Apply skeletal treatment if needed (using first parent node name)
-            if (needsSkeletal) {
+            // Apply skeletal treatment based on mesh type
+            if (hasBlendShapesOnly) {
+                // Blend shapes only: create dedicated SkelRoot with dummy skeleton
                 finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, firstParentNodeName);
+                ASSIMP_LOG_DEBUG("USDZExporter: Created SkelRoot for blend-shape-only mesh: " + meshName);
+            } else if (hasSkinnedBones) {
+                // Skinned mesh: will be bound to main skeleton from ExportSkeletons()
+                // No need to create additional SkelRoot here
+                ASSIMP_LOG_DEBUG("USDZExporter: Skinned mesh " + meshName + " will use main skeleton");
             }
             
             for (const aiNode* parentNode : meshToNodes[i]) {
@@ -537,10 +546,15 @@ void USDZExporter::ExportMeshes() {
         // Fallback: if mesh isn't referenced by any node
         if (!meshPlaced) {
             if (!mStage->root_prims().empty()) {
-                if (needsSkeletal) {
-                    // Add SkelRoot directly to main scene root prim
+                if (hasBlendShapesOnly) {
+                    // Create SkelRoot for blend-shape-only mesh and add to root
+                    finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, "");
                     mStage->root_prims()[0].children().emplace_back(std::move(finalMeshPrim));
-                    ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot " + meshName + " to root prim");
+                    ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot for blend-shape-only mesh " + meshName + " to root prim");
+                } else if (hasSkinnedBones) {
+                    // Skinned mesh: add directly to root (will be bound to main skeleton)
+                    mStage->root_prims()[0].children().emplace_back(std::move(finalMeshPrim));
+                    ASSIMP_LOG_DEBUG("USDZExporter: Added skinned mesh " + meshName + " to root prim");
                 } else {
                     // Add to main scene root prim with GeomScope
                     tinyusdz::Scope geomScope;
@@ -1184,16 +1198,20 @@ bool USDZExporter::NeedsSkeletalTreatment(const aiMesh* mesh) {
 
 // ------------------------------------------------------------------------------------------------
 // Create SkelRoot structure for meshes that need skeletal treatment
+// NOTE: For blend-shape-only meshes, USD requires a skeleton infrastructure even without actual bones.
+// This "dummy skeleton" approach is the standard USD pattern used by professional tools like Blender.
+// USD's blendShapeWeights can only exist within SkelAnimation, which requires a Skeleton reference.
 tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames, const std::string& parentNodeName) {
     // Create SkelRoot container
     tinyusdz::SkelRoot skelRoot;
     skelRoot.name = meshName;  // Use mesh name for SkelRoot
     
     // Create Skeleton with dummy joint for blend shapes
+    // This is the standard USD approach - even Blender uses "joint1" for pure blend shapes
     tinyusdz::Skeleton skeleton;
     skeleton.name = "Skel";
     
-    // Create dummy joint system (required for USD skeletal binding)
+    // Create dummy joint system (required for USD skeletal binding, even for pure blend shapes)
     std::vector<tinyusdz::value::token> jointTokens = {tinyusdz::value::token("joint1")};
     skeleton.joints.set_value(jointTokens);
     
