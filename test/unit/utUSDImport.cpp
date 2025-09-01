@@ -141,5 +141,82 @@ TEST_F(utUSDImport, blendShapeAnimationTest) {
     EXPECT_TRUE(foundMeshWithBlendShapes) << "Should find at least one mesh with blend shapes";
 }
 
+TEST_F(utUSDImport, cameraImportTest) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/USD/usda/camera-lighting.usda", aiProcess_ValidateDataStructure);
+    EXPECT_NE(nullptr, scene);
+    
+    // Should have cameras
+    EXPECT_TRUE(scene->HasCameras());
+    EXPECT_GT(scene->mNumCameras, 0u);
+    
+    // Should have at least one camera (the "Camera" from the test file)
+    EXPECT_EQ(1u, scene->mNumCameras);
+    
+    const aiCamera* camera = scene->mCameras[0];
+    EXPECT_NE(nullptr, camera);
+    
+    // Verify camera properties from the test file
+    EXPECT_STREQ("Camera", camera->mName.C_Str());
+    
+    // Check camera parameters (from camera-lighting.usda)
+    // focalLength = 0.5, horizontalAperture = 0.36, verticalAperture = 0.2025
+    // clippingRange = (0.1, 100), projection = "perspective"
+    // Expected FOV = 2 * atan(horizontalAperture / (2 * focalLength)) = 2 * atan(0.36 / (2 * 0.5)) = 2 * atan(0.36) ≈ 0.691
+    EXPECT_NEAR(0.691f, camera->mHorizontalFOV, 0.01f);
+    EXPECT_NEAR(0.1f, camera->mClipPlaneNear, 0.01f);
+    EXPECT_NEAR(100.0f, camera->mClipPlaneFar, 0.01f);
+    EXPECT_NEAR(0.0f, camera->mOrthographicWidth, 0.01f);  // Should be 0 for perspective camera
+    
+    // Check the calculated aspect ratio
+    EXPECT_NEAR(0.36f / 0.2025f, camera->mAspect, 0.01f);
+}
+
+TEST_F(utUSDImport, lightImportTest) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/USD/usda/camera-lighting.usda", aiProcess_ValidateDataStructure);
+    EXPECT_NE(nullptr, scene);
+    
+    // Should have lights
+    EXPECT_TRUE(scene->HasLights());
+    EXPECT_GT(scene->mNumLights, 0u);
+    
+    // Should have 2 lights (SphereLight "Light" and DomeLight "env_light")
+    EXPECT_EQ(2u, scene->mNumLights);
+    
+    // Find the SphereLight
+    const aiLight* sphereLight = nullptr;
+    const aiLight* domeLight = nullptr;
+    
+    for (unsigned int i = 0; i < scene->mNumLights; ++i) {
+        const aiLight* light = scene->mLights[i];
+        std::string lightName = light->mName.C_Str();
+        
+        if (lightName.find("Light") != std::string::npos && lightName.find("env_light") == std::string::npos) {
+            sphereLight = light;
+        } else if (lightName.find("env_light") != std::string::npos) {
+            domeLight = light;
+        }
+    }
+    
+    // Verify SphereLight properties
+    EXPECT_NE(nullptr, sphereLight);
+    if (sphereLight) {
+        EXPECT_EQ(aiLightSource_POINT, sphereLight->mType);
+        EXPECT_NEAR(318.30988f, sphereLight->mAttenuationConstant, 1.0f);  // intensity from USD
+        // Position should be set from the Xform parent: (4.076245, 1.005454, 5.903862)
+        EXPECT_NEAR(4.076245f, sphereLight->mPosition.x, 0.01f);
+        EXPECT_NEAR(1.005454f, sphereLight->mPosition.y, 0.01f);
+        EXPECT_NEAR(5.903862f, sphereLight->mPosition.z, 0.01f);
+    }
+    
+    // Verify DomeLight properties  
+    EXPECT_NE(nullptr, domeLight);
+    if (domeLight) {
+        EXPECT_EQ(aiLightSource_AMBIENT, domeLight->mType);  // Dome lights are typically ambient
+        EXPECT_NEAR(1.0f, domeLight->mAttenuationConstant, 0.01f);  // intensity = 1
+    }
+}
+
 // Note: Add multi-animation test once supported by USD
 // See https://github.com/lighttransport/tinyusdz/issues/122 for details.

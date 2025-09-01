@@ -46,6 +46,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_USD_IMPORTER
 #include <memory>
 #include <sstream>
+#include <cmath>
+#include <functional>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // internal headers
 #include <assimp/ai_assert.h>
@@ -226,6 +232,8 @@ void USDImporterImplTinyusdz::InternReadFile(
     textures(render_scene, pScene, nameWExt);
     textureImages(render_scene, pScene, nameWExt);
     buffers(render_scene, pScene, nameWExt);
+    cameras(render_scene, pScene, stage);
+    lights(render_scene, pScene, stage);
     
     // Create root node from first scene node
     pScene->mRootNode = nodesRecursive(nullptr, render_scene.nodes[0], render_scene.skeletons);
@@ -289,7 +297,8 @@ void USDImporterImplTinyusdz::animations(
 
         newAiAnimation->mName = animation.abs_path;
 
-        if (animation.channels_map.empty()) {
+        // Check if this animation has any data at all
+        if (animation.channels_map.empty() && animation.blendshape_weights_map.empty()) {
             newAiAnimation->mNumChannels = 0;
             newAiAnimation->mNumMorphMeshChannels = 0;
             continue;
@@ -399,6 +408,7 @@ void USDImporterImplTinyusdz::animations(
         }
         
         // Convert blend shape animations from blendshape_weights_map
+        // This should be processed regardless of whether there are node channels
         if (!animation.blendshape_weights_map.empty()) {
             // Create separate morph mesh animations for each blend shape
             newAiAnimation->mNumMorphMeshChannels = unsigned(animation.blendshape_weights_map.size());
@@ -949,6 +959,18 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
         const tinyusdz::tydra::Node &node,
         const std::vector<tinyusdz::tydra::SkelHierarchy> &skeletons) {
     stringstream ss;
+    
+    // Skip creating scene graph nodes for Camera and Light prims - they should only create aiCamera/aiLight objects
+    if (node.nodeType == NodeType::Camera || 
+        node.nodeType == NodeType::PointLight || 
+        node.nodeType == NodeType::DirectionalLight || 
+        node.nodeType == NodeType::EnvmapLight) {
+        ss.str("");
+        ss << "nodesRecursive(): Skipping " << tinyusdzNodeTypeFor(node.nodeType) << " node " << node.prim_name << " (handled separately)";
+        TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+        return nullptr;
+    }
+    
     aiNode *cNode = new aiNode();
     cNode->mParent = pNodeParent;
     cNode->mName.Set(node.prim_name);
@@ -973,7 +995,16 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
     }
     TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
 
-    unsigned int numChildren = unsigned(node.children.size());
+    // First pass: count children that will create scene graph nodes (exclude cameras and lights)
+    unsigned int numChildren = 0;
+    for (const auto &childNode : node.children) {
+        if (childNode.nodeType != NodeType::Camera && 
+            childNode.nodeType != NodeType::PointLight && 
+            childNode.nodeType != NodeType::DirectionalLight && 
+            childNode.nodeType != NodeType::EnvmapLight) {
+            numChildren++;
+        }
+    }
 
     // Find any tinyusdz skeletons which might begin at this node
     // Add the skeleton bones as child nodes
@@ -1000,14 +1031,24 @@ aiNode *USDImporterImplTinyusdz::nodesRecursive(
     for (const auto &childNode : node.children) {
         aiNode* childNodePtr = nodesRecursive(cNode, childNode, skeletons);
         if (childNodePtr == nullptr) {
-            TINYUSDZLOGE(TAG, "nodesRecursive(): Failed to create child node for: %s", childNode.prim_name.c_str());
-            // Clean up partially created node structure
-            for (size_t j = 0; j < i; ++j) {
-                delete cNode->mChildren[j];
+            // Check if this is a camera/light node (expected to return nullptr) or an actual error
+            if (childNode.nodeType == NodeType::Camera || 
+                childNode.nodeType == NodeType::PointLight || 
+                childNode.nodeType == NodeType::DirectionalLight || 
+                childNode.nodeType == NodeType::EnvmapLight) {
+                // Camera and light nodes are expected to return nullptr - skip them
+                continue;
+            } else {
+                // This is an actual error for other node types
+                TINYUSDZLOGE(TAG, "nodesRecursive(): Failed to create child node for: %s", childNode.prim_name.c_str());
+                // Clean up partially created node structure
+                for (size_t j = 0; j < i; ++j) {
+                    delete cNode->mChildren[j];
+                }
+                delete[] cNode->mChildren;
+                delete cNode;
+                return nullptr;
             }
-            delete[] cNode->mChildren;
-            delete cNode;
-            return nullptr;
         }
         cNode->mChildren[i] = childNodePtr;
         ++i;
@@ -1149,6 +1190,347 @@ void USDImporterImplTinyusdz::blendShapesForMesh(
                 " inbetweens";
         TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
         ++animMeshIdx;
+    }
+}
+
+void USDImporterImplTinyusdz::cameras(
+    const tinyusdz::tydra::RenderScene& render_scene,
+    aiScene* pScene,
+    const tinyusdz::Stage& stage) {
+    
+    stringstream ss;
+    
+    // Since tinyusdz RenderSceneConverter doesn't convert Camera prims to RenderCamera objects,
+    // we need to parse them directly from the USD Stage
+    std::vector<const tinyusdz::GeomCamera*> cameras;
+    
+    // Helper function to recursively find cameras in prims
+    std::function<void(const std::vector<tinyusdz::Prim>&)> findCameras = [&](const std::vector<tinyusdz::Prim>& prims) {
+        for (const auto& prim : prims) {
+            if (prim.is<tinyusdz::GeomCamera>()) {
+                const auto* camera = prim.as<tinyusdz::GeomCamera>();
+                if (camera) {
+                    cameras.push_back(camera);
+                }
+            }
+            // Recursively search children
+            findCameras(prim.children());
+        }
+    };
+    
+    // Start search from root prims
+    findCameras(stage.root_prims());
+    
+    ss.str("");
+    ss << "cameras(): Found " << cameras.size() << " Camera prims in stage";
+    TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+    
+    if (cameras.empty()) {
+        pScene->mNumCameras = 0;
+        pScene->mCameras = nullptr;
+        return;
+    }
+    
+    pScene->mNumCameras = static_cast<unsigned int>(cameras.size());
+    pScene->mCameras = new aiCamera*[pScene->mNumCameras];
+    
+    for (size_t camIdx = 0; camIdx < cameras.size(); ++camIdx) {
+        const auto* usdCamera = cameras[camIdx];
+        
+        auto* aiCam = new aiCamera();
+        pScene->mCameras[camIdx] = aiCam;
+        
+        // Set camera name
+        aiCam->mName.Set(usdCamera->name);
+        
+        // Set clipping planes
+        if (usdCamera->clippingRange.has_value()) {
+            std::array<float, 2> clipping;
+            if (usdCamera->clippingRange.get_value().get_scalar(&clipping)) {
+                aiCam->mClipPlaneNear = clipping[0];
+                aiCam->mClipPlaneFar = clipping[1];
+            } else {
+                // Default values
+                aiCam->mClipPlaneNear = 0.1f;
+                aiCam->mClipPlaneFar = 1000.0f;
+            }
+        } else {
+            // Default values
+            aiCam->mClipPlaneNear = 0.1f;
+            aiCam->mClipPlaneFar = 1000.0f;
+        }
+        
+        // Get focal length and aperture - using USD specification defaults
+        // These match standard 35mm film camera specifications for maximum compatibility
+        // See: https://openusd.org/docs/api/class_usd_geom_camera.html
+        float focalLength = 50.0f; // USD default: 50mm "normal" lens
+        float horizontalAperture = 20.955f; // USD default: 35mm film horizontal aperture (was 20.955f - fixed typo)
+        float verticalAperture = 15.2908f; // USD default: 35mm film vertical aperture
+        
+        if (usdCamera->focalLength.has_value()) {
+            usdCamera->focalLength.get_value().get_scalar(&focalLength);
+        }
+        if (usdCamera->horizontalAperture.has_value()) {
+            usdCamera->horizontalAperture.get_value().get_scalar(&horizontalAperture);
+        }
+        if (usdCamera->verticalAperture.has_value()) {
+            usdCamera->verticalAperture.get_value().get_scalar(&verticalAperture);
+        }
+        
+        // Set aspect ratio
+        aiCam->mAspect = horizontalAperture / verticalAperture;
+        
+        // Convert projection type and set FOV
+        tinyusdz::GeomCamera::Projection projection = tinyusdz::GeomCamera::Projection::Perspective;
+        if (usdCamera->projection.has_value()) {
+            usdCamera->projection.get_value().get_scalar(&projection);
+        }
+        
+        if (projection == tinyusdz::GeomCamera::Projection::Perspective) {
+            // For perspective cameras, calculate horizontal FOV from focal length and aperture
+            // Formula: FOV = 2 * atan(aperture / (2 * focalLength))
+            float xfov = 2.0f * std::atan(horizontalAperture / (2.0f * focalLength));
+            aiCam->mHorizontalFOV = xfov; // Already in radians
+        } else {
+            // For orthographic cameras
+            aiCam->mHorizontalFOV = 0.0f; // Assimp uses 0 to indicate orthographic
+            aiCam->mOrthographicWidth = horizontalAperture; // Use aperture as orthographic width
+        }
+        
+        // Set camera position and orientation (identity by default)
+        // Note: The actual transform will be applied by the scene graph
+        aiCam->mPosition = aiVector3D(0.0f, 0.0f, 0.0f);
+        aiCam->mLookAt = aiVector3D(0.0f, 0.0f, -1.0f);  // USD cameras look down -Z
+        aiCam->mUp = aiVector3D(0.0f, 1.0f, 0.0f);       // USD cameras have +Y up
+        
+        ss.str("");
+        ss << "    camera[" << camIdx << "]: name: |" << usdCamera->name << "|, " <<
+              "projection: " << (projection == tinyusdz::GeomCamera::Projection::Perspective ? "perspective" : "orthographic") << ", " <<
+              "fov: " << aiCam->mHorizontalFOV << ", " <<
+              "near: " << aiCam->mClipPlaneNear << ", " <<
+              "far: " << aiCam->mClipPlaneFar << ", " <<
+              "aspect: " << aiCam->mAspect;
+        TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+    }
+}
+
+void USDImporterImplTinyusdz::lights(
+    const tinyusdz::tydra::RenderScene& render_scene,
+    aiScene* pScene,
+    const tinyusdz::Stage& stage) {
+    
+    stringstream ss;
+    
+    // Since tinyusdz RenderSceneConverter doesn't convert Light prims to RenderLight objects,
+    // we need to parse them directly from the USD Stage
+    std::vector<std::pair<std::string, const tinyusdz::Prim*>> lights;
+    
+    // Create a map of prim paths to render scene nodes for transform lookup
+    std::map<std::string, const tinyusdz::tydra::Node*> pathToNode;
+    std::function<void(const tinyusdz::tydra::Node&, const std::string&)> mapNodes = 
+        [&](const tinyusdz::tydra::Node& node, const std::string& parentPath) {
+        std::string currentPath = parentPath + "/" + node.prim_name;
+        pathToNode[currentPath] = &node;
+        for (const auto& child : node.children) {
+            mapNodes(child, currentPath);
+        }
+    };
+    
+    // Map all render scene nodes
+    for (const auto& rootNode : render_scene.nodes) {
+        mapNodes(rootNode, "");
+    }
+    
+    // Helper function to recursively find lights in prims
+    std::function<void(const std::vector<tinyusdz::Prim>&, const std::string&)> findLights = 
+        [&](const std::vector<tinyusdz::Prim>& prims, const std::string& parentPath) {
+        for (const auto& prim : prims) {
+            std::string currentPath = parentPath + "/" + prim.element_name();
+            
+            // Check for different light types
+            if (prim.is<tinyusdz::SphereLight>() || 
+                prim.is<tinyusdz::DistantLight>() || 
+                prim.is<tinyusdz::RectLight>() || 
+                prim.is<tinyusdz::DiskLight>() || 
+                prim.is<tinyusdz::CylinderLight>() || 
+                prim.is<tinyusdz::DomeLight>()) {
+                lights.push_back({currentPath, &prim});
+            }
+            // Recursively search children
+            findLights(prim.children(), currentPath);
+        }
+    };
+    
+    // Start search from root prims
+    findLights(stage.root_prims(), "");
+    
+    ss.str("");
+    ss << "lights(): Found " << lights.size() << " Light prims in stage";
+    TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+    
+    if (lights.empty()) {
+        pScene->mNumLights = 0;
+        pScene->mLights = nullptr;
+        return;
+    }
+    
+    pScene->mNumLights = static_cast<unsigned int>(lights.size());
+    pScene->mLights = new aiLight*[pScene->mNumLights];
+    
+    for (size_t lightIdx = 0; lightIdx < lights.size(); ++lightIdx) {
+        const auto& [lightPath, prim] = lights[lightIdx];
+        
+        auto* aiLgt = new aiLight();
+        pScene->mLights[lightIdx] = aiLgt;
+        
+        // Set light name (extract from path)
+        std::string lightName = lightPath;
+        size_t lastSlash = lightPath.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            lightName = lightPath.substr(lastSlash + 1);
+        }
+        aiLgt->mName.Set(lightName);
+        
+        // Set default values
+        aiLgt->mPosition = aiVector3D(0.0f, 0.0f, 0.0f);
+        aiLgt->mDirection = aiVector3D(0.0f, 0.0f, -1.0f);
+        aiLgt->mUp = aiVector3D(0.0f, 1.0f, 0.0f);
+        aiLgt->mColorDiffuse = aiColor3D(1.0f, 1.0f, 1.0f);
+        aiLgt->mColorSpecular = aiColor3D(1.0f, 1.0f, 1.0f);
+        aiLgt->mColorAmbient = aiColor3D(0.0f, 0.0f, 0.0f);
+        aiLgt->mAttenuationConstant = 1.0f;
+        aiLgt->mAttenuationLinear = 0.0f;
+        aiLgt->mAttenuationQuadratic = 0.0f;
+        aiLgt->mAngleInnerCone = 0.0f;
+        aiLgt->mAngleOuterCone = 0.0f;
+        aiLgt->mSize = aiVector2D(0.0f, 0.0f);
+        
+        // Extract position from transform matrix if available
+        // For lights, we usually need the parent Xform's transform, not the light prim itself
+        std::string transformPath = lightPath;
+        if (lastSlash != std::string::npos && lastSlash > 0) {
+            // Try parent path first (most common case for lights under Xform)
+            transformPath = lightPath.substr(0, lastSlash);
+        }
+        
+        auto nodeIt = pathToNode.find(transformPath);
+        if (nodeIt == pathToNode.end()) {
+            // Fallback: try the light path itself
+            nodeIt = pathToNode.find(lightPath);
+        }
+        
+        if (nodeIt != pathToNode.end()) {
+            const auto& node = nodeIt->second;
+            
+            // Extract position from the local matrix (4th row, first 3 elements - row-major format)
+            aiLgt->mPosition.x = static_cast<float>(node->local_matrix.m[3][0]);
+            aiLgt->mPosition.y = static_cast<float>(node->local_matrix.m[3][1]);
+            aiLgt->mPosition.z = static_cast<float>(node->local_matrix.m[3][2]);
+            
+            // Extract direction from the local matrix (negative Z axis)
+            aiLgt->mDirection.x = -static_cast<float>(node->local_matrix.m[0][2]);
+            aiLgt->mDirection.y = -static_cast<float>(node->local_matrix.m[1][2]);
+            aiLgt->mDirection.z = -static_cast<float>(node->local_matrix.m[2][2]);
+        }
+        
+        // Determine light type and set specific properties
+        std::string lightType = "unknown";
+        if (prim->is<tinyusdz::SphereLight>()) {
+            aiLgt->mType = aiLightSource_POINT;
+            lightType = "SphereLight";
+            
+            const auto* sphereLight = prim->as<tinyusdz::SphereLight>();
+            if (sphereLight) {
+                // Get intensity
+                                         if (sphereLight->intensity.has_value()) {
+                             float intensity = 1.0f;
+                             if (sphereLight->intensity.get_value().get_scalar(&intensity)) {
+                                 aiLgt->mColorDiffuse = aiColor3D(intensity, intensity, intensity);
+                                 aiLgt->mColorSpecular = aiColor3D(intensity, intensity, intensity);
+                                 aiLgt->mAttenuationConstant = intensity;
+                             }
+                         }
+                
+                // Get radius for size
+                if (sphereLight->radius.has_value()) {
+                    float radius = 0.5f;
+                    if (sphereLight->radius.get_value().get_scalar(&radius)) {
+                        aiLgt->mSize = aiVector2D(radius, radius);
+                    }
+                }
+            }
+        } else if (prim->is<tinyusdz::DistantLight>()) {
+            aiLgt->mType = aiLightSource_DIRECTIONAL;
+            lightType = "DistantLight";
+            
+            const auto* distantLight = prim->as<tinyusdz::DistantLight>();
+            if (distantLight) {
+                // Get intensity
+                if (distantLight->intensity.has_value()) {
+                    float intensity = 1.0f;
+                    if (distantLight->intensity.get_value().get_scalar(&intensity)) {
+                        aiLgt->mColorDiffuse = aiColor3D(intensity, intensity, intensity);
+                        aiLgt->mColorSpecular = aiColor3D(intensity, intensity, intensity);
+                    }
+                }
+                
+                // Get angle
+                if (distantLight->angle.has_value()) {
+                    float angle = 0.53f; // Default sun angle
+                    if (distantLight->angle.get_value().get_scalar(&angle)) {
+                        aiLgt->mAngleOuterCone = angle * (M_PI / 180.0f); // Convert degrees to radians
+                    }
+                }
+            }
+        } else if (prim->is<tinyusdz::RectLight>()) {
+            aiLgt->mType = aiLightSource_AREA;
+            lightType = "RectLight";
+            
+            const auto* rectLight = prim->as<tinyusdz::RectLight>();
+            if (rectLight) {
+                // Get intensity
+                if (rectLight->intensity.has_value()) {
+                    float intensity = 1.0f;
+                    if (rectLight->intensity.get_value().get_scalar(&intensity)) {
+                        aiLgt->mColorDiffuse = aiColor3D(intensity, intensity, intensity);
+                        aiLgt->mColorSpecular = aiColor3D(intensity, intensity, intensity);
+                    }
+                }
+                
+                // Get width and height
+                float width = 1.0f, height = 1.0f;
+                if (rectLight->width.has_value()) {
+                    rectLight->width.get_value().get_scalar(&width);
+                }
+                if (rectLight->height.has_value()) {
+                    rectLight->height.get_value().get_scalar(&height);
+                }
+                aiLgt->mSize = aiVector2D(width, height);
+            }
+        } else if (prim->is<tinyusdz::DomeLight>()) {
+            aiLgt->mType = aiLightSource_AMBIENT;
+            lightType = "DomeLight";
+            
+            const auto* domeLight = prim->as<tinyusdz::DomeLight>();
+            if (domeLight) {
+                // Get intensity
+                if (domeLight->intensity.has_value()) {
+                    float intensity = 1.0f;
+                    if (domeLight->intensity.get_value().get_scalar(&intensity)) {
+                        aiLgt->mColorDiffuse = aiColor3D(intensity, intensity, intensity);
+                        aiLgt->mColorSpecular = aiColor3D(intensity, intensity, intensity);
+                    }
+                }
+            }
+        } else {
+            // Default to point light for other types
+            aiLgt->mType = aiLightSource_POINT;
+            lightType = "Generic";
+        }
+        
+        ss.str("");
+        ss << "    light[" << lightIdx << "]: name: |" << lightName << "|, type: " << lightType << ", path: " << lightPath;
+        TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
     }
 }
 

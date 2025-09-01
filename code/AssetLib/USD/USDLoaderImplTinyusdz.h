@@ -146,6 +146,16 @@ public:
             aiScene *pScene,
             size_t meshIdx,
             const std::string &nameWExt);
+
+    void cameras(
+            const tinyusdz::tydra::RenderScene &render_scene,
+            aiScene *pScene,
+            const tinyusdz::Stage &stage);
+
+    void lights(
+            const tinyusdz::tydra::RenderScene &render_scene,
+            aiScene *pScene,
+            const tinyusdz::Stage &stage);
 };
 } // namespace Assimp
 #endif // AI_USDLOADER_IMPL_TINYUSDZ_H_INCLUDED
