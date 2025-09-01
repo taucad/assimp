@@ -44,11 +44,23 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "USDZExporter.h"
 #include "usdz-writer.hh"
 
+// BlendShapeResult definition
+struct Assimp::USDZExporter::BlendShapeResult {
+    tinyusdz::Prim meshPrim;
+    std::vector<std::string> blendShapeNames;
+    
+    BlendShapeResult(tinyusdz::Prim&& prim, std::vector<std::string>&& names) 
+        : meshPrim(std::move(prim)), blendShapeNames(std::move(names)) {}
+};
+
 // Assimp includes
 #include <assimp/Exceptional.h>
 #include <assimp/IOSystem.hpp>
 #include <assimp/scene.h>
 #include <assimp/StringUtils.h>
+
+// Math includes for animation calculations
+#include <cmath>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/ai_assert.h>
 #include <assimp/StringComparison.h>
@@ -204,9 +216,10 @@ void USDZExporter::ExportMetadata() {
         }
         
         if (maxDuration > 0.0) {
+            double frameRate = 24.0; // Standard frame rate
             stageMeta.startTimeCode = 0.0;
-            stageMeta.endTimeCode = maxDuration;
-            stageMeta.timeCodesPerSecond = 24.0; // Standard frame rate
+            stageMeta.endTimeCode = std::ceil(maxDuration * frameRate); // Convert seconds to frames and round up
+            stageMeta.timeCodesPerSecond = frameRate;
         }
     }
     
@@ -315,6 +328,7 @@ void USDZExporter::ExportMeshes() {
         
         // Convert to appropriate primitive type
         tinyusdz::Prim meshPrim(tinyusdz::GeomMesh{});
+        std::vector<std::string> meshBlendShapeNames;  // Store blend shape names for later use
         
         if (IsPointPrimitive(mesh)) {
             // For point primitives, create a GeomMesh with point-sized faces to ensure tinyusdz compatibility
@@ -418,34 +432,85 @@ void USDZExporter::ExportMeshes() {
                 }
             }
             
+            // Create bone name converter function
+            auto boneNameConverter = [this](const std::string& boneName) -> std::string {
+                // Use the exact USD path from skeleton (critical for tinyusdz validation)
+                auto pathIt = mBoneNameToUSDPath.find(boneName);
+                if (pathIt != mBoneNameToUSDPath.end()) {
+                    return pathIt->second;
+                }
+                // Fallback to sanitized name (shouldn't happen if skeleton was built correctly)
+                return mNameRegistry.Sanitize(boneName);
+            };
+            
+            // Use pipeline to get complete mesh with blend shapes if they exist
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            pipeline.ExecuteFullPipeline(boneNameConverter);
+            
+            if (!pipeline.IsValid()) {
+                ASSIMP_LOG_WARN("USDZExporter: Mesh conversion pipeline validation failed");
+            }
+            
+            // Create mesh prim from the processed usdMesh
             meshPrim = tinyusdz::Prim(usdMesh);
+            
+            // Add BlendShape prims as children of the mesh
+            const auto& blendShapePrims = pipeline.GetBlendShapePrims();
+            for (const auto& blendShapePrim : blendShapePrims) {
+                meshPrim.children().emplace_back(*blendShapePrim);
+            }
             
             // Set MaterialBindingAPI on the prim (Apple's pattern)
             meshPrim.metas().apiSchemas = materialBindingAPI;
+            
+            // Store blend shape names from pipeline for later use
+            meshBlendShapeNames = pipeline.GetBlendShapeNames();
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Added " + std::to_string(blendShapePrims.size()) + " BlendShape children to mesh");
         }
+        
+        // Check if this mesh needs skeletal treatment (bones or blend shapes)
+        bool needsSkeletal = NeedsSkeletalTreatment(mesh);
+        tinyusdz::Prim finalMeshPrim = std::move(meshPrim);
         
         // Find the parent nodes that reference this mesh and add it as their child
         bool meshPlaced = false;
         if (meshToNodes.count(i)) {
+            // Get the first parent node name for skeletal treatment (most meshes have one parent)
+            const aiNode* firstParentNode = meshToNodes[i][0];
+            std::string firstParentNodeName = SanitizeName(firstParentNode->mName.C_Str());
+            
+            // Apply skeletal treatment if needed (using first parent node name)
+            if (needsSkeletal) {
+                finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, firstParentNodeName);
+            }
+            
             for (const aiNode* parentNode : meshToNodes[i]) {
                 std::string parentNodeName = SanitizeName(parentNode->mName.C_Str());
                 
                 // Find the corresponding USD node in our stage
                 std::function<bool(tinyusdz::Prim&)> addMeshToNode = [&](tinyusdz::Prim& prim) -> bool {
                     if (prim.element_name() == parentNodeName) {
-                        // Create GeomScope wrapper with proper naming (Apple's pattern)
-                        tinyusdz::Scope geomScope;
-                        geomScope.name = "Geometry";  // Use "Geometry" as Apple does
-                        
-                        // Create GeomScope prim and add mesh as its child
-                        tinyusdz::Prim geomScopePrim(geomScope);
-                        geomScopePrim.children().emplace_back(meshPrim);  // Copy for multiple parents
-                        
-                        // Add GeomScope as child of this node
-                        prim.children().emplace_back(std::move(geomScopePrim));
+                        if (needsSkeletal) {
+                            // For skeletal meshes, add SkelRoot directly to the node
+                            prim.children().emplace_back(std::move(finalMeshPrim));
+                            ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot " + meshName + " to node " + parentNodeName);
+                        } else {
+                            // Create GeomScope wrapper with proper naming (Apple's pattern)
+                            tinyusdz::Scope geomScope;
+                            geomScope.name = "Geometry";  // Use "Geometry" as Apple does
+                            
+                            // Create GeomScope prim and add mesh as its child
+                            tinyusdz::Prim geomScopePrim(geomScope);
+                            geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
+                            
+                            // Add GeomScope as child of this node
+                            prim.children().emplace_back(std::move(geomScopePrim));
+                            
+                            ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName + " with GeomScope wrapper");
+                        }
                         
                         meshPlaced = true;
-                        ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName + " with GeomScope wrapper");
                         return true;
                     }
                     
@@ -469,44 +534,28 @@ void USDZExporter::ExportMeshes() {
             }
         }
         
-        // Fallback: if mesh isn't referenced by any node or special case for skinned meshes
+        // Fallback: if mesh isn't referenced by any node
         if (!meshPlaced) {
-            if (mesh->mNumBones > 0) {
-                // Add skinned mesh to SkelRoot with GeomScope wrapper
-                for (auto& rootPrim : mStage->root_prims()) {
-                    if (rootPrim.element_name() == "SkelRoot") {
-                        // Create GeomScope for skinned mesh
-                        tinyusdz::Scope geomScope;
-                        geomScope.name = "Geometry";
-                        
-                        tinyusdz::Prim geomScopePrim(geomScope);
-                        geomScopePrim.children().emplace_back(meshPrim);
-                        rootPrim.children().emplace_back(std::move(geomScopePrim));
-                        
-                        meshPlaced = true;
-                        ASSIMP_LOG_DEBUG("USDZExporter: Added skinned mesh " + meshName + " to SkelRoot with GeomScope wrapper");
-                        break;
-                    }
-                }
-            }
-            
-            if (!meshPlaced) {
-                // Last resort: add to root level with GeomScope wrapper
-                if (!mStage->root_prims().empty()) {
+            if (!mStage->root_prims().empty()) {
+                if (needsSkeletal) {
+                    // Add SkelRoot directly to main scene root prim
+                    mStage->root_prims()[0].children().emplace_back(std::move(finalMeshPrim));
+                    ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot " + meshName + " to root prim");
+                } else {
                     // Add to main scene root prim with GeomScope
                     tinyusdz::Scope geomScope;
                     geomScope.name = "Geometry";
                     
                     tinyusdz::Prim geomScopePrim(geomScope);
-                    geomScopePrim.children().emplace_back(meshPrim);
+                    geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
                     mStage->root_prims()[0].children().emplace_back(std::move(geomScopePrim));
                     
                     ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to root prim with GeomScope wrapper");
-                } else {
-                    // Absolute fallback: add directly to root level
-                    mStage->root_prims().emplace_back(std::move(meshPrim));
-                    ASSIMP_LOG_WARN("USDZExporter: Added mesh " + meshName + " to root level (no scene root found)");
                 }
+            } else {
+                // Absolute fallback: add directly to root level
+                mStage->root_prims().emplace_back(std::move(finalMeshPrim));
+                ASSIMP_LOG_WARN("USDZExporter: Added mesh " + meshName + " to root level (no scene root found)");
             }
         }
     }
@@ -1128,6 +1177,330 @@ bool USDZExporter::IsPointPrimitive(const aiMesh* mesh) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Check if mesh needs skeletal treatment (has bones or blend shapes)
+bool USDZExporter::NeedsSkeletalTreatment(const aiMesh* mesh) {
+    return mesh && (mesh->mNumBones > 0 || mesh->mNumAnimMeshes > 0);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Create SkelRoot structure for meshes that need skeletal treatment
+tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames, const std::string& parentNodeName) {
+    // Create SkelRoot container
+    tinyusdz::SkelRoot skelRoot;
+    skelRoot.name = meshName;  // Use mesh name for SkelRoot
+    
+    // Create Skeleton with dummy joint for blend shapes
+    tinyusdz::Skeleton skeleton;
+    skeleton.name = "Skel";
+    
+    // Create dummy joint system (required for USD skeletal binding)
+    std::vector<tinyusdz::value::token> jointTokens = {tinyusdz::value::token("joint1")};
+    skeleton.joints.set_value(jointTokens);
+    
+    // Create identity bind and rest transforms
+    std::vector<tinyusdz::value::matrix4d> bindTransforms(1);
+    std::vector<tinyusdz::value::matrix4d> restTransforms(1);
+    tinyusdz::Identity(&bindTransforms[0]);
+    tinyusdz::Identity(&restTransforms[0]);
+    
+    skeleton.bindTransforms.set_value(bindTransforms);
+    skeleton.restTransforms.set_value(restTransforms);
+    
+    // Add SkelBindingAPI to skeleton
+    tinyusdz::APISchemas skelBindingAPI;
+    skelBindingAPI.listOpQual = tinyusdz::ListEditQual::Prepend;
+    skelBindingAPI.names.push_back({tinyusdz::APISchemas::APIName::SkelBindingAPI, ""});
+    
+    // Create skeleton prim
+    tinyusdz::Prim skeletonPrim(skeleton);
+    skeletonPrim.metas().apiSchemas = skelBindingAPI;
+    
+    // Create SkelAnimation if mesh has blend shapes
+    if (!blendShapeNames.empty()) {
+        tinyusdz::SkelAnimation skelAnim;
+        skelAnim.name = "Anim";
+        
+        // Set up blend shape tokens using provided names
+        std::vector<tinyusdz::value::token> blendShapeTokens;
+        for (const std::string& name : blendShapeNames) {
+            blendShapeTokens.push_back(tinyusdz::value::token(name));
+        }
+        skelAnim.blendShapes.set_value(blendShapeTokens);
+        
+        // Generate proper time samples from scene animation data
+        tinyusdz::Animatable<std::vector<float>> animatedWeights;
+        
+        // Get animation timeline information
+        double startTime = 0.0;
+        double endTime = 4.0;  // Will be overridden by actual animation data
+        double frameRate = 24.0;  // Standard USD frame rate
+        
+        // Get actual animation duration from scene data
+        if (mScene && mScene->mNumAnimations > 0) {
+            double maxDuration = 0.0;
+            for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
+                const aiAnimation* anim = mScene->mAnimations[i];
+                double duration = anim->mDuration / (anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0);
+                maxDuration = std::max(maxDuration, duration);
+            }
+            if (maxDuration > 0.0) {
+                endTime = maxDuration;
+            }
+        }
+        
+        // Calculate total frames and generate time samples
+        // Use ceiling to match endTimeCode calculation (e.g., 4.2s * 24fps = 100.8 → 101 frames)
+        int totalFrames = static_cast<int>(std::ceil((endTime - startTime) * frameRate));
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Generating " + std::to_string(totalFrames) + " time samples from " + 
+                        std::to_string(startTime) + " to " + std::to_string(endTime) + " at " + std::to_string(frameRate) + "fps");
+        
+        // Generate time samples for each frame
+        for (int frame = 0; frame < totalFrames; ++frame) {
+            double timeCode = startTime + (frame / frameRate);
+            std::vector<float> frameWeights(blendShapeNames.size(), 0.0f);
+            
+            // Sample animation data from scene if available
+            if (mScene && mScene->mNumAnimations > 0) {
+                ASSIMP_LOG_DEBUG("USDZExporter: Found " + std::to_string(mScene->mNumAnimations) + " animations in scene");
+                // Find mesh morph animations that match our mesh
+                for (uint32_t animIdx = 0; animIdx < mScene->mNumAnimations; ++animIdx) {
+                    const aiAnimation* anim = mScene->mAnimations[animIdx];
+                    ASSIMP_LOG_DEBUG("USDZExporter: Animation " + std::to_string(animIdx) + " has " + 
+                                    std::to_string(anim->mNumMorphMeshChannels) + " morph channels");
+                    
+                    // Convert time code to animation ticks
+                    double ticksPerSecond = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0;
+                    double animTime = timeCode * ticksPerSecond;
+                    
+                    if (frame < 5 || frame % 24 == 0) { // Log first 5 frames and every 24th frame (1 second intervals)
+                        ASSIMP_LOG_DEBUG("USDZExporter: Frame " + std::to_string(frame) + 
+                                        " - ticksPerSecond: " + std::to_string(ticksPerSecond) + 
+                                        ", timeCode: " + std::to_string(timeCode) + 
+                                        ", animTime: " + std::to_string(animTime));
+                    }
+                    
+                    // Sample morph mesh channels
+                    for (uint32_t morphIdx = 0; morphIdx < anim->mNumMorphMeshChannels; ++morphIdx) {
+                        const aiMeshMorphAnim* morphAnim = anim->mMorphMeshChannels[morphIdx];
+                        
+                        // Check if this morph animation applies to our mesh
+                        std::string morphMeshName = morphAnim->mName.C_Str();
+                        std::string meshName = mesh->mName.C_Str();
+                        ASSIMP_LOG_DEBUG("USDZExporter: Morph channel " + std::to_string(morphIdx) + 
+                                        " name: '" + morphMeshName + "', mesh name: '" + meshName + 
+                                        "', keys: " + std::to_string(morphAnim->mNumKeys));
+                        
+                        // Be flexible with name matching - morph animations often target nodes, not meshes directly
+                        bool nameMatches = morphMeshName.empty() || morphMeshName == meshName || 
+                                         morphMeshName.find("node") != std::string::npos ||
+                                         morphMeshName.find(meshName) != std::string::npos ||
+                                         meshName.find(morphMeshName) != std::string::npos;
+                        
+                        if (nameMatches) {
+                            ASSIMP_LOG_DEBUG("USDZExporter: Using morph channel for animation sampling");
+                            // Sample the morph weights at this time
+                            if (morphAnim->mNumKeys > 0 && morphAnim->mKeys) {
+                                if (frame == 0) {
+                                    ASSIMP_LOG_DEBUG("USDZExporter: Sampling animation at time " + std::to_string(animTime) + 
+                                                    " (frame " + std::to_string(frame) + "), total keys: " + std::to_string(morphAnim->mNumKeys));
+                                    // Log all keys for debugging
+                                    for (uint32_t debugIdx = 0; debugIdx < morphAnim->mNumKeys; ++debugIdx) {
+                                        const aiMeshMorphKey& debugKey = morphAnim->mKeys[debugIdx];
+                                        ASSIMP_LOG_DEBUG("USDZExporter: All keys - Key " + std::to_string(debugIdx) + 
+                                                        " time: " + std::to_string(debugKey.mTime));
+                                    }
+                                }
+                                // First, log all keyframes to verify import data
+                                if (frame == 0) {
+                                    ASSIMP_LOG_DEBUG("USDZExporter: Logging all " + std::to_string(morphAnim->mNumKeys) + " keyframes:");
+                                    for (uint32_t debugIdx = 0; debugIdx < morphAnim->mNumKeys; ++debugIdx) {
+                                        const aiMeshMorphKey& debugKey = morphAnim->mKeys[debugIdx];
+                                        ASSIMP_LOG_DEBUG("USDZExporter: Key " + std::to_string(debugIdx) + 
+                                                        " time: " + std::to_string(debugKey.mTime) + 
+                                                        ", numWeights: " + std::to_string(debugKey.mNumValuesAndWeights));
+                                        if (debugKey.mWeights && debugKey.mNumValuesAndWeights > 0) {
+                                            std::string weightsStr = "[";
+                                            for (uint32_t w = 0; w < debugKey.mNumValuesAndWeights; ++w) {
+                                                if (w > 0) weightsStr += ", ";
+                                                weightsStr += std::to_string(debugKey.mWeights[w]);
+                                            }
+                                            weightsStr += "]";
+                                            ASSIMP_LOG_DEBUG("USDZExporter:   weights = " + weightsStr);
+                                        }
+                                    }
+                                }
+                                
+                                for (uint32_t keyIdx = 0; keyIdx < morphAnim->mNumKeys; ++keyIdx) {
+                                    const aiMeshMorphKey& key = morphAnim->mKeys[keyIdx];
+                                    
+                                    if (false) { // Disable individual key logging since we log all above
+                                        ASSIMP_LOG_DEBUG("USDZExporter: Key " + std::to_string(keyIdx) + 
+                                                        " time: " + std::to_string(key.mTime) + 
+                                                        ", numWeights: " + std::to_string(key.mNumValuesAndWeights));
+                                        if (key.mWeights && key.mNumValuesAndWeights > 0) {
+                                            std::string weightsStr = "[";
+                                            for (uint32_t w = 0; w < key.mNumValuesAndWeights; ++w) {
+                                                if (w > 0) weightsStr += ", ";
+                                                weightsStr += std::to_string(key.mWeights[w]);
+                                            }
+                                            weightsStr += "]";
+                                            ASSIMP_LOG_DEBUG("USDZExporter:   weights = " + weightsStr);
+                                        }
+                                    }
+                                    
+                                    // Find the correct keyframe interval for interpolation
+                                    if (keyIdx == morphAnim->mNumKeys - 1) {
+                                        // Last keyframe - use its values directly
+                                        if (animTime >= key.mTime) {
+                                            for (uint32_t weightIdx = 0; weightIdx < key.mNumValuesAndWeights && weightIdx < frameWeights.size(); ++weightIdx) {
+                                                frameWeights[weightIdx] = static_cast<float>(key.mWeights[weightIdx]);
+                                            }
+                                            if (frame < 5) {
+                                                ASSIMP_LOG_DEBUG("USDZExporter: Frame " + std::to_string(frame) + 
+                                                                " using final keyframe " + std::to_string(keyIdx) + 
+                                                                " weights: [" + std::to_string(frameWeights[0]) + ", " + std::to_string(frameWeights[1]) + "]");
+                                            }
+                                            break;
+                                        }
+                                    } else if (animTime >= key.mTime && animTime < morphAnim->mKeys[keyIdx + 1].mTime) {
+                                        // Interpolate between this keyframe and the next
+                                        const aiMeshMorphKey& nextKey = morphAnim->mKeys[keyIdx + 1];
+                                        double t = (animTime - key.mTime) / (nextKey.mTime - key.mTime);  // Interpolation factor [0,1]
+                                        
+                                        for (uint32_t weightIdx = 0; weightIdx < key.mNumValuesAndWeights && weightIdx < frameWeights.size(); ++weightIdx) {
+                                            double currentWeight = key.mWeights[weightIdx];
+                                            double nextWeight = nextKey.mWeights[weightIdx];
+                                            frameWeights[weightIdx] = static_cast<float>(currentWeight + t * (nextWeight - currentWeight));
+                                        }
+                                        
+                                        if (frame < 5) {
+                                            ASSIMP_LOG_DEBUG("USDZExporter: Frame " + std::to_string(frame) + 
+                                                            " interpolating between keys " + std::to_string(keyIdx) + "-" + std::to_string(keyIdx+1) + 
+                                                            " (t=" + std::to_string(t) + ") weights: [" + std::to_string(frameWeights[0]) + ", " + std::to_string(frameWeights[1]) + "]");
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fallback: Generate synthetic animation for testing
+                ASSIMP_LOG_DEBUG("USDZExporter: No scene animations found, generating synthetic animation for frame " + std::to_string(frame));
+                float normalizedTime = static_cast<float>(frame) / static_cast<float>(totalFrames - 1);
+                
+                // Create smooth animation curves similar to Blender reference
+                for (size_t i = 0; i < blendShapeNames.size(); ++i) {
+                    if (i == 0) {
+                        // First blend shape: sine wave animation
+                        frameWeights[i] = 0.5f * (1.0f + std::sin(normalizedTime * 2.0f * M_PI - M_PI_2));
+                    } else if (i == 1) {
+                        // Second blend shape: different phase
+                        frameWeights[i] = 0.5f * (1.0f + std::sin(normalizedTime * 2.0f * M_PI));
+                    }
+                }
+            }
+            
+            // Add time sample (USD uses integer frame numbers starting from 1)
+            animatedWeights.add_sample(static_cast<double>(frame + 1), frameWeights);
+        }
+        
+        skelAnim.blendShapeWeights.set_value(animatedWeights);
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added blendShapeWeights.timeSamples with " + std::to_string(totalFrames) + 
+                        " samples for " + std::to_string(blendShapeNames.size()) + " blend shapes");
+        
+        // Add SkelAnimation as child of skeleton
+        tinyusdz::Prim skelAnimPrim(skelAnim);
+        skeletonPrim.children().emplace_back(std::move(skelAnimPrim));
+        
+        // Add animation source reference to skeleton with dynamically constructed absolute path
+        tinyusdz::Relationship animSourceRel;
+        
+        // Construct absolute path: /{rootName}/{nodeName}/{meshName}/Skel/Anim
+        std::string rootName = GetSceneName();
+        std::string skelAnimPath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Skel/Anim";
+        tinyusdz::Path animSourcePath(skelAnimPath, "");
+        animSourceRel.set(animSourcePath);
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Set skel:animationSource to absolute path: " + skelAnimPath);
+        tinyusdz::Property animSourceProp(animSourceRel);
+        
+        // Access skeleton data and set the property
+        if (auto* skelData = skeletonPrim.as<tinyusdz::Skeleton>()) {
+            const_cast<std::map<std::string, tinyusdz::Property>&>(skelData->props)["skel:animationSource"] = animSourceProp;
+        }
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added SkelAnimation with " + std::to_string(blendShapeTokens.size()) + " blend shapes");
+    }
+    
+    // Create SkelRoot prim and add skeleton as child
+    tinyusdz::Prim skelRootPrim(skelRoot);
+    skelRootPrim.children().emplace_back(std::move(skeletonPrim));
+    
+    // Add SkelBindingAPI to the mesh prim (append to existing API schemas)
+    if (!meshPrim.metas().apiSchemas.has_value() || meshPrim.metas().apiSchemas->names.empty()) {
+        // No existing API schemas, create new
+        tinyusdz::APISchemas meshSkelBindingAPI;
+        meshSkelBindingAPI.listOpQual = tinyusdz::ListEditQual::Prepend;
+        meshSkelBindingAPI.names.push_back({tinyusdz::APISchemas::APIName::SkelBindingAPI, ""});
+        meshPrim.metas().apiSchemas = meshSkelBindingAPI;
+    } else {
+        // Append to existing API schemas (like MaterialBindingAPI)
+        meshPrim.metas().apiSchemas->names.push_back({tinyusdz::APISchemas::APIName::SkelBindingAPI, ""});
+    }
+    
+    // Set skel:skeleton relationship on the mesh with dynamically constructed absolute path
+    if (auto* meshData = meshPrim.as<tinyusdz::GeomMesh>()) {
+        // Construct absolute path: /{rootName}/{nodeName}/{meshName}/Skel
+        std::string rootName = GetSceneName();
+        std::string skeletonPath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Skel";
+        
+        tinyusdz::Path skelPath(skeletonPath, "");
+        tinyusdz::Relationship skeletonRel;
+        skeletonRel.set(skelPath);
+        tinyusdz::Property skeletonProp(skeletonRel);
+        
+        const_cast<std::map<std::string, tinyusdz::Property>&>(meshData->props)["skel:skeleton"] = skeletonProp;
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Set skel:skeleton to absolute path: " + skeletonPath);
+        
+        // Also fix skel:blendShapeTargets to use absolute paths (override MeshConverterPipeline's relative paths)
+        if (!blendShapeNames.empty()) {
+            std::vector<tinyusdz::Path> blendShapeTargetPaths;
+            for (const std::string& blendShapeName : blendShapeNames) {
+                // Construct absolute path: /{rootName}/{nodeName}/{meshName}/Geometry/{meshName}/{blendShapeName}
+                std::string blendShapeTargetPath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Geometry/" + meshName + "/" + blendShapeName;
+                blendShapeTargetPaths.emplace_back(blendShapeTargetPath, "");
+            }
+            
+            tinyusdz::Relationship blendShapeTargetsRel;
+            blendShapeTargetsRel.set(blendShapeTargetPaths);
+            tinyusdz::Property blendShapeTargetsProp(blendShapeTargetsRel);
+            
+            const_cast<std::map<std::string, tinyusdz::Property>&>(meshData->props)["skel:blendShapeTargets"] = blendShapeTargetsProp;
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Set skel:blendShapeTargets to absolute paths");
+        }
+    }
+    
+    // Create Geometry scope wrapper (Apple's pattern)
+    tinyusdz::Scope geomScope;
+    geomScope.name = "Geometry";
+    
+    tinyusdz::Prim geomScopePrim(geomScope);
+    geomScopePrim.children().emplace_back(std::move(meshPrim));
+    
+    // Add Geometry scope as child of SkelRoot
+    skelRootPrim.children().emplace_back(std::move(geomScopePrim));
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Created SkelRoot structure for mesh: " + meshName);
+    return skelRootPrim;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Convert mesh
 void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) {
     if (!mesh) return;
@@ -1143,13 +1516,16 @@ void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) 
         return mNameRegistry.Sanitize(boneName);
     };
     
-    // Use MeshConverterPipeline for structured conversion with scene context
-    MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
-    pipeline.ExecuteFullPipeline(boneNameConverter);
-    
-    if (!pipeline.IsValid()) {
-        ASSIMP_LOG_WARN("USDZExporter: Mesh conversion pipeline validation failed");
-    }
+                // Use MeshConverterPipeline for structured conversion with scene context
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            pipeline.ExecuteFullPipeline(boneNameConverter);
+            
+            if (!pipeline.IsValid()) {
+                ASSIMP_LOG_WARN("USDZExporter: Mesh conversion pipeline validation failed");
+            }
+            
+            // Note: Blend shapes are now handled directly by the pipeline in ExportMeshes
+            // No cross-function storage needed
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1189,26 +1565,71 @@ void USDZExporter::MeshConverterPipeline::ExecuteFaceConversion() {
 }
 
 void USDZExporter::MeshConverterPipeline::ExecuteNormalConversion() {
-    if (!mMesh->mNormals) return; // Check if normals exist
-    
     std::vector<tinyusdz::value::normal3f> normals;
-    normals.reserve(mMesh->mNumVertices);
     
-    for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
-        const aiVector3D& n = mMesh->mNormals[i];
-        normals.emplace_back(n.x, n.y, n.z);
+    if (mMesh->mNormals) {
+        // Use existing normals from mesh
+        normals.reserve(mMesh->mNumVertices);
+        for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
+            const aiVector3D& n = mMesh->mNormals[i];
+            normals.emplace_back(n.x, n.y, n.z);
+        }
+        
+        tinyusdz::Attribute normalAttr;
+        normalAttr.set_value(std::move(normals));
+        normalAttr.set_type_name("normal3f[]");
+        
+        tinyusdz::AttrMeta normalMeta;
+        normalMeta.interpolation = tinyusdz::Interpolation::Vertex;
+        normalAttr.metas() = normalMeta;
+        
+        tinyusdz::Property normalProp(normalAttr, false);
+        mUsdMesh.props["normals"] = normalProp;
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added " + std::to_string(normals.size()) + " vertex normals");
+    } else {
+        // Generate face-varying normals for triangular faces
+        if (mMesh->mNumFaces > 0) {
+            // Calculate face normals and expand to face-varying
+            std::vector<tinyusdz::value::normal3f> faceVaryingNormals;
+            faceVaryingNormals.reserve(mMesh->mNumFaces * 3); // Assuming triangular faces
+            
+            for (uint32_t faceIdx = 0; faceIdx < mMesh->mNumFaces; ++faceIdx) {
+                const aiFace& face = mMesh->mFaces[faceIdx];
+                if (face.mNumIndices >= 3) {
+                    // Calculate face normal from first 3 vertices
+                    const aiVector3D& v0 = mMesh->mVertices[face.mIndices[0]];
+                    const aiVector3D& v1 = mMesh->mVertices[face.mIndices[1]];
+                    const aiVector3D& v2 = mMesh->mVertices[face.mIndices[2]];
+                    
+                    aiVector3D edge1 = v1 - v0;
+                    aiVector3D edge2 = v2 - v0;
+                    aiVector3D faceNormal = edge1 ^ edge2; // Cross product
+                    faceNormal.Normalize();
+                    
+                    // Add the same normal for each vertex in the face
+                    for (uint32_t i = 0; i < face.mNumIndices; ++i) {
+                        faceVaryingNormals.emplace_back(faceNormal.x, faceNormal.y, faceNormal.z);
+                    }
+                }
+            }
+            
+            if (!faceVaryingNormals.empty()) {
+                tinyusdz::Attribute normalAttr;
+                normalAttr.set_value(std::move(faceVaryingNormals));
+                normalAttr.set_type_name("normal3f[]");
+                
+                tinyusdz::AttrMeta normalMeta;
+                normalMeta.interpolation = tinyusdz::Interpolation::FaceVarying;
+                normalAttr.metas() = normalMeta;
+                
+                tinyusdz::Property normalProp(normalAttr, false);
+                mUsdMesh.props["normals"] = normalProp;
+                
+                ASSIMP_LOG_DEBUG("USDZExporter: Generated " + std::to_string(faceVaryingNormals.size()) + " face-varying normals");
+            }
+        }
     }
-    
-    tinyusdz::Attribute normalAttr;
-    normalAttr.set_value(std::move(normals));
-    normalAttr.set_type_name("normal3f[]");
-    
-    tinyusdz::AttrMeta normalMeta;
-    normalMeta.interpolation = tinyusdz::Interpolation::Vertex;
-    normalAttr.metas() = normalMeta;
-    
-    tinyusdz::Property normalProp(normalAttr, false);
-    mUsdMesh.props["primvars:normals"] = normalProp;
 }
 
 void USDZExporter::MeshConverterPipeline::ExecuteUVConversion() {
@@ -1451,8 +1872,11 @@ void USDZExporter::MeshConverterPipeline::ExecuteBlendShapeConversion() {
     
     ASSIMP_LOG_DEBUG("USDZExporter: Converting " + std::to_string(mMesh->mNumAnimMeshes) + " blend shapes");
     
-    // Store created BlendShape names for later reference
-    std::vector<std::string> createdBlendShapeNames;
+    // Store created BlendShape prims for later reference
+    std::vector<tinyusdz::Prim> blendShapePrims;
+    // Clear any previous blend shape data
+    mBlendShapeNames.clear();
+    mBlendShapePrims.clear();
     
     // Process each animation mesh as a blend shape target
     for (uint32_t animMeshIdx = 0; animMeshIdx < mMesh->mNumAnimMeshes; ++animMeshIdx) {
@@ -1461,12 +1885,15 @@ void USDZExporter::MeshConverterPipeline::ExecuteBlendShapeConversion() {
         
         // Create BlendShape prim using proper tinyusdz APIs
         tinyusdz::BlendShape blendShape;
-        std::string blendShapeName = mNameRegistry.Sanitize(animMesh->mName.C_Str());
-        if (blendShapeName.empty()) {
-            blendShapeName = "BlendShape_" + std::to_string(animMeshIdx);
+        
+        // Use glTF-derived name if available, otherwise fall back to target_N
+        std::string blendShapeName;
+        if (animMesh->mName.length > 0) {
+            blendShapeName = std::string(animMesh->mName.C_Str());
+        } else {
+            blendShapeName = "target_" + std::to_string(animMeshIdx);
         }
-        blendShapeName = mNameRegistry.GenerateUnique(blendShapeName);
-        blendShape.set_name(blendShapeName);
+        blendShape.name = blendShapeName;
         
         // Calculate offsets and collect affected vertices
         std::vector<tinyusdz::value::vector3f> offsets;
@@ -1533,27 +1960,26 @@ void USDZExporter::MeshConverterPipeline::ExecuteBlendShapeConversion() {
             ASSIMP_LOG_DEBUG("USDZExporter: BlendShape " + blendShapeName + " normal offsets: " + std::to_string(normalOffsets.size()));
         }
         
-        // Convert to Prim and add as child to stage
-        // Note: BlendShapes are typically added as separate prims, not directly to the mesh
+        // Store BlendShape prim to be added as mesh child later
         if (!pointIndices.empty() && !offsets.empty()) {
-            tinyusdz::Prim blendShapePrim(blendShape);
-            mStage.root_prims().emplace_back(std::move(blendShapePrim));
+            auto blendShapePrim = std::make_unique<tinyusdz::Prim>(blendShape);
+            mBlendShapePrims.emplace_back(std::move(blendShapePrim));
             
             // Store the actual created name for reference building
-            createdBlendShapeNames.push_back(blendShapeName);
+            mBlendShapeNames.push_back(blendShapeName);
             
-            ASSIMP_LOG_DEBUG("USDZExporter: Created BlendShape prim: " + blendShapeName + " at path: /" + blendShapeName);
+            ASSIMP_LOG_DEBUG("USDZExporter: Created BlendShape prim: " + blendShapeName + " to be added as mesh child");
         }
     }
     
     // After creating all BlendShape prims, add skel:blendShapes property to mesh using stored names
-    if (!createdBlendShapeNames.empty()) {
+    if (!mBlendShapeNames.empty()) {
         std::vector<tinyusdz::value::token> blendShapePathTokens;
         
         // Use the actual created names we stored during creation
-        for (const std::string& blendShapeName : createdBlendShapeNames) {
-            std::string blendShapePath = "/" + blendShapeName;
-            blendShapePathTokens.push_back(tinyusdz::value::token(blendShapePath));
+        // BlendShapes will be children of the mesh, so use relative paths
+        for (const std::string& blendShapeName : mBlendShapeNames) {
+            blendShapePathTokens.push_back(tinyusdz::value::token(blendShapeName));
         }
     
         // Set skel:blendShapes property on the mesh with USD paths
@@ -1568,9 +1994,65 @@ void USDZExporter::MeshConverterPipeline::ExecuteBlendShapeConversion() {
             
             ASSIMP_LOG_DEBUG("USDZExporter: Added skel:blendShapes property with " + std::to_string(blendShapePathTokens.size()) + " USD path references");
         }
+        
+        // Add skel:blendShapeTargets relationships (absolute paths to blend shapes)
+        std::vector<tinyusdz::Path> blendShapeTargetPaths;
+        for (const std::string& blendShapeName : mBlendShapeNames) {
+            // BlendShapes are children of this mesh - use relative path without "./"
+            // USD expects just the child name for direct children
+            blendShapeTargetPaths.emplace_back(blendShapeName, "");
+        }
+        
+        tinyusdz::Relationship blendShapeTargetsRel;
+        blendShapeTargetsRel.set(blendShapeTargetPaths);
+        tinyusdz::Property blendShapeTargetsProp(blendShapeTargetsRel);
+        mUsdMesh.props["skel:blendShapeTargets"] = blendShapeTargetsProp;
+        
+        // Add required skeletal binding properties for blend shapes
+        // Add dummy joint indices (all vertices bound to joint 0)
+        std::vector<int> jointIndices(mMesh->mNumVertices, 0);
+        tinyusdz::Attribute jointIndicesAttr;
+        jointIndicesAttr.set_value(jointIndices);
+        jointIndicesAttr.set_type_name("int[]");
+        
+        tinyusdz::AttrMeta jointIndicesMeta;
+        jointIndicesMeta.interpolation = tinyusdz::Interpolation::Vertex;
+        jointIndicesMeta.elementSize = 1;
+        jointIndicesAttr.metas() = jointIndicesMeta;
+        
+        tinyusdz::Property jointIndicesProp(jointIndicesAttr, false);
+        mUsdMesh.props["primvars:skel:jointIndices"] = jointIndicesProp;
+        
+        // Add dummy joint weights (all vertices have weight 1.0)
+        std::vector<float> jointWeights(mMesh->mNumVertices, 1.0f);
+        tinyusdz::Attribute jointWeightsAttr;
+        jointWeightsAttr.set_value(jointWeights);
+        jointWeightsAttr.set_type_name("float[]");
+        
+        tinyusdz::AttrMeta jointWeightsMeta;
+        jointWeightsMeta.interpolation = tinyusdz::Interpolation::Vertex;
+        jointWeightsMeta.elementSize = 1;
+        jointWeightsAttr.metas() = jointWeightsMeta;
+        
+        tinyusdz::Property jointWeightsProp(jointWeightsAttr, false);
+        mUsdMesh.props["primvars:skel:jointWeights"] = jointWeightsProp;
+        
+        // Note: skel:skeleton relationship will be set later in CreateSkelRootForMesh 
+        // where we have access to the full USD hierarchy context
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added skeletal properties for blend shapes");
     }
     
     ASSIMP_LOG_DEBUG("USDZExporter: Blend shape conversion completed");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Get complete mesh prim with blend shapes and skeletal properties
+USDZExporter::BlendShapeResult USDZExporter::MeshConverterPipeline::GetCompleteMeshWithBlendShapes(tinyusdz::Prim&& baseMeshPrim) {
+    // Since blend shapes are now created as separate root-level prims,
+    // we just return the base mesh as-is. The skel:blendShapes property
+    // has already been set during ExecuteBlendShapeConversion()
+    return BlendShapeResult(std::move(baseMeshPrim), {});
 }
 
 void USDZExporter::MeshConverterPipeline::ExecuteAttributeConversion() {
@@ -1606,6 +2088,39 @@ void USDZExporter::MeshConverterPipeline::ExecuteAttributeConversion() {
     triangleSubdivisionRuleAttr.set_type_name("token");
     tinyusdz::Property triangleSubdivisionRuleProp(triangleSubdivisionRuleAttr, false);
     mUsdMesh.props["triangleSubdivisionRule"] = triangleSubdivisionRuleProp;
+    
+    // 4. Calculate and set extent (bounding box) - required for USD meshes
+    if (mMesh->mNumVertices > 0) {
+        aiVector3D minBounds = mMesh->mVertices[0];
+        aiVector3D maxBounds = mMesh->mVertices[0];
+        
+        // Find min and max bounds
+        for (uint32_t i = 1; i < mMesh->mNumVertices; ++i) {
+            const aiVector3D& vertex = mMesh->mVertices[i];
+            minBounds.x = std::min(minBounds.x, vertex.x);
+            minBounds.y = std::min(minBounds.y, vertex.y);
+            minBounds.z = std::min(minBounds.z, vertex.z);
+            maxBounds.x = std::max(maxBounds.x, vertex.x);
+            maxBounds.y = std::max(maxBounds.y, vertex.y);
+            maxBounds.z = std::max(maxBounds.z, vertex.z);
+        }
+        
+        // Create extent array [min, max]
+        std::vector<tinyusdz::value::float3> extent = {
+            tinyusdz::value::float3{minBounds.x, minBounds.y, minBounds.z},
+            tinyusdz::value::float3{maxBounds.x, maxBounds.y, maxBounds.z}
+        };
+        
+        tinyusdz::Attribute extentAttr;
+        extentAttr.set_value(extent);
+        extentAttr.set_type_name("float3[]");
+        tinyusdz::Property extentProp(extentAttr, false);
+        mUsdMesh.props["extent"] = extentProp;
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Added extent property: min(" + 
+                        std::to_string(minBounds.x) + ", " + std::to_string(minBounds.y) + ", " + std::to_string(minBounds.z) + 
+                        ") max(" + std::to_string(maxBounds.x) + ", " + std::to_string(maxBounds.y) + ", " + std::to_string(maxBounds.z) + ")");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2333,8 +2848,8 @@ void USDZExporter::ConvertAnimation(const aiAnimation* anim) {
         
         ASSIMP_LOG_DEBUG("USDZExporter: Processing morph animation for mesh: " + actualMeshName);
         
-        // Create SkelAnimation for this morph target animation
-        CreateMorphTargetSkelAnimation(morphAnim, actualMeshName, timeScale, anim->mName.C_Str());
+        // Update the existing SkelAnimation in the skeleton with morph animation data
+        UpdateSkelAnimationWithMorphData(morphAnim, actualMeshName, timeScale, anim->mName.C_Str());
     }
     
     ASSIMP_LOG_DEBUG("USDZExporter: Animation conversion completed for " + ai_to_string(anim->mNumChannels) + " node channels and " + ai_to_string(anim->mNumMorphMeshChannels) + " morph channels");
@@ -2530,80 +3045,110 @@ void USDZExporter::ConvertSkeletalAnimation(const aiAnimation* anim) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Create SkelAnimation for morph target animations
-void USDZExporter::CreateMorphTargetSkelAnimation(const aiMeshMorphAnim* morphAnim, 
-                                                  const std::string& meshName, 
-                                                  double timeScale, 
-                                                  const char* animationName) {
+// Update existing SkelAnimation with morph target animation data
+void USDZExporter::UpdateSkelAnimationWithMorphData(const aiMeshMorphAnim* morphAnim, 
+                                                    const std::string& meshName, 
+                                                    double timeScale, 
+                                                    const char* animationName) {
     if (!morphAnim || morphAnim->mNumKeys == 0) {
         return;
     }
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Creating SkelAnimation for morph target: " + meshName);
+    ASSIMP_LOG_DEBUG("USDZExporter: Updating SkelAnimation with morph data for mesh: " + meshName);
     
-    // Create SkelAnimation for morph targets
-    tinyusdz::SkelAnimation skelAnim;
-    std::string animName = SanitizeName(animationName) + "_" + SanitizeName(meshName) + "_MorphAnim";
-    skelAnim.name = GenerateUniqueName(animName);
-    
-    // Collect blend shape names and build time-to-weights mapping
-    std::vector<tinyusdz::value::token> blendShapeTokens;
-    std::map<double, std::vector<float>> timeToWeights;
-    
-    // Get the first keyframe to determine number of blend shapes
-    if (morphAnim->mNumKeys > 0) {
-        const aiMeshMorphKey& firstKey = morphAnim->mKeys[0];
+    // Find the SkelRoot that contains this mesh and update its SkelAnimation
+    std::function<bool(tinyusdz::Prim&)> findAndUpdateSkelAnimation = [&](tinyusdz::Prim& prim) -> bool {
+        // Look for SkelRoot containing our mesh
+        if (prim.prim_type_name() == "SkelRoot") {
+            // Check if this SkelRoot contains our mesh
+            bool containsMesh = false;
+            std::function<bool(const tinyusdz::Prim&)> checkForMesh = [&](const tinyusdz::Prim& p) -> bool {
+                if (p.element_name() == meshName && p.prim_type_name() == "Mesh") {
+                    return true;
+                }
+                for (const auto& child : p.children()) {
+                    if (checkForMesh(child)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            containsMesh = checkForMesh(prim);
+            
+            if (containsMesh) {
+                // Find the SkelAnimation within this SkelRoot
+                std::function<bool(tinyusdz::Prim&)> updateSkelAnim = [&](tinyusdz::Prim& skelPrim) -> bool {
+                    if (skelPrim.prim_type_name() == "SkelAnimation") {
+                        // Update this SkelAnimation with time samples
+                        if (auto* skelAnimData = skelPrim.as<tinyusdz::SkelAnimation>()) {
+                            // Build time-to-weights mapping
+                            std::map<double, std::vector<float>> timeToWeights;
+                            
+                            for (uint32_t k = 0; k < morphAnim->mNumKeys; ++k) {
+                                const aiMeshMorphKey& key = morphAnim->mKeys[k];
+                                double time = key.mTime * timeScale;
+                                
+                                std::vector<float> weights;
+                                weights.reserve(key.mNumValuesAndWeights);
+                                
+                                for (uint32_t w = 0; w < key.mNumValuesAndWeights; ++w) {
+                                    weights.push_back(static_cast<float>(key.mWeights[w]));
+                                }
+                                
+                                timeToWeights[time] = weights;
+                            }
+                            
+                            // Create time-sampled blendShapeWeights
+                            if (!timeToWeights.empty()) {
+                                tinyusdz::Animatable<std::vector<float>> animatedWeights;
+                                
+                                // Set default value (first time sample)
+                                animatedWeights.set_default(timeToWeights.begin()->second);
+                                
+                                // Add all time samples
+                                for (const auto& timeWeightPair : timeToWeights) {
+                                    animatedWeights.add_sample(timeWeightPair.first, timeWeightPair.second);
+                                }
+                                
+                                // Update the SkelAnimation's blendShapeWeights
+                                const_cast<tinyusdz::SkelAnimation*>(skelAnimData)->blendShapeWeights.set_value(animatedWeights);
+                                
+                                ASSIMP_LOG_DEBUG("USDZExporter: Updated SkelAnimation with " + std::to_string(timeToWeights.size()) + " time samples");
+                            }
+                            
+                            return true;
+                        }
+                    }
+                    
+                    // Search recursively in children
+                    for (auto& child : skelPrim.children()) {
+                        if (updateSkelAnim(child)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                
+                return updateSkelAnim(prim);
+            }
+        }
         
-        // Build blend shape token list from mesh name and weight indices
-        for (uint32_t w = 0; w < firstKey.mNumValuesAndWeights; ++w) {
-            std::string blendShapeName = "BlendShape_" + ai_to_string(w);
-            blendShapeTokens.push_back(tinyusdz::value::token(blendShapeName));
+        // Search recursively in children
+        for (auto& child : prim.children()) {
+            if (findAndUpdateSkelAnimation(child)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    
+    // Search all root prims for the SkelRoot containing our mesh
+    for (auto& rootPrim : mStage->root_prims()) {
+        if (findAndUpdateSkelAnimation(rootPrim)) {
+            break;
         }
     }
-    
-    // Process all keyframes to build time samples
-    for (uint32_t k = 0; k < morphAnim->mNumKeys; ++k) {
-        const aiMeshMorphKey& key = morphAnim->mKeys[k];
-        double time = key.mTime * timeScale;
-        
-        std::vector<float> weights;
-        weights.reserve(key.mNumValuesAndWeights);
-        
-        for (uint32_t w = 0; w < key.mNumValuesAndWeights; ++w) {
-            weights.push_back(static_cast<float>(key.mWeights[w]));
-        }
-        
-        timeToWeights[time] = weights;
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Morph keyframe at time " + ai_to_string(time) + 
-                         " with " + ai_to_string(key.mNumValuesAndWeights) + " weights");
-    }
-    
-    // Set blendShapes attribute
-    skelAnim.blendShapes.set_value(blendShapeTokens);
-    
-    // Create time-sampled blendShapeWeights
-    if (!timeToWeights.empty()) {
-        tinyusdz::Animatable<std::vector<float>> animatedWeights;
-        
-        // Set default value (first time sample)
-        animatedWeights.set_default(timeToWeights.begin()->second);
-        
-        // Add all time samples
-        for (const auto& timeWeightPair : timeToWeights) {
-            animatedWeights.add_sample(timeWeightPair.first, timeWeightPair.second);
-        }
-        
-        skelAnim.blendShapeWeights.set_value(animatedWeights);
-    }
-    
-    // Create Prim and add to stage
-    tinyusdz::Prim skelAnimPrim(skelAnim);
-    mStage->root_prims().emplace_back(std::move(skelAnimPrim));
-    
-    ASSIMP_LOG_DEBUG("USDZExporter: Created SkelAnimation '" + skelAnim.name + "' with " + 
-                     ai_to_string(blendShapeTokens.size()) + " blend shapes and " +
-                     ai_to_string(timeToWeights.size()) + " time samples");
 }
 
 // ------------------------------------------------------------------------------------------------

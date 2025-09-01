@@ -144,6 +144,11 @@ private:
     // Mesh conversion helpers
     bool IsPointPrimitive(const aiMesh* mesh);
     void ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
+    bool NeedsSkeletalTreatment(const aiMesh* mesh);
+    tinyusdz::Prim CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames = {}, const std::string& parentNodeName = "");
+    
+    // Forward declaration for BlendShapeResult
+    struct BlendShapeResult;
 
 
 
@@ -271,7 +276,11 @@ private:
         
         explicit MeshConverterPipeline(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh, const aiScene* scene, 
                                      NameRegistry& nameRegistry, tinyusdz::Stage& stage)
-            : mMesh(mesh), mUsdMesh(usdMesh), mScene(scene), mNameRegistry(nameRegistry), mStage(stage), mValid(mesh != nullptr) {}
+            : mMesh(mesh), mUsdMesh(usdMesh), mScene(scene), mNameRegistry(nameRegistry), mStage(stage), mValid(mesh != nullptr) {
+            // Suppress unused parameter warnings - kept for future extensibility
+            (void)mStage;
+            (void)mNameRegistry;
+        }
         
         // Pipeline methods with fluent interface and RAII guarantees
         MeshConverterPipeline& ConvertVertices() { 
@@ -338,6 +347,17 @@ private:
         
         bool IsValid() const { return mValid; }
         
+        // Note: Blend shapes are now created as separate root-level prims, no longer returned from pipeline
+        
+        // Get complete mesh prim with blend shapes and skeletal properties
+        BlendShapeResult GetCompleteMeshWithBlendShapes(tinyusdz::Prim&& baseMeshPrim);
+        
+        // Get blend shape names for SkelRoot creation
+        const std::vector<std::string>& GetBlendShapeNames() const { return mBlendShapeNames; }
+        
+        // Get blend shape prims to add as mesh children
+        const std::vector<std::unique_ptr<tinyusdz::Prim>>& GetBlendShapePrims() const { return mBlendShapePrims; }
+        
         // Public access to specific conversion steps for special cases
         void ExecuteAttributeConversion();
         
@@ -348,6 +368,9 @@ private:
         NameRegistry& mNameRegistry;
         tinyusdz::Stage& mStage;
         bool mValid;
+        // Store blend shapes to be added as children of the mesh prim
+        std::vector<std::string> mBlendShapeNames;  // Store blend shape names for SkelRoot creation
+        std::vector<std::unique_ptr<tinyusdz::Prim>> mBlendShapePrims;  // Store blend shape prims to add as mesh children
         
         // Forward declarations for implementation methods
         void ExecuteVertexConversion();
@@ -391,8 +414,8 @@ private:
     // Animation conversion helpers
     void ConvertAnimation(const aiAnimation* anim);
     void ConvertSkeletalAnimation(const aiAnimation* anim);
-    void CreateMorphTargetSkelAnimation(const aiMeshMorphAnim* morphAnim, const std::string& meshName, 
-                                       double timeScale, const char* animationName);
+    void UpdateSkelAnimationWithMorphData(const aiMeshMorphAnim* morphAnim, const std::string& meshName, 
+                                         double timeScale, const char* animationName);
     void ConvertSkinning(const aiMesh* mesh);
     void ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertBlendShapes(const aiMesh* mesh);

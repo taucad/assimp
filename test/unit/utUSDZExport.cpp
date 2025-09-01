@@ -56,6 +56,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <sys/stat.h>
 #include <cerrno>
+#include <regex>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -885,16 +886,147 @@ TEST_F(utUSDZExport, importGltfCamerasExportUsda) {
 // =============================================================================
 
 TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
-    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/glTF-Sample-Models/AnimatedMorphCube-glTF/AnimatedMorphCube.gltf";
-    const std::string outputPath = "usd/animations/AnimatedMorphCube_out.usda";
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/AnimatedMorphCube/glTF/AnimatedMorphCube.gltf";
+    const std::string outputPath = "usd/blendshapes/AnimatedMorphCube_out.usda";
     
     EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
     
-    // Additional animation validation
-    Assimp::Importer importer;
-    const aiScene* scene = importer.ReadFile(outputPath, aiProcess_ValidateDataStructure);
-    if (scene) {
-        validateAnimationData(scene);
+    // Read the generated USD content for comprehensive validation
+    std::ifstream usdFile(outputPath);
+    ASSERT_TRUE(usdFile.is_open()) << "Failed to open USD output file: " << outputPath;
+    
+    std::string usdContent((std::istreambuf_iterator<char>(usdFile)), std::istreambuf_iterator<char>());
+    usdFile.close();
+    
+    // ========================================================================
+    // ANIMATED MORPH CUBE VALIDATION: Complex blend shape animation
+    // ========================================================================
+    
+    // 1. Validate blend shape names - should use glTF names "thin" and "angle", not "target_0", "target_1"
+    EXPECT_TRUE(usdContent.find("\"thin\"") != std::string::npos)
+        << "Should use glTF-derived name 'thin' for first blend shape";
+    EXPECT_TRUE(usdContent.find("\"angle\"") != std::string::npos)
+        << "Should use glTF-derived name 'angle' for second blend shape";
+    
+    // Should NOT use auto-generated names
+    EXPECT_TRUE(usdContent.find("\"target_0\"") == std::string::npos)
+        << "Should not use auto-generated name 'target_0'";
+    EXPECT_TRUE(usdContent.find("\"target_1\"") == std::string::npos)
+        << "Should not use auto-generated name 'target_1'";
+    
+    // 2. Validate skel:blendShapeTargets uses absolute paths
+    size_t blendShapeTargetsPos = usdContent.find("rel skel:blendShapeTargets");
+    ASSERT_TRUE(blendShapeTargetsPos != std::string::npos) << "skel:blendShapeTargets not found";
+    
+    size_t targetsStart = usdContent.find("[", blendShapeTargetsPos);
+    size_t targetsEnd = usdContent.find("]", targetsStart);
+    ASSERT_TRUE(targetsStart != std::string::npos && targetsEnd != std::string::npos) 
+        << "skel:blendShapeTargets array not found";
+    
+    std::string targetsSection = usdContent.substr(targetsStart, targetsEnd - targetsStart);
+    
+    // Should use absolute paths like </AnimatedMorphCube_out/AnimatedMorphCube/Cube/Geometry/Cube/thin>
+    EXPECT_TRUE(targetsSection.find("</") != std::string::npos)
+        << "skel:blendShapeTargets should use absolute paths starting with </";
+    EXPECT_TRUE(targetsSection.find("/thin>") != std::string::npos)
+        << "Should reference absolute path to 'thin' blend shape";
+    EXPECT_TRUE(targetsSection.find("/angle>") != std::string::npos)
+        << "Should reference absolute path to 'angle' blend shape";
+    
+    // 3. Validate BlendShape prim names match the target names
+    EXPECT_TRUE(usdContent.find("def BlendShape \"thin\"") != std::string::npos)
+        << "Should have BlendShape prim named 'thin'";
+    EXPECT_TRUE(usdContent.find("def BlendShape \"angle\"") != std::string::npos)
+        << "Should have BlendShape prim named 'angle'";
+    
+    // 4. Validate SkelAnimation blendShapes token array uses correct names
+    size_t skelAnimPos = usdContent.find("def SkelAnimation \"Anim\"");
+    ASSERT_TRUE(skelAnimPos != std::string::npos) << "SkelAnimation not found";
+    
+    size_t blendShapesPos = usdContent.find("uniform token[] blendShapes", skelAnimPos);
+    ASSERT_TRUE(blendShapesPos != std::string::npos) << "blendShapes token array not found";
+    
+    size_t blendShapesStart = usdContent.find("[", blendShapesPos);
+    size_t blendShapesEnd = usdContent.find("]", blendShapesStart);
+    std::string blendShapesSection = usdContent.substr(blendShapesStart, blendShapesEnd - blendShapesStart);
+    
+    EXPECT_TRUE(blendShapesSection.find("\"thin\"") != std::string::npos)
+        << "SkelAnimation blendShapes should include 'thin'";
+    EXPECT_TRUE(blendShapesSection.find("\"angle\"") != std::string::npos)
+        << "SkelAnimation blendShapes should include 'angle'";
+    
+    // 5. Validate animation data - should NOT be all [0,0]
+    size_t timeSamplesPos = usdContent.find("blendShapeWeights.timeSamples");
+    ASSERT_TRUE(timeSamplesPos != std::string::npos) << "blendShapeWeights.timeSamples not found";
+    
+    size_t timeSamplesStart = usdContent.find("{", timeSamplesPos);
+    size_t timeSamplesEnd = usdContent.find("}", timeSamplesStart);
+    std::string timeSamplesSection = usdContent.substr(timeSamplesStart, timeSamplesEnd - timeSamplesStart);
+    
+    // Should have non-zero animation values (not all [0, 0])
+    bool hasNonZeroWeights = false;
+    if (timeSamplesSection.find("[0.") != std::string::npos || 
+        timeSamplesSection.find("[1") != std::string::npos ||
+        timeSamplesSection.find(", 0.") != std::string::npos ||
+        timeSamplesSection.find(", 1") != std::string::npos) {
+        hasNonZeroWeights = true;
+    }
+    EXPECT_TRUE(hasNonZeroWeights) << "Animation should have non-zero blend shape weights, not all [0, 0]";
+    
+    // 6. Validate endTimeCode is properly rounded (should be 101, not 100.8)
+    size_t endTimePos = usdContent.find("endTimeCode = ");
+    ASSERT_TRUE(endTimePos != std::string::npos) << "endTimeCode not found";
+    
+    size_t endTimeStart = endTimePos + 14;
+    size_t endTimeEnd = usdContent.find_first_of(" \n\t)", endTimeStart);
+    std::string endTimeStr = usdContent.substr(endTimeStart, endTimeEnd - endTimeStart);
+    
+    // Should be an integer, not a decimal
+    EXPECT_TRUE(endTimeStr.find(".") == std::string::npos) 
+        << "endTimeCode should be an integer (101), not decimal (" << endTimeStr << ")";
+    
+    int endTimeCode = std::stoi(endTimeStr);
+    EXPECT_EQ(endTimeCode, 101) << "endTimeCode should be 101 for AnimatedMorphCube animation";
+    
+    // 6. Verify we have exactly 101 time samples (frames 1-101)
+    size_t timeSamplesPos2 = usdContent.find("blendShapeWeights.timeSamples");
+    EXPECT_TRUE(timeSamplesPos2 != std::string::npos) << "Should have blendShapeWeights.timeSamples";
+    
+    if (timeSamplesPos2 != std::string::npos) {
+        size_t timeSamplesEnd2 = usdContent.find("}", timeSamplesPos2);
+        std::string timeSamplesSection2 = usdContent.substr(timeSamplesPos2, timeSamplesEnd2 - timeSamplesPos2);
+        
+        // Count the number of time samples by counting colons
+        size_t colonCount = 0;
+        size_t pos = 0;
+        while ((pos = timeSamplesSection2.find(":", pos)) != std::string::npos) {
+            colonCount++;
+            pos++;
+        }
+        
+        EXPECT_EQ(colonCount, 101) << "Should have exactly 101 time samples (frames 1-101), found: " << colonCount;
+        
+        // Verify we have frame 101
+        EXPECT_TRUE(timeSamplesSection2.find("101:") != std::string::npos) << "Should have frame 101 sample";
+        
+        // Verify we don't have frame 102
+        EXPECT_TRUE(timeSamplesSection2.find("102:") == std::string::npos) << "Should not have frame 102 sample";
+    }
+    
+    // 7. Validate with usdchecker
+    std::string usdcheckerCmd = "usdchecker " + outputPath + " 2>&1";
+    FILE* pipe = popen(usdcheckerCmd.c_str(), "r");
+    if (pipe) {
+        char buffer[128];
+        std::string result = "";
+        while (fgets(buffer, sizeof buffer, pipe) != nullptr) {
+            result += buffer;
+        }
+        int exitCode = pclose(pipe);
+        
+        EXPECT_EQ(exitCode, 0) << "usdchecker failed with output: " << result;
+        EXPECT_TRUE(result.find("Success!") != std::string::npos) 
+            << "usdchecker should report 'Success!' but got: " << result;
     }
 }
 
@@ -904,22 +1036,326 @@ TEST_F(utUSDZExport, importGltfSimpleMorphExportUsda) {
     
     EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
     
-    // Validate blend shape conversion by checking USD file content
-    // USD BlendShapes are separate prims, not aiAnimMesh data, so we check the file directly
+    // Comprehensive blend shape validation based on Blender reference structure
     std::ifstream usdFile(outputPath);
     ASSERT_TRUE(usdFile.is_open()) << "Failed to open USD output file: " << outputPath;
     
     std::string usdContent((std::istreambuf_iterator<char>(usdFile)), std::istreambuf_iterator<char>());
     usdFile.close();
     
-    // Check for BlendShape prims in the USD file
-    bool foundBlendShapePrims = usdContent.find("def BlendShape") != std::string::npos;
+    // ========================================================================
+    // STRUCTURE VALIDATION: Root -> SkelRoot -> Mesh + Skeleton
+    // ========================================================================
     
-    // Check for skel:blendShapes property on mesh
-    bool foundBlendShapeProperty = usdContent.find("skel:blendShapes") != std::string::npos;
+    // 1. Root node should exist and be named after the output file
+    EXPECT_TRUE(usdContent.find("def Xform \"SimpleMorph_out\"") != std::string::npos)
+        << "Root node should be named after output file (SimpleMorph_out)";
     
-    EXPECT_TRUE(foundBlendShapePrims) << "USD file should contain BlendShape prim definitions";
-    EXPECT_TRUE(foundBlendShapeProperty) << "Mesh should have skel:blendShapes property";
+    // 2. SkelRoot should exist as child of root
+    EXPECT_TRUE(usdContent.find("def SkelRoot") != std::string::npos)
+        << "SkelRoot should exist for blend shape meshes";
+    
+    // 3. Mesh should exist with SkelBindingAPI
+    EXPECT_TRUE(usdContent.find("def Mesh") != std::string::npos)
+        << "Mesh prim should exist";
+    EXPECT_TRUE(usdContent.find("SkelBindingAPI") != std::string::npos)
+        << "Mesh should have SkelBindingAPI applied";
+    
+    // 4. Skeleton should exist with SkelBindingAPI
+    EXPECT_TRUE(usdContent.find("def Skeleton") != std::string::npos)
+        << "Skeleton prim should exist";
+    
+    // ========================================================================
+    // BLEND SHAPE VALIDATION: BlendShapes as children of mesh
+    // ========================================================================
+    
+    // 5. BlendShape prims should exist as children of the mesh
+    EXPECT_TRUE(usdContent.find("def BlendShape \"target_0\"") != std::string::npos)
+        << "BlendShape target_0 should exist as child of mesh";
+    EXPECT_TRUE(usdContent.find("def BlendShape \"target_1\"") != std::string::npos)
+        << "BlendShape target_1 should exist as child of mesh";
+    
+    // 6. BlendShapes should have proper structure (offsets and pointIndices)
+    EXPECT_TRUE(usdContent.find("uniform vector3f[] offsets") != std::string::npos)
+        << "BlendShapes should have offsets arrays";
+    EXPECT_TRUE(usdContent.find("uniform int[] pointIndices") != std::string::npos)
+        << "BlendShapes should have pointIndices arrays";
+    
+    // ========================================================================
+    // SKELETAL BINDING VALIDATION: Mesh properties
+    // ========================================================================
+    
+    // 7. Mesh should have skel:blendShapes token array
+    EXPECT_TRUE(usdContent.find("uniform token[] skel:blendShapes") != std::string::npos)
+        << "Mesh should have skel:blendShapes token array";
+    EXPECT_TRUE(usdContent.find("[\"target_0\", \"target_1\"]") != std::string::npos)
+        << "skel:blendShapes should reference target_0 and target_1";
+    
+    // 8. Mesh should have skel:blendShapeTargets relationships
+    EXPECT_TRUE(usdContent.find("rel skel:blendShapeTargets") != std::string::npos)
+        << "Mesh should have skel:blendShapeTargets relationships";
+    
+    // 9. Mesh should have skel:skeleton relationship
+    EXPECT_TRUE(usdContent.find("rel skel:skeleton") != std::string::npos)
+        << "Mesh should have skel:skeleton relationship";
+    
+    // 10. Mesh should have joint indices and weights for skeletal binding
+    EXPECT_TRUE(usdContent.find("int[] primvars:skel:jointIndices") != std::string::npos)
+        << "Mesh should have skel:jointIndices primvar";
+    EXPECT_TRUE(usdContent.find("float[] primvars:skel:jointWeights") != std::string::npos)
+        << "Mesh should have skel:jointWeights primvar";
+    
+    // ========================================================================
+    // SKELETON VALIDATION: Joint system and animation
+    // ========================================================================
+    
+    // 11. Skeleton should have joints array
+    EXPECT_TRUE(usdContent.find("uniform token[] joints") != std::string::npos)
+        << "Skeleton should have joints array";
+    
+    // 12. Skeleton should have bind and rest transforms
+    EXPECT_TRUE(usdContent.find("uniform matrix4d[] bindTransforms") != std::string::npos)
+        << "Skeleton should have bindTransforms";
+    EXPECT_TRUE(usdContent.find("uniform matrix4d[] restTransforms") != std::string::npos)
+        << "Skeleton should have restTransforms";
+    
+    // 13. Skeleton should reference SkelAnimation
+    EXPECT_TRUE(usdContent.find("rel skel:animationSource") != std::string::npos)
+        << "Skeleton should have animationSource relationship";
+    
+    // ========================================================================
+    // ANIMATION VALIDATION: SkelAnimation with blend shape weights
+    // ========================================================================
+    
+    // 14. SkelAnimation should exist as child of Skeleton
+    EXPECT_TRUE(usdContent.find("def SkelAnimation") != std::string::npos)
+        << "SkelAnimation should exist as child of Skeleton";
+    
+    // 15. SkelAnimation should have blendShapes token array
+    EXPECT_TRUE(usdContent.find("uniform token[] blendShapes") != std::string::npos)
+        << "SkelAnimation should have blendShapes token array";
+    
+    // 16. SkelAnimation should have blendShapeWeights with time samples
+    EXPECT_TRUE(usdContent.find("blendShapeWeights") != std::string::npos)
+        << "SkelAnimation should have blendShapeWeights";
+    
+    // ========================================================================
+    // REGRESSION PREVENTION: Common issues
+    // ========================================================================
+    
+    // 17. No duplicate SkelAnimation at root level (regression test)
+    size_t skelAnimCount = 0;
+    size_t pos = 0;
+    while ((pos = usdContent.find("def SkelAnimation", pos)) != std::string::npos) {
+        skelAnimCount++;
+        pos += 17; // length of "def SkelAnimation"
+    }
+    EXPECT_EQ(1u, skelAnimCount) << "Should have exactly one SkelAnimation (inside Skeleton, not at root)";
+    
+    // 18. No BlendShapes at root level (regression test)
+    EXPECT_TRUE(usdContent.find("def BlendShape") != std::string::npos)
+        << "BlendShapes should exist";
+    // Ensure BlendShapes are properly nested (not at root level)
+    size_t rootEnd = usdContent.find("def SkelRoot");
+    if (rootEnd != std::string::npos) {
+        std::string beforeSkelRoot = usdContent.substr(0, rootEnd);
+        EXPECT_TRUE(beforeSkelRoot.find("def BlendShape") == std::string::npos)
+            << "BlendShapes should not exist at root level (should be children of mesh)";
+    }
+    
+    // 19. Proper naming consistency (no "Unnamed" blend shapes)
+    EXPECT_TRUE(usdContent.find("\"Unnamed\"") == std::string::npos)
+        << "Should not have 'Unnamed' blend shapes - should use target_0, target_1";
+    
+    // 20. Geometry scope wrapper should exist
+    EXPECT_TRUE(usdContent.find("def Scope \"Geometry\"") != std::string::npos)
+        << "Mesh should be wrapped in Geometry scope (Apple's pattern)";
+    
+    // ========================================================================
+    // CRITICAL STRUCTURE VALIDATION: BlendShapes as mesh children
+    // ========================================================================
+    
+    // 21. BlendShapes should be children of Mesh, not root-level prims
+    size_t meshStart = usdContent.find("def Mesh \"meshes_0_\"");
+    EXPECT_TRUE(meshStart != std::string::npos) << "Mesh definition should exist";
+    
+    if (meshStart != std::string::npos) {
+        // Find the end of the mesh definition (next def at same level or closing brace)
+        size_t meshEnd = usdContent.find("\n            }", meshStart);
+        if (meshEnd == std::string::npos) {
+            meshEnd = usdContent.find("\n        }", meshStart);
+        }
+        EXPECT_TRUE(meshEnd != std::string::npos) << "Mesh definition should have proper closing";
+        
+        if (meshEnd != std::string::npos) {
+            std::string meshContent = usdContent.substr(meshStart, meshEnd - meshStart);
+            
+            // BlendShapes should be inside the mesh
+            EXPECT_TRUE(meshContent.find("def BlendShape \"target_0\"") != std::string::npos)
+                << "target_0 BlendShape should be child of mesh, not root-level prim";
+            EXPECT_TRUE(meshContent.find("def BlendShape \"target_1\"") != std::string::npos)
+                << "target_1 BlendShape should be child of mesh, not root-level prim";
+        }
+    }
+    
+    // ========================================================================
+    // MESH PROPERTY VALIDATION: Missing critical properties
+    // ========================================================================
+    
+    // 22. Mesh should have extent property
+    EXPECT_TRUE(usdContent.find("float3[] extent") != std::string::npos)
+        << "Mesh should have extent property for bounding box";
+    
+    // 23. Mesh should have normals
+    EXPECT_TRUE(usdContent.find("normal3f[] normals") != std::string::npos)
+        << "Mesh should have normals property";
+    
+    // 24. skel:blendShapeTargets should use absolute paths, not relative
+    if (usdContent.find("rel skel:blendShapeTargets") != std::string::npos) {
+        // Should be absolute paths like </path/to/mesh/target_0>
+        EXPECT_TRUE(usdContent.find("</SimpleMorph_out/nodes_0_/meshes_0_/Geometry/meshes_0_/target_0>") != std::string::npos ||
+                   usdContent.find("</") != std::string::npos)
+            << "skel:blendShapeTargets should use absolute paths, not relative paths like <.target_0>";
+    }
+    
+    // 25. skel:skeleton should use absolute path, not relative
+    if (usdContent.find("rel skel:skeleton") != std::string::npos) {
+        // Should be absolute path like </path/to/skeleton>
+        EXPECT_TRUE(usdContent.find("</SimpleMorph_out/nodes_0_/meshes_0_/Skel>") != std::string::npos ||
+                   usdContent.find("rel skel:skeleton = </") != std::string::npos)
+            << "skel:skeleton should use absolute path, not relative path like <../Skel>";
+    }
+    
+    // ========================================================================
+    // SKELETON PROPERTY VALIDATION: Animation source path
+    // ========================================================================
+    
+    // 26. skel:animationSource should use absolute path, not relative
+    if (usdContent.find("rel skel:animationSource") != std::string::npos) {
+        // Should be absolute path like </path/to/animation>
+        EXPECT_TRUE(usdContent.find("</SimpleMorph_out/nodes_0_/meshes_0_/Skel/Anim>") != std::string::npos ||
+                   usdContent.find("rel skel:animationSource = </") != std::string::npos)
+            << "skel:animationSource should use absolute path, not relative path like <./Anim>";
+    }
+    
+    // ========================================================================
+    // SKELANIMATION VALIDATION: Time samples and proper animation
+    // ========================================================================
+    
+    // 27. SkelAnimation should NOT have default blendShapeWeights array
+    EXPECT_TRUE(usdContent.find("float[] blendShapeWeights = [") == std::string::npos)
+        << "SkelAnimation should not have default blendShapeWeights array - should use timeSamples only";
+    
+    // 28. SkelAnimation MUST have blendShapeWeights.timeSamples for animation
+    EXPECT_TRUE(usdContent.find("blendShapeWeights.timeSamples") != std::string::npos)
+        << "SkelAnimation must have blendShapeWeights.timeSamples for actual animation data";
+    
+    // 29. Time samples should have multiple keyframes
+    if (usdContent.find("blendShapeWeights.timeSamples") != std::string::npos) {
+        // Should have multiple time codes like 0: [0, 0], 1: [0.5, 0], etc.
+        size_t timeSamplesStart = usdContent.find("blendShapeWeights.timeSamples");
+        size_t timeSamplesEnd = usdContent.find("}", timeSamplesStart);
+        if (timeSamplesEnd != std::string::npos) {
+            std::string timeSamplesContent = usdContent.substr(timeSamplesStart, timeSamplesEnd - timeSamplesStart);
+            
+            // Should have at least 2 different time codes
+            EXPECT_TRUE(timeSamplesContent.find("0:") != std::string::npos)
+                << "Time samples should include time code 0";
+            EXPECT_TRUE(timeSamplesContent.find("1:") != std::string::npos ||
+                       timeSamplesContent.find("2:") != std::string::npos ||
+                       timeSamplesContent.find("3:") != std::string::npos ||
+                       timeSamplesContent.find("4:") != std::string::npos)
+                << "Time samples should include multiple time codes for animation";
+        }
+    }
+}
+
+// =============================================================================
+// ANIMATION TIME SAMPLING TESTS
+// =============================================================================
+
+TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
+    // Test specifically for proper time sampling in blend shape animations
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/SimpleMorph/glTF/SimpleMorph.gltf";
+    const std::string outputPath = "usd/blendshapes/SimpleMorph_timeSampling_out.usda";
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Read the generated USD content for time sampling validation
+    std::ifstream usdFile(outputPath);
+    ASSERT_TRUE(usdFile.is_open()) << "Failed to open USD output file: " << outputPath;
+    
+    std::string usdContent((std::istreambuf_iterator<char>(usdFile)), std::istreambuf_iterator<char>());
+    usdFile.close();
+    
+    // ========================================================================
+    // TIME SAMPLING VALIDATION: Critical animation requirements
+    // ========================================================================
+    
+    // 1. Must have blendShapeWeights.timeSamples (not default array)
+    EXPECT_TRUE(usdContent.find("blendShapeWeights.timeSamples") != std::string::npos)
+        << "SkelAnimation must have blendShapeWeights.timeSamples for animation";
+    
+    // 2. Must NOT have default blendShapeWeights array
+    EXPECT_TRUE(usdContent.find("float[] blendShapeWeights = [") == std::string::npos)
+        << "SkelAnimation should not have default blendShapeWeights array";
+    
+    // 3. Validate time sample count and range
+    size_t timeSamplesStart = usdContent.find("blendShapeWeights.timeSamples");
+    ASSERT_TRUE(timeSamplesStart != std::string::npos) << "timeSamples section not found";
+    
+    size_t timeSamplesEnd = usdContent.find("}", timeSamplesStart);
+    ASSERT_TRUE(timeSamplesEnd != std::string::npos) << "timeSamples closing brace not found";
+    
+    std::string timeSamplesSection = usdContent.substr(timeSamplesStart, timeSamplesEnd - timeSamplesStart);
+    
+    // 4. Count the number of time samples (should be substantial, not just 2)
+    size_t colonCount = 0;
+    size_t pos = 0;
+    while ((pos = timeSamplesSection.find(":", pos)) != std::string::npos) {
+        colonCount++;
+        pos++;
+    }
+    
+    // Should have exactly 96 time samples for 4-second animation at 24fps
+    EXPECT_EQ(colonCount, 96) << "Should have exactly 96 time samples for 4-second animation at 24fps (found " << colonCount << ")";
+    
+    // 5. Validate time code range (should go from reasonable start to end)
+    // Check for presence of various time codes
+    EXPECT_TRUE(timeSamplesSection.find("1:") != std::string::npos)
+        << "Should have time samples starting from 1";
+    
+    // 6. Should have time samples up to frame 96 (4 seconds * 24fps)
+    EXPECT_TRUE(timeSamplesSection.find("96:") != std::string::npos) 
+        << "Should have final time sample at frame 96";
+    
+    // 7. Validate that blend shape weights actually animate (not all zeros)
+    bool hasNonZeroWeights = false;
+    
+    // Simple check: look for specific animated values we know should be there
+    // Based on our interpolation: frame 2 should have [0, 0.041666669]
+    if (timeSamplesSection.find("0.041666") != std::string::npos ||
+        timeSamplesSection.find("0.083333") != std::string::npos ||
+        timeSamplesSection.find("0.125") != std::string::npos ||
+        timeSamplesSection.find("0.166666") != std::string::npos) {
+        hasNonZeroWeights = true;
+    }
+    
+    EXPECT_TRUE(hasNonZeroWeights) << "Blend shape weights should animate (have non-zero values)";
+    
+    // 8. Validate timeline consistency with USD metadata
+    // Check that endTimeCode matches the highest time sample
+    if (usdContent.find("endTimeCode = ") != std::string::npos) {
+        size_t endTimePos = usdContent.find("endTimeCode = ") + 14;
+        size_t endTimeEnd = usdContent.find_first_of(" \n\t)", endTimePos);
+        if (endTimeEnd != std::string::npos) {
+            std::string endTimeStr = usdContent.substr(endTimePos, endTimeEnd - endTimePos);
+            int endTimeCode = std::stoi(endTimeStr);
+            
+            // endTimeCode should be 96 frames (4 seconds * 24fps)
+            EXPECT_EQ(endTimeCode, 96) << "endTimeCode should be exactly 96 frames for 4-second animation at 24fps (found " << endTimeCode << ")";
+        }
+    }
 }
 
 // =============================================================================
