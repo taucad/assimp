@@ -211,7 +211,7 @@ void USDZExporter::ExportMetadata() {
         double maxDuration = 0.0;
         for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
             const aiAnimation* anim = mScene->mAnimations[i];
-            double duration = anim->mDuration / (anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0);
+            double duration = anim->mDuration / (anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 24.0);
             maxDuration = std::max(maxDuration, duration);
         }
         
@@ -1250,7 +1250,7 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
         
         // Get animation timeline information
         double startTime = 0.0;
-        double endTime = 4.0;  // Will be overridden by actual animation data
+        double endTime = 0.0;  // Will be overridden by actual animation data
         double frameRate = 24.0;  // Standard USD frame rate
         
         // Get actual animation duration from scene data
@@ -1258,7 +1258,7 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
             double maxDuration = 0.0;
             for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
                 const aiAnimation* anim = mScene->mAnimations[i];
-                double duration = anim->mDuration / (anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0);
+                double duration = anim->mDuration / (anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 24.0);
                 maxDuration = std::max(maxDuration, duration);
             }
             if (maxDuration > 0.0) {
@@ -1288,7 +1288,7 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
                                     std::to_string(anim->mNumMorphMeshChannels) + " morph channels");
                     
                     // Convert time code to animation ticks
-                    double ticksPerSecond = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 25.0;
+                    double ticksPerSecond = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 24.0;
                     double animTime = timeCode * ticksPerSecond;
                     
                     if (frame < 5 || frame % 24 == 0) { // Log first 5 frames and every 24th frame (1 second intervals)
@@ -2751,7 +2751,7 @@ void USDZExporter::ConvertAnimation(const aiAnimation* anim) {
     ASSIMP_LOG_DEBUG("USDZExporter: Converting animation: " + std::string(anim->mName.C_Str()));
     
     // Convert ticks per second to time scale
-    double timeScale = 1.0 / (anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0);
+    double timeScale = 1.0 / (anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 24.0);
     
     // Process node animation channels (transform animations)
     for (uint32_t i = 0; i < anim->mNumChannels; ++i) {
@@ -2945,7 +2945,7 @@ void USDZExporter::ConvertSkeletalAnimation(const aiAnimation* anim) {
     std::vector<std::vector<tinyusdz::value::float3>> allScales(jointNames.size());
     
     // Convert time scale
-    double timeScale = 1.0 / (anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0);
+    double timeScale = 1.0 / (anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 24.0);
     
     // Process animation keyframes
     for (uint32_t i = 0; i < anim->mNumChannels; ++i) {
