@@ -1605,6 +1605,256 @@ TEST_F(utUSDZExport, importGltfTextureTransformExportUsda) {
         << "USD file should contain UsdTransform2d shaders for UV transformations";
     EXPECT_TRUE(content.find("UsdPrimvarReader_float2") != std::string::npos) 
         << "USD file should contain UsdPrimvarReader_float2 for UV coordinate reading";
+    
+    // ========================================================================
+    // TEXTURE TRANSFORM VALIDATION: Assert specific transform values per material
+    // ========================================================================
+    
+    // 1. Offset_U material: should have translation=(0.5, 1)
+    EXPECT_TRUE(content.find("def Material \"Offset_U\"") != std::string::npos)
+        << "Should have Offset_U material (not Offset_U_1)";
+    size_t offsetUPos = content.find("def Material \"Offset_U\"");
+    if (offsetUPos != std::string::npos) {
+        size_t offsetUEnd = content.find("def Material", offsetUPos + 1);
+        if (offsetUEnd == std::string::npos) offsetUEnd = content.length();
+        std::string offsetUSection = content.substr(offsetUPos, offsetUEnd - offsetUPos);
+        
+        EXPECT_TRUE(offsetUSection.find("float2 inputs:translation = (0.5, 1)") != std::string::npos)
+            << "Offset_U material should have translation=(0.5, 1)";
+        EXPECT_TRUE(offsetUSection.find("float2 inputs:scale = (1, -1)") != std::string::npos)
+            << "Offset_U material should have scale=(1, -1)";
+    }
+    
+    // 2. Offset_V material: should have translation=(0, 0.5)
+    EXPECT_TRUE(content.find("def Material \"Offset_V\"") != std::string::npos)
+        << "Should have Offset_V material (not Offset_V_1)";
+    size_t offsetVPos = content.find("def Material \"Offset_V\"");
+    if (offsetVPos != std::string::npos) {
+        size_t offsetVEnd = content.find("def Material", offsetVPos + 1);
+        if (offsetVEnd == std::string::npos) offsetVEnd = content.length();
+        std::string offsetVSection = content.substr(offsetVPos, offsetVEnd - offsetVPos);
+        
+        EXPECT_TRUE(offsetVSection.find("float2 inputs:translation = (0, 0.5)") != std::string::npos)
+            << "Offset_V material should have translation=(0, 0.5), not (0, -0.5)";
+        EXPECT_TRUE(offsetVSection.find("float2 inputs:scale = (1, -1)") != std::string::npos)
+            << "Offset_V material should have scale=(1, -1)";
+    }
+    
+    // 3. Offset_UV material: should have translation=(0.5, 0.5)
+    EXPECT_TRUE(content.find("def Material \"Offset_UV\"") != std::string::npos)
+        << "Should have Offset_UV material (not Offset_UV_1)";
+    size_t offsetUVPos = content.find("def Material \"Offset_UV\"");
+    if (offsetUVPos != std::string::npos) {
+        size_t offsetUVEnd = content.find("def Material", offsetUVPos + 1);
+        if (offsetUVEnd == std::string::npos) offsetUVEnd = content.length();
+        std::string offsetUVSection = content.substr(offsetUVPos, offsetUVEnd - offsetUVPos);
+        
+        EXPECT_TRUE(offsetUVSection.find("float2 inputs:translation = (0.5, 0.5)") != std::string::npos)
+            << "Offset_UV material should have translation=(0.5, 0.5), not (0.5, -0.5)";
+        EXPECT_TRUE(offsetUVSection.find("float2 inputs:scale = (1, -1)") != std::string::npos)
+            << "Offset_UV material should have scale=(1, -1)";
+    }
+    
+    // 4. Rotation material: should have rotation=22.5 and translation=(0, 1)
+    EXPECT_TRUE(content.find("def Material \"Rotation\"") != std::string::npos)
+        << "Should have Rotation material (not Rotation_1)";
+    size_t rotationPos = content.find("def Material \"Rotation\"");
+    if (rotationPos != std::string::npos) {
+        size_t rotationEnd = content.find("def Material", rotationPos + 1);
+        if (rotationEnd == std::string::npos) rotationEnd = content.length();
+        std::string rotationSection = content.substr(rotationPos, rotationEnd - rotationPos);
+        
+        EXPECT_TRUE(rotationSection.find("float inputs:rotation = 22.5") != std::string::npos)
+            << "Rotation material should have rotation=22.5";
+        EXPECT_TRUE(rotationSection.find("float2 inputs:translation = (0, 1)") != std::string::npos)
+            << "Rotation material should have translation=(0, 1), not computed rotation offset";
+        EXPECT_TRUE(rotationSection.find("float2 inputs:scale = (1, -1)") != std::string::npos)
+            << "Rotation material should have scale=(1, -1)";
+    }
+    
+    // 5. Scale material: should have scale=(1.5, -1.5) and translation=(0, 1)
+    EXPECT_TRUE(content.find("def Material \"Scale\"") != std::string::npos)
+        << "Should have Scale material (not Scale_1)";
+    size_t scalePos = content.find("def Material \"Scale\"");
+    if (scalePos != std::string::npos) {
+        size_t scaleEnd = content.find("def Material", scalePos + 1);
+        if (scaleEnd == std::string::npos) scaleEnd = content.length();
+        std::string scaleSection = content.substr(scalePos, scaleEnd - scalePos);
+        
+        EXPECT_TRUE(scaleSection.find("float2 inputs:scale = (1.5, -1.5)") != std::string::npos)
+            << "Scale material should have scale=(1.5, -1.5)";
+        EXPECT_TRUE(scaleSection.find("float2 inputs:translation = (0, 1)") != std::string::npos)
+            << "Scale material should have translation=(0, 1), not (0, -0.5)";
+    }
+    
+    // 6. All material: should have scale=(1.5, -1.5), translation=(-0.2, 1.1), rotation=17.188734
+    EXPECT_TRUE(content.find("def Material \"All\"") != std::string::npos)
+        << "Should have All material (not All_1)";
+    size_t allPos = content.find("def Material \"All\"");
+    if (allPos != std::string::npos) {
+        size_t allEnd = content.find("def Material", allPos + 1);
+        if (allEnd == std::string::npos) allEnd = content.length();
+        std::string allSection = content.substr(allPos, allEnd - allPos);
+        
+        // Check for rotation with reasonable floating point tolerance
+        EXPECT_TRUE(allSection.find("float inputs:rotation = 17.1887") != std::string::npos)
+            << "All material should have rotation≈17.1887 (17.188734 with precision tolerance)";
+        EXPECT_TRUE(allSection.find("float2 inputs:scale = (1.5, -1.5)") != std::string::npos)
+            << "All material should have scale=(1.5, -1.5)";
+        // Check for translation with reasonable floating point tolerance  
+        EXPECT_TRUE(allSection.find("float2 inputs:translation = (-0.2, 1.0999999)") != std::string::npos ||
+                   allSection.find("float2 inputs:translation = (-0.2, 1.1)") != std::string::npos)
+            << "All material should have translation≈(-0.2, 1.1) with precision tolerance";
+    }
+    
+    // ========================================================================
+    // TEXTURE WRAP MODE VALIDATION: Critical for preventing tiling effects
+    // ========================================================================
+    
+    // 7. Main transform materials should use "clamp" wrap mode (prevents tiling)
+    std::vector<std::string> clampMaterials = {"Offset_U", "Offset_V", "Offset_UV", "Rotation", "Scale", "All"};
+    for (const std::string& matName : clampMaterials) {
+        size_t matPos = content.find("def Material \"" + matName + "\"");
+        if (matPos != std::string::npos) {
+            size_t matEnd = content.find("def Material", matPos + 1);
+            if (matEnd == std::string::npos) matEnd = content.length();
+            std::string matSection = content.substr(matPos, matEnd - matPos);
+            
+            EXPECT_TRUE(matSection.find("token inputs:wrapS = \"clamp\"") != std::string::npos)
+                << matName << " material should have wrapS = \"clamp\" to prevent tiling";
+            EXPECT_TRUE(matSection.find("token inputs:wrapT = \"clamp\"") != std::string::npos)
+                << matName << " material should have wrapT = \"clamp\" to prevent tiling";
+        }
+    }
+    
+    // 8. Indicator materials should use "repeat" wrap mode
+    std::vector<std::string> repeatMaterials = {"Correct", "NotSupported", "Error"};
+    for (const std::string& matName : repeatMaterials) {
+        size_t matPos = content.find("def Material \"" + matName + "\"");
+        if (matPos != std::string::npos) {
+            size_t matEnd = content.find("def Material", matPos + 1);
+            if (matEnd == std::string::npos) matEnd = content.length();
+            std::string matSection = content.substr(matPos, matEnd - matPos);
+            
+            EXPECT_TRUE(matSection.find("token inputs:wrapS = \"repeat\"") != std::string::npos)
+                << matName << " material should have wrapS = \"repeat\" for indicator patterns";
+            EXPECT_TRUE(matSection.find("token inputs:wrapT = \"repeat\"") != std::string::npos)
+                << matName << " material should have wrapT = \"repeat\" for indicator patterns";
+        }
+    }
+    
+    // ========================================================================
+    // INSTANCEABLE REFERENCE SYSTEM VALIDATION: Critical for visual indicators
+    // ========================================================================
+    
+    // 9. Secondary indicator XForm prims should have instanceable Geometry with prepend references
+    // Re-enabled: Using correct tinyusdz Reference API patterns
+    // Note: Primary nodes (Rotation___*) contain actual mesh definitions, not references
+    std::vector<std::string> secondaryIndicatorXForms = {"All___Correct", "All___Error", "Scale___Correct"}; // Re-enabled for testing
+    
+    for (const std::string& xformName : secondaryIndicatorXForms) {
+        size_t xformPos = content.find("def Xform \"" + xformName + "\"");
+        if (xformPos != std::string::npos) {
+            size_t xformEnd = content.find("\n        }", xformPos);
+            if (xformEnd == std::string::npos) xformEnd = content.find("\n    }", xformPos);
+            if (xformEnd == std::string::npos) xformEnd = content.length();
+                                std::string xformSection = content.substr(xformPos, xformEnd - xformPos);
+
+                    EXPECT_TRUE(xformSection.find("def Scope \"Geometry\"") != std::string::npos)
+                        << xformName << " should contain Geometry child";
+                    EXPECT_TRUE(xformSection.find("instanceable = true") != std::string::npos)
+                        << xformName << " Geometry should be instanceable = true";
+                    EXPECT_TRUE(xformSection.find("prepend references") != std::string::npos)
+                        << xformName << " Geometry should have prepend references";
+
+                    // Validate complete hierarchy paths for specific secondary indicator XForms
+                    if (xformName == "All___Correct") {
+                        EXPECT_TRUE(xformSection.find("prepend references = </TextureTransform_out/ROOT/Rotation/Rotation___Correct/Geometry>") != std::string::npos)
+                            << "All___Correct should reference full hierarchy path to primary Rotation___Correct";
+                    } else if (xformName == "All___Error") {
+                        EXPECT_TRUE(xformSection.find("prepend references = </TextureTransform_out/ROOT/Rotation/Rotation___Error/Geometry>") != std::string::npos)
+                            << "All___Error should reference full hierarchy path to primary Rotation___Error";
+                    } else if (xformName == "Scale___Correct") {
+                        EXPECT_TRUE(xformSection.find("prepend references = </TextureTransform_out/ROOT/Rotation/Rotation___Correct/Geometry>") != std::string::npos)
+                            << "Scale___Correct should reference full hierarchy path to primary Rotation___Correct";
+                    }
+        }
+    }
+    
+    // Also validate that primary nodes contain actual mesh definitions (not references)
+    std::vector<std::string> primaryIndicatorXForms = {"Rotation___Correct", "Rotation___Not_Supported"};
+    for (const std::string& xformName : primaryIndicatorXForms) {
+        size_t xformPos = content.find("def Xform \"" + xformName + "\"");
+        if (xformPos != std::string::npos) {
+            size_t xformEnd = content.find("\n        }", xformPos);
+            if (xformEnd == std::string::npos) xformEnd = content.find("\n    }", xformPos);
+            if (xformEnd == std::string::npos) xformEnd = content.length();
+            std::string xformSection = content.substr(xformPos, xformEnd - xformPos);
+            
+            EXPECT_TRUE(xformSection.find("def Scope \"Geometry\"") != std::string::npos)
+                << xformName << " should contain Geometry child";
+            EXPECT_TRUE(xformSection.find("def Mesh") != std::string::npos)
+                << xformName << " should contain actual mesh definition (primary node)";
+            EXPECT_TRUE(xformSection.find("instanceable = true") == std::string::npos)
+                << xformName << " should NOT be instanceable (primary node)";
+            EXPECT_TRUE(xformSection.find("prepend references") == std::string::npos)
+                << xformName << " should NOT have prepend references (primary node)";
+        }
+    }
+    
+    // ========================================================================
+    // UV COORDINATE ORDERING VALIDATION: Texture mapping fidelity
+    // ========================================================================
+    
+    // 10. UV coordinates should use Apple's ordering pattern
+    EXPECT_TRUE(content.find("texCoord2f[] primvars:st = [(0, 0), (0.5, 0), (0.5, 0.5), (0, 0.5)]") != std::string::npos)
+        << "UV coordinates should use Apple's clockwise ordering pattern and texCoord2f type";
+    
+    // ========================================================================
+    // FACE VERTEX INDICES VALIDATION: Consistent winding for proper normals
+    // ========================================================================
+    
+    // 11. Face vertex indices should use Apple's winding order
+    EXPECT_TRUE(content.find("int[] faceVertexIndices = [0, 2, 1, 2, 0, 3]") != std::string::npos)
+        << "Face vertex indices should use Apple's [0, 2, 1, 2, 0, 3] winding order";
+    
+    // ========================================================================
+    // MESH ATTRIBUTE ORDERING VALIDATION: Critical vertex/UV ordering 
+    // ========================================================================
+    
+    // 12. Check points ordering for Not_Supported_Marker mesh
+    size_t notSupportedMeshPos = content.find("def Mesh \"Not_Supported_Marker\"");
+    if (notSupportedMeshPos != std::string::npos) {
+        size_t meshEnd = content.find("\n        }", notSupportedMeshPos);
+        if (meshEnd == std::string::npos) meshEnd = content.find("\n    }", notSupportedMeshPos);
+        if (meshEnd == std::string::npos) meshEnd = content.length();
+        std::string meshSection = content.substr(notSupportedMeshPos, meshEnd - notSupportedMeshPos);
+        
+        EXPECT_TRUE(meshSection.find("point3f[] points = [(-0.5, 0.5, 0), (0.5, 0.5, 0), (0.5, -0.5, 0), (-0.5, -0.5, 0)]") != std::string::npos)
+            << "Not_Supported_Marker points should match Apple reference ordering: [(-0.5, 0.5, 0), (0.5, 0.5, 0), (0.5, -0.5, 0), (-0.5, -0.5, 0)]";
+        
+        EXPECT_TRUE(meshSection.find("texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)]") != std::string::npos)
+            << "Not_Supported_Marker UVs should match Apple reference ordering: [(0, 0), (1, 0), (1, 1), (0, 1)]";
+    }
+    
+    // 13. Check for consistent ordering across all marker meshes
+    std::vector<std::string> markerMeshes = {"Correct_Marker", "Not_Supported_Marker", "Error_Marker"};
+    for (const std::string& meshName : markerMeshes) {
+        size_t meshPos = content.find("def Mesh \"" + meshName + "\"");
+        if (meshPos != std::string::npos) {
+            size_t meshEnd = content.find("\n        }", meshPos);
+            if (meshEnd == std::string::npos) meshEnd = content.find("\n    }", meshPos);
+            if (meshEnd == std::string::npos) meshEnd = content.length();
+            std::string meshSection = content.substr(meshPos, meshEnd - meshPos);
+            
+            // All marker meshes should use the same vertex ordering pattern as Apple reference
+            EXPECT_TRUE(meshSection.find("point3f[] points = [(-0.5, 0.5, 0), (0.5, 0.5, 0), (0.5, -0.5, 0), (-0.5, -0.5, 0)]") != std::string::npos)
+                << meshName << " points should match Apple reference ordering pattern";
+            
+            EXPECT_TRUE(meshSection.find("texCoord2f[] primvars:st = [(0, 0), (1, 1), (1, 0), (0, 1)]") != std::string::npos)
+                << meshName << " UVs should match standard ordering pattern";
+        }
+    }
 }
 
 TEST_F(utUSDZExport, validateAdvancedTextureTypesSupport) {

@@ -407,7 +407,8 @@ private:
     
     // Shader creation helpers (Apple's NodeGraph pattern implementation)
     tinyusdz::Shader CreateTexCoordReader(const std::string& varName = "st");
-    tinyusdz::Shader CreateStTransform(const std::string& inputConnection, bool flipY = true);
+    tinyusdz::Shader CreateStTransform(const std::string& inputConnection, 
+                                       const aiUVTransform* uvTransform = nullptr, bool flipY = true);
     void AddSourceColorSpace(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType);
     void AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType);
 
@@ -429,7 +430,8 @@ private:
     void SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform);
 
     // Texture helpers
-    tinyusdz::UsdUVTexture CreateUVTexture(const std::string& filePath, const std::string& paramName);
+    tinyusdz::UsdUVTexture CreateUVTexture(const std::string& filePath, const std::string& paramName, 
+                                          const aiMaterial* mat, aiTextureType textureType, unsigned int texSlot);
     
     // Utility methods
     std::string SanitizeName(const std::string& name) const;
@@ -437,6 +439,7 @@ private:
     std::string GenerateUniqueName(const std::string& baseName) const;
     std::string GetSceneName() const;
     bool IsEmbeddedTexture(const std::string& texPath) const;
+    std::string BuildFullHierarchyPath(const aiNode* node, const std::string& rootPrimName) const;
     
     // File output methods
     void SaveAsUSDA(const std::string& filename);
@@ -497,6 +500,14 @@ private:
     // Texture processing helpers (for current material being processed)
     std::string mCurrentMaterialPath;
     std::vector<std::pair<std::string, tinyusdz::UsdUVTexture>> mCurrentMaterialTextureShaders;
+    std::map<std::string, aiUVTransform> mCurrentMaterialTextureTransforms;
+    
+    // Shared mesh tracking for programmatic reference system (data-driven instancing)
+    struct SharedMeshInfo {
+        std::string primaryPath;                    // Path to first occurrence GeomScope
+        std::vector<const aiNode*> referencingNodes; // All nodes that reference this mesh
+    };
+    std::map<uint32_t, SharedMeshInfo> mSharedMeshInfo; // mesh index -> sharing info
     
     // Note: Texture handling is now done by tinyusdz::usdz::SaveAsUSDZ() which extracts
     // texture dependencies directly from the Stage and packages them automatically

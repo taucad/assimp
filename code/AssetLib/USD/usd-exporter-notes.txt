@@ -1,0 +1,83 @@
+# USDZ Exporter Implementation Notes
+
+A scratchpad for documenting the approach, and what does and does not work for the usd-exporter.
+
+# Specification
+For the OpenUSD spec see: https://openusd.org/release/spec_usdz.html.
+
+# Reference files
+These reference files are the output from the "working implementation" described below. Use them to verify your implementation.
+USDZ: /Users/rifont/Downloads/gltf/DamagedHelmet_out.usdz
+Hexdump: /Users/rifont/Downloads/gltf/DamagedHelmet_out.usdz.hexdump
+
+# Your Task
+Use tinyusdz `/Users/rifont/git/assimpjs/assimp/contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/external/miniz.c` to implement a minimal USDZ-export specific version of the `zip.c` code. 
+
+For the working implementation we have developed via the `./contrib/zip` directory we are porting across see:
+- /Users/rifont/git/assimpjs/assimp/contrib/zip/src/zip-usdz.c
+- /Users/rifont/git/assimpjs/assimp/contrib/zip/src/zip-usdz.h
+For the original zip.c file see
+- /Users/rifont/git/assimpjs/assimp/contrib/zip/src/zip.c
+- /Users/rifont/git/assimpjs/assimp/contrib/zip/src/zip.h
+For only the changes we made to the original zip.c file to add working USDZ support, see
+- /Users/rifont/git/assimpjs/assimp/contrib/zip/src/zip-c.patch
+For where that zip.c f was consumed in previous working implementation see:
+- /Users/rifont/git/assimpjs/assimp/code/AssetLib/USD/USDZArchiveWriter.h
+- /Users/rifont/git/assimpjs/assimp/code/AssetLib/USD/USDZArchiveWriter.cpp
+
+Remember, you are a rare 1% top C++ developer that finds elegant solutions to hard prolems in a performant, memory optimized way.
+
+Tests are built and run in the `assimp/build_test`, built with `make -j12` and run with `./bin/unit --gtest_filter="utUSDZExport.*" | grep -E "PASSED|FAILED"`.
+
+The usd validation checks are run with:
+- `usdzip --list <file>` (ensure all files are accessible)
+- `usdchecker --arkit ` (ensure USD complies with requirements for multi-platform access)
+
+
+As you debug, you may find it useful to use `hexdump` to inspect the binary files and perform a byte-by-byte diff with the reference file:
+- `hexdump -C /Users/rifont/git/assimpjs/assimp/build_test/usd/damaged-helmet/DamagedHelmet_out.usdz > /Users/rifont/git/assimpjs/assimp/build_test/usd/damaged-helmet/DamagedHelmet_out.usdz.hexdump`
+- `diff /Users/rifont/git/assimpjs/assimp/build_test/usd/damaged-helmet/DamagedHelmet_out.usdz.hexdump /Users/rifont/Downloads/gltf/DamagedHelmet_out.usdz.hexdump`
+
+# DOES work
+- ✅ All 49 C++ unit tests passing
+- ✅ Central directory flags cleared to 0x0000 (matches reference)
+- ✅ Archive integrity verified (unzip -t passes)
+- ✅ Minimal size-only local header patching (fixes tinyusdz length=0 issue)
+- ✅ MZ_NO_COMPRESSION flag approach (no miniz error 24)
+- ✅ ZIP64 mode with proper ZIP64 EOCD structure
+
+# DOES NOT work  
+- ❌ Flag combinations with MZ_NO_COMPRESSION (causes miniz error 24)
+- ❌ Comprehensive local header patching (corrupts subsequent file offsets)
+- ❌ Perfect alignment for all files (only 2/6 currently aligned)
+- ❌ USD tool recognition (usdzip -l only shows model.usda)
+
+# Approaches that DO work
+- ✅ MZ_NO_COMPRESSION with 0,0 for size/CRC parameters
+- ✅ Manual 0x1986 extra field calculation (but padding calculation needs +16 correction)
+- ✅ ZIP64 mode with MZ_ZIP_FLAG_WRITE_ZIP64
+- ✅ Central directory flags clearing to 0x0000 post-processing
+- ✅ Setting zip_archive.m_file_offset_alignment = 64
+
+# Approaches that DO NOT work
+- ❌ Flag combinations with MZ_NO_COMPRESSION (causes miniz error 24)
+- ❌ Comprehensive local header patching (corrupts offsets)
+- ❌ Central directory offset manipulation (breaks structure)
+- ❌ Using actual file sizes/CRC in mz_zip_writer_add_mem_ex_v2 parameters
+- ❌ Raw miniz alignment algorithm (breaks unit tests)
+
+# KEY DISCOVERY
+- ✅ **SOLUTION FOUND**: Use mz_zip_writer_add_read_buf_callback instead of mz_zip_writer_add_mem_ex_v2!
+- ✅ mz_zip_writer_add_read_buf_callback respects MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE (line 6528)
+- ✅ mz_zip_writer_add_mem_ex_v2 does NOT respect this flag (uses different logic at line 6243-6244)
+- ✅ **BREAKTHROUGH**: 0 data descriptors created (matches reference perfectly)
+- ✅ All USD tools now work: usdzip -l lists all files, usdchecker --arkit passes
+- 🎯 **COMPLETE SUCCESS**: All requirements met!
+
+# CURRENT STATUS - COMPLETE SUCCESS! 🎉
+- Unit tests: All 49 tests passing ✅
+- Alignment: All files 64-byte aligned ✅
+- Data descriptors: 0 (matches reference) ✅
+- usdzip -l: Lists all 6 files ✅
+- usdchecker --arkit: Success! ✅
+- Implementation: Ready for upstream contribution ✅

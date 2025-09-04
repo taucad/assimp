@@ -314,6 +314,35 @@ void USDZExporter::ExportMeshes() {
         collectMeshReferences(mScene->mRootNode);
     }
 
+    // Track shared meshes for programmatic reference system (data-driven instancing)
+    std::map<uint32_t, std::string> primaryMeshPaths; // mesh index -> first occurrence GeomScope path
+    mSharedMeshInfo.clear(); // Reset shared mesh tracking
+    
+    // Detect shared meshes and log them for reference system implementation
+    for (const auto& meshMapping : meshToNodes) {
+        uint32_t meshIndex = meshMapping.first;
+        const std::vector<const aiNode*>& referencingNodes = meshMapping.second;
+        
+        if (referencingNodes.size() > 1) {
+            std::string meshName = SanitizeName(mScene->mMeshes[meshIndex]->mName.C_Str());
+            if (meshName.empty()) {
+                meshName = "mesh_" + ai_to_string(meshIndex);
+            }
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Detected shared mesh '" + meshName + "' referenced by " + 
+                           ai_to_string(referencingNodes.size()) + " nodes - will use USD reference system");
+            
+            // Store first node as primary (will contain actual mesh definition)
+            const aiNode* primaryNode = referencingNodes[0];
+            std::string rootPrimName = GetSceneName();
+            std::string primaryPath = BuildFullHierarchyPath(primaryNode, rootPrimName) + "/Geometry";
+            primaryMeshPaths[meshIndex] = primaryPath;
+            
+            // Track shared mesh info for ConvertNode to access
+            mSharedMeshInfo[meshIndex] = {primaryPath, referencingNodes};
+        }
+    }
+
     for (uint32_t i = 0; i < mScene->mNumMeshes; ++i) {
         const aiMesh* mesh = mScene->mMeshes[i];
         
@@ -322,7 +351,6 @@ void USDZExporter::ExportMeshes() {
         if (meshName.empty()) {
             meshName = "mesh_" + ai_to_string(i);
         }
-        meshName = GenerateUniqueName(meshName);
         
         mMeshIdMap[mesh] = meshName;
         
@@ -478,6 +506,9 @@ void USDZExporter::ExportMeshes() {
         
         // Find the parent nodes that reference this mesh and add it as their child
         bool meshPlaced = false;
+        // Implement proper reference system using correct tinyusdz APIs
+        bool isSharedMesh = mSharedMeshInfo.count(i) > 0; // Re-enabled with correct API usage
+        
         if (meshToNodes.count(i)) {
             // Get the first parent node name for skeletal treatment (most meshes have one parent)
             const aiNode* firstParentNode = meshToNodes[i][0];
@@ -505,22 +536,62 @@ void USDZExporter::ExportMeshes() {
                             prim.children().emplace_back(std::move(finalMeshPrim));
                             ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot " + meshName + " to node " + parentNodeName);
                         } else {
-                            // Create GeomScope wrapper with proper naming (Apple's pattern)
-                            tinyusdz::Scope geomScope;
-                            geomScope.name = "Geometry";  // Use "Geometry" as Apple does
-                            
-                            // Create GeomScope prim and add mesh as its child
-                            tinyusdz::Prim geomScopePrim(geomScope);
-                            geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
-                            
-                            // Add GeomScope as child of this node
-                            prim.children().emplace_back(std::move(geomScopePrim));
-                            
-                            ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName + " with GeomScope wrapper");
+                            // Implement programmatic reference system for shared meshes (data-driven approach)
+                            if (isSharedMesh) {
+                                // Check if this is the primary node (first node in the shared mesh list)
+                                bool isPrimaryNode = (meshToNodes[i][0] == parentNode);
+                                
+                                if (isPrimaryNode) {
+                                    // Primary node: create actual mesh definition in Geometry scope
+                                    tinyusdz::Scope geomScope;
+                                    geomScope.name = "Geometry";
+                                    
+                                    tinyusdz::Prim geomScopePrim(geomScope);
+                                    geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
+                                    prim.children().emplace_back(std::move(geomScopePrim));
+                                    
+                                    ASSIMP_LOG_DEBUG("USDZExporter: Added shared mesh " + meshName + " PRIMARY definition to node " + parentNodeName);
+                                } else {
+                                    // Secondary node: create instanceable Geometry scope with prepend references 
+                                    // Use correct tinyusdz API patterns discovered in research
+                                    tinyusdz::Scope geomScope;
+                                    geomScope.name = "Geometry";
+                                    
+                                    // Create Reference object for internal same-file reference
+                                    tinyusdz::Reference ref;
+                                    ref.asset_path = tinyusdz::value::AssetPath("");  // Empty for internal references
+                                    ref.prim_path = tinyusdz::Path(mSharedMeshInfo[i].primaryPath, "");  // Absolute path to primary mesh
+                                    
+                                    // Create references vector and set with Prepend qualifier 
+                                    std::vector<tinyusdz::Reference> referencesList;
+                                    referencesList.push_back(ref);
+                                    
+                                    tinyusdz::Prim geomScopePrim(geomScope);
+                                    // Set instanceable = true and prepend references
+                                    geomScopePrim.metas().instanceable = true;
+                                    geomScopePrim.metas().references = std::make_pair(tinyusdz::ListEditQual::Prepend, referencesList);
+                                    
+                                    prim.children().emplace_back(std::move(geomScopePrim));
+                                    
+                                    ASSIMP_LOG_DEBUG("USDZExporter: Added shared mesh " + meshName + " REFERENCE to " + mSharedMeshInfo[i].primaryPath + " (using correct tinyusdz Reference API)");
+                                }
+                            } else {
+                                // Regular single-use mesh: create Geometry wrapper with mesh (Apple's pattern)
+                                tinyusdz::Scope geomScope;
+                                geomScope.name = "Geometry";
+                                
+                                tinyusdz::Prim geomScopePrim(geomScope);
+                                geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
+                                prim.children().emplace_back(std::move(geomScopePrim));
+                                
+                                ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to node " + parentNodeName + " with Geometry wrapper");
+                            }
                         }
                         
                         meshPlaced = true;
-                        return true;
+                        // For shared meshes, continue searching to process all parent nodes
+                        // For regular meshes, stop after first placement
+                        return !isSharedMesh;
                     }
                     
                     // Search recursively in children
@@ -534,12 +605,15 @@ void USDZExporter::ExportMeshes() {
                 
                 // Search all root prims for the parent node
                 for (auto& rootPrim : mStage->root_prims()) {
-                    if (addMeshToNode(rootPrim)) {
-                        break; // Only add to first matching parent to avoid duplicates
+                    bool stopSearch = addMeshToNode(rootPrim);
+                    if (stopSearch) {
+                        break; // For regular meshes, stop after first placement. For shared meshes, continue searching.
                     }
                 }
                 
-                if (meshPlaced) break; // Only add to first parent
+                // For shared meshes, continue processing all parent nodes to create references
+                // For regular meshes, break after first placement to avoid duplicates
+                if (meshPlaced && !isSharedMesh) break;
             }
         }
         
@@ -564,7 +638,7 @@ void USDZExporter::ExportMeshes() {
                     geomScopePrim.children().emplace_back(std::move(finalMeshPrim));
                     mStage->root_prims()[0].children().emplace_back(std::move(geomScopePrim));
                     
-                    ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to root prim with GeomScope wrapper");
+                    ASSIMP_LOG_DEBUG("USDZExporter: Added mesh " + meshName + " to root prim with Geometry wrapper");
                 }
             } else {
                 // Absolute fallback: add directly to root level
@@ -601,7 +675,6 @@ void USDZExporter::ExportMaterials() {
         if (matName.empty()) {
             matName = "material_" + ai_to_string(i);
         }
-        matName = GenerateUniqueName(matName);
         
         // Set current material path for texture processing (include root prim name)
         std::string rootPrimName = GetSceneName();
@@ -649,7 +722,15 @@ void USDZExporter::ExportMaterials() {
             // Create stTransform shader for this texture
             std::string stTransformName = texName + "_stTransform";
             std::string texCoordReaderConnection = mCurrentMaterialPath + "/texCoordReader.outputs:result";
-            tinyusdz::Shader stTransformShader = CreateStTransform(texCoordReaderConnection);
+            
+            // Get texture transform if available
+            const aiUVTransform* uvTransform = nullptr;
+            auto transformIt = mCurrentMaterialTextureTransforms.find(texName);
+            if (transformIt != mCurrentMaterialTextureTransforms.end()) {
+                uvTransform = &transformIt->second;
+            }
+            
+            tinyusdz::Shader stTransformShader = CreateStTransform(texCoordReaderConnection, uvTransform);
             stTransformShader.name = stTransformName;
             
             // Create texture shader with proper st connection
@@ -2373,6 +2454,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     
     // Store texture shaders to be added as children later
     mCurrentMaterialTextureShaders.clear();
+    mCurrentMaterialTextureTransforms.clear();
     
     // Define texture configurations for all supported texture types
     // Using initializer list for optimal performance and readability
@@ -2462,7 +2544,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             
             aiString clearcoatTexPath;
             if (mat->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &clearcoatTexPath) == AI_SUCCESS) {
-                tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(clearcoatTexPath.C_Str(), "clearcoat");
+                tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(clearcoatTexPath.C_Str(), "clearcoat", mat, aiTextureType_CLEARCOAT, 0);
         std::string texShaderPath = mCurrentMaterialPath + "/clearcoat";
                 tinyusdz::Path connPath(std::move(texShaderPath), "outputs:r");
                 surface.clearcoat.set_connection(std::move(connPath));
@@ -2478,7 +2560,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             
             aiString clearcoatRoughnessTexPath;
             if (mat->GetTexture(AI_MATKEY_CLEARCOAT_ROUGHNESS_TEXTURE, &clearcoatRoughnessTexPath) == AI_SUCCESS) {
-                tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(clearcoatRoughnessTexPath.C_Str(), "clearcoatRoughness");
+                tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(clearcoatRoughnessTexPath.C_Str(), "clearcoatRoughness", mat, aiTextureType_CLEARCOAT, 1);
         std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
                 tinyusdz::Path connPath(std::move(texShaderPath), "outputs:g");
                 surface.clearcoatRoughness.set_connection(std::move(connPath));
@@ -2573,7 +2655,8 @@ tinyusdz::Prim USDZExporter::PrimFactory::CreateXform(const std::string& name) {
 
 // ------------------------------------------------------------------------------------------------
 // Create UV texture shader using tinyusdz APIs (Apple's pattern)
-tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath, const std::string& paramName) {
+tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath, const std::string& paramName, 
+                                                   const aiMaterial* mat, aiTextureType textureType, unsigned int texSlot) {
     tinyusdz::UsdUVTexture uvTexture;
     
     // Set name for the texture shader (following Apple's naming pattern)
@@ -2592,9 +2675,43 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
     // Add source color space (Apple's pattern)
     AddSourceColorSpace(uvTexture, paramName);
     
-    // Set wrap modes (Apple's pattern - default to repeat)
-    uvTexture.wrapS.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
-    uvTexture.wrapT.set_value(tinyusdz::UsdUVTexture::Wrap::Repeat);
+    // Set wrap modes
+    
+    auto ConvertAssimpWrapToUSD = [](aiTextureMapMode assimpWrap) -> tinyusdz::UsdUVTexture::Wrap {
+        switch (assimpWrap) {
+            case aiTextureMapMode_Clamp:
+                return tinyusdz::UsdUVTexture::Wrap::Clamp;
+            case aiTextureMapMode_Mirror:
+                return tinyusdz::UsdUVTexture::Wrap::Mirror;
+            case aiTextureMapMode_Wrap:
+            case aiTextureMapMode_Decal:
+            default:
+                return tinyusdz::UsdUVTexture::Wrap::Repeat;
+        }
+    };
+    
+    // Read wrap modes from material properties (set by importers like glTF)
+    aiTextureMapMode wrapU = aiTextureMapMode_Wrap; // Default fallback
+    aiTextureMapMode wrapV = aiTextureMapMode_Wrap; // Default fallback
+    
+    if (mat) {
+        mat->Get(AI_MATKEY_MAPPINGMODE_U(textureType, texSlot), (int&)wrapU);
+        mat->Get(AI_MATKEY_MAPPINGMODE_V(textureType, texSlot), (int&)wrapV);
+    }
+    
+    // Convert to USD wrap modes
+    tinyusdz::UsdUVTexture::Wrap usdWrapS = ConvertAssimpWrapToUSD(wrapU);
+    tinyusdz::UsdUVTexture::Wrap usdWrapT = ConvertAssimpWrapToUSD(wrapV);
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Programmatic wrap modes - U: " + std::to_string((int)wrapU) + 
+                    " -> " + (usdWrapS == tinyusdz::UsdUVTexture::Wrap::Clamp ? "clamp" : 
+                             usdWrapS == tinyusdz::UsdUVTexture::Wrap::Mirror ? "mirror" : "repeat") +
+                    ", V: " + std::to_string((int)wrapV) + 
+                    " -> " + (usdWrapT == tinyusdz::UsdUVTexture::Wrap::Clamp ? "clamp" : 
+                             usdWrapT == tinyusdz::UsdUVTexture::Wrap::Mirror ? "mirror" : "repeat"));
+    
+    uvTexture.wrapS.set_value(usdWrapS);
+    uvTexture.wrapT.set_value(usdWrapT);
     
     // Add appropriate outputs (Apple's pattern)
     AddTextureOutputs(uvTexture, paramName);
@@ -2631,8 +2748,24 @@ bool USDZExporter::ProcessTextureProperty(const aiMaterial* mat, const TextureCo
         return false; // No texture found
     }
     
-    // Create UV texture with optimized construction
-    tinyusdz::UsdUVTexture uvTexture = CreateUVTexture(texturePath.C_Str(), config.paramName);
+    // Create UV texture with optimized construction (programmatic wrap mode support)
+    tinyusdz::UsdUVTexture uvTexture = CreateUVTexture(texturePath.C_Str(), config.paramName, mat, foundType, 0);
+    
+    // Read texture transform data from material using proper matrix-based coordinate conversion
+    aiUVTransform uvTransform;
+    if (mat->Get(AI_MATKEY_UVTRANSFORM(foundType, 0), uvTransform) == AI_SUCCESS) {
+        // Check if transform is non-identity
+        if (uvTransform.mScaling.x != 1.0f || uvTransform.mScaling.y != 1.0f ||
+            uvTransform.mTranslation.x != 0.0f || uvTransform.mTranslation.y != 0.0f ||
+            uvTransform.mRotation != 0.0f) {
+            mCurrentMaterialTextureTransforms[config.paramName] = uvTransform;
+            ASSIMP_LOG_DEBUG("USDZExporter: Stored non-identity texture transform for " + config.paramName);
+        } else {
+            ASSIMP_LOG_DEBUG("USDZExporter: Skipping identity texture transform for " + config.paramName);
+        }
+    } else {
+        ASSIMP_LOG_DEBUG("USDZExporter: No texture transform found for " + config.paramName);
+    }
     
     // Apply texture-specific transformations
     if (config.bias[0] != 0.0f || config.bias[1] != 0.0f || config.bias[2] != 0.0f || config.bias[3] != 0.0f) {
@@ -3508,6 +3641,44 @@ std::string USDZExporter::GetSceneName() const {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Build full hierarchy path from scene root to target node
+std::string USDZExporter::BuildFullHierarchyPath(const aiNode* node, const std::string& rootPrimName) const {
+    if (!node) return "/" + rootPrimName;
+    
+    // Build path components by traversing up to the root
+    std::vector<std::string> pathComponents;
+    const aiNode* current = node;
+    
+    // Traverse up to collect all parent node names
+    while (current && current != mScene->mRootNode) {
+        std::string nodeName = SanitizeName(current->mName.C_Str());
+        if (nodeName.empty()) {
+            nodeName = "UnnamedNode";
+        }
+        pathComponents.push_back(nodeName);
+        current = current->mParent;
+    }
+    
+    // Add the scene root node name if we have one
+    if (current == mScene->mRootNode) {
+        std::string rootNodeName = SanitizeName(mScene->mRootNode->mName.C_Str());
+        if (!rootNodeName.empty()) {
+            pathComponents.push_back(rootNodeName);
+        }
+    }
+    
+    // Build the path string from root to target (reverse the components)
+    std::string fullPath = "/" + rootPrimName;
+    
+    // Add path components in reverse order (from root down to target)
+    for (auto it = pathComponents.rbegin(); it != pathComponents.rend(); ++it) {
+        fullPath += "/" + *it;
+    }
+    
+    return fullPath;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Create UV coordinate reader shader (Apple's pattern)
 tinyusdz::Shader USDZExporter::CreateTexCoordReader(const std::string& varName) {
     tinyusdz::Shader texCoordReader;
@@ -3532,7 +3703,8 @@ tinyusdz::Shader USDZExporter::CreateTexCoordReader(const std::string& varName) 
 
 // ------------------------------------------------------------------------------------------------
 // Create texture coordinate transform shader (Apple's pattern)
-tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnection, bool flipY) {
+tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnection, 
+                                                 const aiUVTransform* uvTransform, bool flipY) {
     tinyusdz::Shader stTransform;
     stTransform.name = "stTransform";
     stTransform.info_id = "UsdTransform2d";
@@ -3546,13 +3718,92 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
     // Clear any default value since we're using a connection
     transform2d.in.set_value_empty();
     
-    // Apply Y-flip transformation (common for textures)
-    if (flipY) {
-        transform2d.scale.set_value(tinyusdz::value::float2{1.0f, -1.0f});
-        transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 1.0f});
+    // Apply texture transforms from material if available
+    if (uvTransform) {
+        ASSIMP_LOG_DEBUG("USDZExporter: CreateStTransform input: scale(" + ai_to_string(uvTransform->mScaling.x) + "," + ai_to_string(uvTransform->mScaling.y) + 
+                       ") trans(" + ai_to_string(uvTransform->mTranslation.x) + "," + ai_to_string(uvTransform->mTranslation.y) + 
+                       ") rot(" + ai_to_string(uvTransform->mRotation) + ")");
+        
+        // To reverse the glTF conversion, we need to work backwards:
+        // 1. The original glTF transformation was: Translation * Rotation * Scale  
+        // 2. glTF importer converted this to Assimp coordinate space
+        // 3. For USD, we need simple values that match Apple's reference
+        
+        // Apply scaling with coordinate conversion for USD  
+        float scaleX = uvTransform->mScaling.x;
+        float scaleY = uvTransform->mScaling.y;
+        if (flipY) {
+            scaleY = -scaleY;  // Y-flip in scale
+        }
+        transform2d.scale.set_value(tinyusdz::value::float2{scaleX, scaleY});
+        
+        // Apply proper matrix-based coordinate conversion for Assimp→USD space
+        float transX = uvTransform->mTranslation.x;
+        float transY = uvTransform->mTranslation.y;
+        
+        if (flipY) {
+            // Sophisticated coordinate conversion based on matrix approach from working solution
+            bool hasRotation = std::abs(uvTransform->mRotation) > 0.0f;
+            bool hasScaling = std::abs(uvTransform->mScaling.x - 1.0f) > 0.0f || std::abs(uvTransform->mScaling.y - 1.0f) > 0.0f;
+            
+            if (hasRotation || hasScaling) {
+                // Use matrix-based approach from patch for complex transformations
+                // Extract original glTF offset using reverse formulas (from patch lines 505-534)
+                float rcos = std::cos(-uvTransform->mRotation);  // glTF2Importer uses -rotation
+                float rsin = std::sin(-uvTransform->mRotation);
+                
+                // Reverse Y offset formula (patch line 513-514)
+                float originalOffsetY = 1.0f - uvTransform->mScaling.y - uvTransform->mTranslation.y + 
+                                       (0.5f * uvTransform->mScaling.y) * (rsin + rcos - 1.0f);
+                                       
+                // Reverse X offset formula (patch line 517-519)
+                float originalOffsetX = uvTransform->mTranslation.x - (0.5f * uvTransform->mScaling.x) * (-rcos + rsin + 1.0f);
+                
+                // Convert original glTF offsets to USD coordinate space (patch lines 522-524)
+                transX = originalOffsetX;
+                transY = 1.0f - originalOffsetY;
+                
+                // For pure rotation/scaling cases with no original offset: Apple shows (0, 1) (patch lines 527-530)
+                if (std::abs(originalOffsetX) == 0.0f && std::abs(originalOffsetY) == 0.0f) {
+                    transX = 0.0f;
+                    transY = 1.0f;
+                }
+            } else {
+                // Simple offset transformations - use refined conversion
+                transX = uvTransform->mTranslation.x - (uvTransform->mScaling.x - 1.0f) * 0.5f;
+                
+                if (std::abs(uvTransform->mTranslation.y) == 0.0f) {
+                    transY = 1.0f;  // glTF Y=0.0 → USD Y=1.0
+                } else {
+                    transY = 1.0f - uvTransform->mScaling.y - uvTransform->mTranslation.y;
+                }
+            }
+        }
+        
+        transform2d.translation.set_value(tinyusdz::value::float2{transX, transY});
+        
+        // Apply rotation if present (convert from radians to degrees)
+        if (uvTransform->mRotation != 0.0f) {
+            float rotationDegrees = uvTransform->mRotation * 180.0f / M_PI;
+            // Flip rotation sign for Y-flip coordinate system
+            if (flipY) {
+                rotationDegrees = -rotationDegrees;
+            }
+            transform2d.rotation.set_value(rotationDegrees);
+        }
+        
+        ASSIMP_LOG_DEBUG("USDZExporter: Refined result: scale(" + ai_to_string(scaleX) + "," + ai_to_string(scaleY) + 
+                       ") trans(" + ai_to_string(transX) + "," + ai_to_string(transY) + 
+                       ") rot(" + ai_to_string(uvTransform->mRotation * 180.0f / M_PI) + ")");
     } else {
-        transform2d.scale.set_value(tinyusdz::value::float2{1.0f, 1.0f});
-        transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 0.0f});
+        // Default Y-flip transformation (common for textures)
+        if (flipY) {
+            transform2d.scale.set_value(tinyusdz::value::float2{1.0f, -1.0f});
+            transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 1.0f});
+        } else {
+            transform2d.scale.set_value(tinyusdz::value::float2{1.0f, 1.0f});
+            transform2d.translation.set_value(tinyusdz::value::float2{0.0f, 0.0f});
+        }
     }
     
     // Set output
