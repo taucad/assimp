@@ -38,7 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----------------------------------------------------------------------
 */
-
+#ifndef ASSIMP_BUILD_NO_EXPORT
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
 
 #include "USDZExporter.h"
@@ -4224,4 +4224,4 @@ void Assimp::ExportSceneUSDZ(const char* pFile, IOSystem* pIOSystem, const aiSce
 }
 
 #endif // !ASSIMP_BUILD_NO_USD_EXPORTER
-
+#endif // ASSIMP_BUILD_NO_EXPORT
