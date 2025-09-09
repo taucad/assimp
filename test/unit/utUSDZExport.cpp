@@ -1868,6 +1868,40 @@ TEST_F(utUSDZExport, validateAdvancedTextureTypesSupport) {
         EXPECT_TRUE(content.find(channel) != std::string::npos)
             << "USD file should contain " << channel << " texture channel usage";
     }
+    
+    // CRITICAL: Verify texture directory and files were created
+    // Extract directory from output path
+    std::string outputDir = outputPath.substr(0, outputPath.find_last_of("/"));
+    std::string texturesDir = outputDir + "/textures";
+    
+    // Check textures directory exists
+    struct stat dirStat;
+    EXPECT_EQ(stat(texturesDir.c_str(), &dirStat), 0) << "Textures directory not created: " << texturesDir;
+    if (stat(texturesDir.c_str(), &dirStat) == 0) {
+        EXPECT_TRUE(S_ISDIR(dirStat.st_mode)) << "Textures path is not a directory: " << texturesDir;
+
+        // Check expected texture files exist based on damaged-helmet.glb content
+        std::vector<std::string> expectedTextureFiles = {
+            "Default_albedo.jpg",
+            "Default_metalRoughness.jpg", 
+            "Default_normal.jpg",
+            "Default_AO.jpg",
+            "Default_emissive.jpg"
+        };
+        
+        for (const std::string& textureFile : expectedTextureFiles) {
+            std::string expectedTextureFilePath = texturesDir + "/" + textureFile;
+            struct stat fileStat;
+            EXPECT_EQ(stat(expectedTextureFilePath.c_str(), &fileStat), 0) 
+                << "Expected texture file not found: " << expectedTextureFilePath;
+            if (stat(expectedTextureFilePath.c_str(), &fileStat) == 0) {
+                EXPECT_TRUE(S_ISREG(fileStat.st_mode)) 
+                    << "Texture path is not a regular file: " << expectedTextureFilePath;
+                EXPECT_GT(fileStat.st_size, 0) 
+                    << "Texture file is empty: " << expectedTextureFilePath;
+            }
+        }
+    }
 }
 
 TEST_F(utUSDZExport, validateNormalMapBiasScaleCorrection) {

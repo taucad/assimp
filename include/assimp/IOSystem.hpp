@@ -70,6 +70,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif // _WIN32
 
 #include <vector>
+#include <cerrno>
 
 namespace Assimp {
 
@@ -295,15 +296,60 @@ AI_FORCE_INLINE bool IOSystem::PopDirectory() {
 
 // ----------------------------------------------------------------------------
 AI_FORCE_INLINE bool IOSystem::CreateDirectory( const std::string &path ) {
-    if ( path.empty() ) {
+    // Input validation
+    if ( path.empty() || path.length() > 4096 ) {
         return false;
     }
 
+    // Security: Prevent path traversal attacks
+    if (path.find("..") != std::string::npos) {
+        return false;
+    }
+    
+    // Security: Prevent dangerous absolute paths
 #ifdef _WIN32
-    return 0 != ::_mkdir( path.c_str() );
+    // On Windows, reject UNC paths but allow drive letters
+    if (path.length() >= 2 && path[0] == '\\' && path[1] == '\\') {
+        return false;
+    }
 #else
-    return 0 != ::mkdir( path.c_str(), 0777 );
-#endif // _WIN32
+    // On Unix, reject absolute paths starting with /
+    if (!path.empty() && path[0] == '/') {
+        return false;
+    }
+#endif
+
+    // Security: Reasonable path depth limit (count directory separators)
+    size_t separatorCount = 0;
+    for (char c : path) {
+        if (c == '/' || c == '\\') {
+            ++separatorCount;
+            if (separatorCount > 15) {  // Reasonable limit for directory nesting
+                return false;
+            }
+        }
+    }
+
+    // Create parent directories recursively if needed
+    size_t lastSep = path.find_last_of("/\\");
+    if (lastSep != std::string::npos && lastSep > 0) {
+        std::string parentDir = path.substr(0, lastSep);
+        if (!parentDir.empty() && !Exists(parentDir.c_str())) {
+            if (!CreateDirectory(parentDir)) {
+                return false;
+            }
+        }
+    }
+
+    // Create the directory
+#ifdef _WIN32
+    int result = ::_mkdir( path.c_str() );
+#else
+    int result = ::mkdir( path.c_str(), 0777 );
+#endif
+
+    // Success if directory created or already exists
+    return (result == 0) || (errno == EEXIST);
 }
 
 // ----------------------------------------------------------------------------
