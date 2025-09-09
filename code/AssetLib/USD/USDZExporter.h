@@ -451,6 +451,14 @@ private:
     std::string GenerateUSDContent();
     void CollectTextureDataForUSDZ(std::map<std::string, std::vector<uint8_t>>& textureDataMap);
     bool ConvertRawTextureToPNG(const aiTexture* texture, std::vector<uint8_t>& pngData);
+    
+    // USDA texture extraction methods
+    void ExtractTexturesForUSDA(const std::string& usdaFilePath);
+    bool WriteTextureFile(const std::string& filePath, const std::vector<uint8_t>& textureData);
+    
+    // Shared texture processing template for eliminating code duplication
+    template<typename TextureHandler>
+    uint32_t ProcessEmbeddedTextures(TextureHandler handler, const std::string& pathPrefix = "");
 
     // Error handling
     void ReportError(const std::string& message);

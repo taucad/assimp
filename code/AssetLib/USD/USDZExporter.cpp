@@ -3884,8 +3884,14 @@ void USDZExporter::SaveAsUSDA(const std::string& filename) {
     
     ASSIMP_LOG_INFO("USDZExporter: Successfully exported USDA");
     
-    // Note: For USDZ export, textures are embedded in the archive by tinyusdz::usdz::SaveAsUSDZ()
-    // For USDA export, textures should be manually copied to textures/ subdirectory if needed
+    // Extract texture files for USDA export (write to filesystem)
+    try {
+        ExtractTexturesForUSDA(filename);
+        ASSIMP_LOG_INFO("USDZExporter: Texture extraction completed for USDA export");
+    } catch (const std::exception& e) {
+        ReportWarning("Texture extraction failed: " + std::string(e.what()));
+        // Continue with USDA export even if texture extraction fails
+    }
 }
 
 // Note: Texture file writing is now handled by tinyusdz::usdz::SaveAsUSDZ()
@@ -3979,10 +3985,11 @@ std::string USDZExporter::GenerateUSDContent() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Collect texture data for USDZ embedding
-void USDZExporter::CollectTextureDataForUSDZ(std::map<std::string, std::vector<uint8_t>>& textureDataMap) {
+// Shared texture processing with template handler for different output strategies
+template<typename TextureHandler>
+uint32_t USDZExporter::ProcessEmbeddedTextures(TextureHandler handler, const std::string& pathPrefix) {
+    uint32_t processedCount = 0;
     
-    // Process embedded textures from aiScene->mTextures
     for (uint32_t i = 0; i < mScene->mNumTextures; ++i) {
         const aiTexture* tex = mScene->mTextures[i];
         if (!tex) continue;
@@ -4011,9 +4018,9 @@ void USDZExporter::CollectTextureDataForUSDZ(std::map<std::string, std::vector<u
         }
         
         std::string sanitizedFilename = SanitizeFilename(baseTextureName);
-        std::string texturePath = "textures/" + sanitizedFilename;
+        std::string texturePath = pathPrefix + sanitizedFilename;
         
-        // Extract texture data
+        // Extract texture data using shared logic
         std::vector<uint8_t> textureData;
         if (tex->mHeight == 0) {
             // Compressed texture data
@@ -4040,15 +4047,115 @@ void USDZExporter::CollectTextureDataForUSDZ(std::map<std::string, std::vector<u
             }
         }
         
+        // Delegate to handler for output-specific processing
         if (!textureData.empty()) {
-            textureDataMap[texturePath] = std::move(textureData);
-            ASSIMP_LOG_DEBUG("USDZExporter: Collected embedded texture: " + texturePath + " (" + ai_to_string(textureDataMap[texturePath].size()) + " bytes)");
+            if (handler(texturePath, textureData)) {
+                ++processedCount;
+            }
         } else {
             ASSIMP_LOG_DEBUG("USDZExporter: Empty texture data for: " + texturePath);
         }
     }
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Collected " + ai_to_string(textureDataMap.size()) + " textures for USDZ embedding");
+    return processedCount;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Collect texture data for USDZ embedding
+void USDZExporter::CollectTextureDataForUSDZ(std::map<std::string, std::vector<uint8_t>>& textureDataMap) {
+    auto usdzCollector = [this, &textureDataMap](const std::string& texturePath, std::vector<uint8_t>& textureData) -> bool {
+        textureDataMap[texturePath] = std::move(textureData);
+        ASSIMP_LOG_DEBUG("USDZExporter: Collected embedded texture: " + texturePath + 
+                        " (" + ai_to_string(textureDataMap[texturePath].size()) + " bytes)");
+        return true;
+    };
+    
+    uint32_t collected = ProcessEmbeddedTextures(usdzCollector, "textures/");
+    ASSIMP_LOG_DEBUG("USDZExporter: Collected " + ai_to_string(collected) + " textures for USDZ embedding");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Extract texture files for USDA export (writes files to filesystem)
+void USDZExporter::ExtractTexturesForUSDA(const std::string& usdaFilePath) {
+    // Early return if no textures to process
+    if (!mScene || mScene->mNumTextures == 0) {
+        ASSIMP_LOG_DEBUG("USDZExporter: No embedded textures to extract for USDA export");
+        return;
+    }
+    
+    // Extract directory from USDA file path
+    std::string outputDir = usdaFilePath.substr(0, usdaFilePath.find_last_of("/\\"));
+    if (outputDir.empty()) {
+        outputDir = "."; // Current directory if no path specified
+    }
+    
+    std::string texturesDir = outputDir + "/textures";
+    
+    // Create textures directory if it doesn't exist
+    if (!CreateTexturesDirectory(texturesDir)) {
+        ReportError("Failed to create textures directory: " + texturesDir);
+        return;
+    }
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Created textures directory: " + texturesDir);
+    
+    // Use shared texture processing with file writer handler
+    auto fileWriter = [this, &texturesDir](const std::string& texturePath, std::vector<uint8_t>& textureData) -> bool {
+        // Convert relative path to full file path
+        std::string textureFilePath = texturesDir + "/" + texturePath;
+        
+        // Update file extension if PNG conversion occurred (template handles this in texturePath)
+        if (texturePath.substr(texturePath.length() - 4) == ".png" && 
+            textureFilePath.substr(textureFilePath.length() - 4) != ".png") {
+            textureFilePath = textureFilePath.substr(0, textureFilePath.find_last_of('.')) + ".png";
+        }
+        
+        if (WriteTextureFile(textureFilePath, textureData)) {
+            ASSIMP_LOG_DEBUG("USDZExporter: Extracted texture file: " + textureFilePath + 
+                            " (" + ai_to_string(textureData.size()) + " bytes)");
+            return true;
+        } else {
+            ReportError("Failed to write texture file: " + textureFilePath);
+            return false;
+        }
+    };
+    
+    uint32_t extracted = ProcessEmbeddedTextures(fileWriter, ""); // No prefix, we handle full paths in lambda
+    
+    // TODO: Handle external texture files (copy from original locations)
+    // This would require tracking external texture references during material processing
+    
+    ASSIMP_LOG_DEBUG("USDZExporter: Texture extraction completed for USDA export, " + 
+                    ai_to_string(extracted) + " textures processed");
+}
+
+// ------------------------------------------------------------------------------------------------
+// Write texture data to file using IOSystem for cross-platform compatibility
+bool USDZExporter::WriteTextureFile(const std::string& filePath, const std::vector<uint8_t>& textureData) {
+    if (textureData.empty()) {
+        return false;
+    }
+    
+    if (mIOSystem) {
+        std::unique_ptr<IOStream> file(mIOSystem->Open(filePath.c_str(), "wb"));
+        if (!file) {
+            ReportError("Failed to create texture file using IOSystem: " + filePath);
+            return false;
+        }
+        
+        size_t written = file->Write(textureData.data(), 1, textureData.size());
+        file->Flush();
+        
+        if (written != textureData.size()) {
+            ReportError("Failed to write complete texture data to file: " + filePath);
+            return false;
+        }
+        
+        // IOSystem manages closing through RAII
+        return true;
+    }
+    
+    throw DeadlyExportError("IOSystem is not available for texture file writing: " + filePath);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -4081,7 +4188,6 @@ void USDZExporter::ReportWarning(const std::string& message) {
 // ------------------------------------------------------------------------------------------------  
 // Create textures directory with proper cross-platform support
 bool USDZExporter::CreateTexturesDirectory(const std::string& dirPath) {
-    // Use IOSystem if available for cross-platform directory creation
     if (mIOSystem) {
         // Note: The default IOSystem::CreateDirectory has inverted logic, so we need to work around it
         bool result = mIOSystem->CreateDirectory(dirPath);
@@ -4092,14 +4198,9 @@ bool USDZExporter::CreateTexturesDirectory(const std::string& dirPath) {
         }
         
         return result;
+    } else {
+      throw DeadlyExportError("IOSystem is not available for directory creation: " + dirPath);
     }
-    
-    // Fallback: use system-specific directory creation with correct return logic
-    #ifdef _WIN32
-        return CreateDirectoryA(dirPath.c_str(), NULL) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
-    #else
-        return mkdir(dirPath.c_str(), 0755) == 0 || errno == EEXIST;
-    #endif
 }
 
 // ------------------------------------------------------------------------------------------------  

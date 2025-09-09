@@ -57,6 +57,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/stat.h>
 #include <cerrno>
 #include <regex>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -1348,6 +1349,21 @@ TEST_F(utUSDZExport, importGltfPrimitiveModeTriangleFanExportUsda) {
     ));
 }
 
+TEST_F(utUSDZExport, importGltfPrimitiveModeTriangleFanNoTexturesDirectoryExportUsda) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/glTF-Asset-Generator/Mesh_PrimitiveMode/Mesh_PrimitiveMode_05.gltf";
+    const std::string outputPath = "usd/primitives/PrimitiveMode_TriangleFan_NoTexDir_out.usda";
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Extract directory from output path
+    std::string outputDir = outputPath.substr(0, outputPath.find_last_of("/\\"));
+    std::string texturesDir = outputDir + "/textures";
+    
+    // Assert that textures directory does NOT exist (no textures in this model)
+    EXPECT_FALSE(std::filesystem::exists(texturesDir)) 
+        << "Textures directory should not be created when no textures are present: " << texturesDir;
+}
+
 // =============================================================================
 // ERROR HANDLING TESTS
 // =============================================================================
@@ -1456,6 +1472,44 @@ TEST_F(utUSDZExport, exportComplexAnimationScene) {
     const std::string outputPath = "usd/animation/AnimatedMorphCube_out.usda";
     
     EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+}
+
+TEST_F(utUSDZExport, importGltfCesiumManExportUsda) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/CesiumMan/CesiumMan.glb";
+    const std::string outputPath = "usd/animation/CesiumMan_out.usda";
+    
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Verify USD content references the texture correctly
+    std::ifstream usdFile(outputPath);
+    if (usdFile.is_open()) {
+        std::string usdContent((std::istreambuf_iterator<char>(usdFile)), std::istreambuf_iterator<char>());
+        usdFile.close();
+        EXPECT_TRUE(usdContent.find("@./textures/Default_albedo.jpg@") != std::string::npos) 
+            << "Texture asset reference not found in USD content";
+    }
+    
+    // Additional validation for animated character
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(outputPath, aiProcess_ValidateDataStructure);
+    if (scene) {
+        // Validate that the character model has reasonable complexity
+        EXPECT_GT(scene->mNumMeshes, 0u) << "Cesium Man should have meshes";
+        EXPECT_GT(scene->mNumMaterials, 0u) << "Cesium Man should have materials";
+        
+        // Check for skeletal animation data if present
+        if (scene->mNumMeshes > 0 && scene->mMeshes[0]) {
+            const aiMesh* mesh = scene->mMeshes[0];
+            if (mesh->mNumBones > 0) {
+                validateSkinningData(scene, 1); // Expect at least 1 bone if skinned
+            }
+        }
+        
+        // Validate animations if present
+        if (scene->mNumAnimations > 0) {
+            validateAnimationData(scene);
+        }
+    }
 }
 
 // =============================================================================
