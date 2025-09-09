@@ -4020,7 +4020,7 @@ uint32_t USDZExporter::ProcessEmbeddedTextures(TextureHandler handler, const std
         std::string sanitizedFilename = SanitizeFilename(baseTextureName);
         std::string texturePath = pathPrefix + sanitizedFilename;
         
-        // Extract texture data using shared logic
+        // Extract texture data
         std::vector<uint8_t> textureData;
         if (tex->mHeight == 0) {
             // Compressed texture data
