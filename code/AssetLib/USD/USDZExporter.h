@@ -60,6 +60,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <array>
 #include <functional>
+#include <set>
 
 struct aiScene;
 struct aiNode;
@@ -420,6 +421,30 @@ private:
     void ConvertSkinning(const aiMesh* mesh);
     void ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertBlendShapes(const aiMesh* mesh);
+    
+    // Hierarchical joint path helpers
+    struct JointPathMapping {
+        std::vector<std::string> skeletonJoints;    // All joints in hierarchy order
+        std::vector<std::string> animationJoints;  // Only animated joints
+        std::map<std::string, std::string> boneToJointPath;   // Maps bone names to USD joint paths
+        std::vector<std::string> skeletonJointNames; // Actual bone names in skeleton order
+        std::vector<const aiBone*> skeletonBonePointers; // aiBone* pointers in skeleton order (for bindTransforms)
+    };
+    
+    // Scene node hierarchy mapping (following gltfImport.cpp algorithm exactly)
+    struct NodeHierarchyMapping {
+        std::map<const aiNode*, int> nodeToIndex;           // Maps aiNode to scene index  
+        std::map<int, std::string> indexToHierarchicalPath; // Maps index to "n0/n1/n2" paths
+        std::map<std::string, std::string> nodeNameToPath;  // Maps node name to hierarchical path
+    };
+    
+    // Build scene node hierarchy (like gltfImport.cpp buildSkeletonNodeNames)
+    NodeHierarchyMapping BuildSceneNodeHierarchy() const;
+    
+    // Build joint paths using node hierarchy and skeleton data (no hardcoding)
+    JointPathMapping BuildJointPathsFromNodeHierarchy(const NodeHierarchyMapping& nodeMapping, 
+                                                       const std::set<std::string>& allBoneNames,
+                                                       const std::map<std::string, const aiBone*>& boneDataMap) const;
 
     // Camera/Light conversion helpers
     void ConvertCamera(const aiCamera* camera);
@@ -428,6 +453,9 @@ private:
     // Node hierarchy helpers
     tinyusdz::Xform* ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim = nullptr);
     void SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform);
+    bool IsBoneNode(const aiNode* node) const;
+    const aiNode* FindNodeByName(const aiNode* node, const std::string& name) const;
+    aiMatrix4x4 GetWorldTransform(const aiNode* node) const;
 
     // Texture helpers
     tinyusdz::UsdUVTexture CreateUVTexture(const std::string& filePath, const std::string& paramName, 
@@ -477,6 +505,22 @@ private:
     std::string mFilename;
     IOSystem* mIOSystem;
     bool mIsPackaged;
+    
+    // Apple structure bone discriminator for consistent skeletal export
+    std::set<std::string> mBoneNames;
+    bool mBoneNamesInitialized = false;
+    void InitializeBoneDiscriminator();
+    bool ShouldSkipBoneNode(const std::string& nodeName);
+    bool NodeOnlyContainsSkeletalMeshes(const aiNode* node);
+    void GenerateIndividualJointXforms(tinyusdz::Prim& armaturePrim, const std::set<std::string>& allBoneNames);
+    void CreateCentralizedSkelAnimation();
+    void CompleteSkelRootWithAnimation();
+    bool FindMeshInHierarchy(tinyusdz::Prim& prim, tinyusdz::Prim& geomScopePrim);
+    
+    // Helper functions for proper hierarchy placement
+    tinyusdz::Prim* FindMainScenePrim();
+    tinyusdz::Prim* FindArmaturePrim();
+    tinyusdz::Prim* FindGeomScopeInSkelRoot();
 
     // Export control flags
     bool mExportAnimations;

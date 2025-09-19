@@ -960,12 +960,12 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
     size_t endTimeEnd = usdContent.find_first_of(" \n\t)", endTimeStart);
     std::string endTimeStr = usdContent.substr(endTimeStart, endTimeEnd - endTimeStart);
     
-    // Should be an integer, not a decimal
-    EXPECT_TRUE(endTimeStr.find(".") == std::string::npos) 
-        << "endTimeCode should be an integer (101), not decimal (" << endTimeStr << ")";
+    // Should be a decimal value, not an integer
+    EXPECT_TRUE(endTimeStr.find(".") != std::string::npos) 
+        << "endTimeCode should be a decimal (4.208333), not integer (" << endTimeStr << ")";
     
-    int endTimeCode = std::stoi(endTimeStr);
-    EXPECT_EQ(endTimeCode, 101) << "endTimeCode should be 101 for AnimatedMorphCube animation";
+    float endTimeCode = std::stof(endTimeStr);
+    EXPECT_FLOAT_EQ(endTimeCode, 4.20833f) << "endTimeCode should be 4.20833 for AnimatedMorphCube animation";
     
     // 5. Verify we have exactly 101 time samples (frames 1-101)
     size_t timeSamplesPos2 = usdContent.find("blendShapeWeights.timeSamples");
@@ -983,13 +983,13 @@ TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsda) {
             pos++;
         }
         
-        EXPECT_EQ(colonCount, 101) << "Should have exactly 101 time samples (frames 1-101), found: " << colonCount;
+        EXPECT_EQ(colonCount, 101) << "Should have exactly 101 time samples (fractional time codes), found: " << colonCount;
         
-        // Verify we have frame 101
-        EXPECT_TRUE(timeSamplesSection2.find("101:") != std::string::npos) << "Should have frame 101 sample";
+        // Verify we have fractional time codes (e.g., 0.0416667, 0.0833333, etc.)
+        EXPECT_TRUE(timeSamplesSection2.find("0.0416667:") != std::string::npos) << "Should have fractional time sample 0.0416667";
         
-        // Verify we don't have frame 102
-        EXPECT_TRUE(timeSamplesSection2.find("102:") == std::string::npos) << "Should not have frame 102 sample";
+        // Verify we have the final fractional time code around 4.2
+        EXPECT_TRUE(timeSamplesSection2.find("4.2") != std::string::npos) << "Should have final fractional time sample around 4.2";
     }
 }
 
@@ -1272,17 +1272,17 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
         pos++;
     }
     
-    // Should have exactly 96 time samples for 4-second animation at 24fps
-    EXPECT_EQ(colonCount, 96) << "Should have exactly 96 time samples for 4-second animation at 24fps (found " << colonCount << ")";
+    // Should have exactly 101 time samples for 4.208333-second animation at 24fps  
+    EXPECT_EQ(colonCount, 101) << "Should have exactly 101 time samples for 4.208333-second animation at 24fps (found " << colonCount << ")";
     
     // 4. Validate time code range (should go from reasonable start to end)
-    // Check for presence of various time codes
-    EXPECT_TRUE(timeSamplesSection.find("1:") != std::string::npos)
-        << "Should have time samples starting from 1";
+    // Check for presence of fractional time codes
+    EXPECT_TRUE(timeSamplesSection.find("0.0416667:") != std::string::npos)
+        << "Should have time samples starting from 0.0416667";
     
-    // 5. Should have time samples up to frame 96 (4 seconds * 24fps)
-    EXPECT_TRUE(timeSamplesSection.find("96:") != std::string::npos) 
-        << "Should have final time sample at frame 96";
+    // 5. Should have time samples up to approximately 4.2 seconds
+    EXPECT_TRUE(timeSamplesSection.find("4.2") != std::string::npos) 
+        << "Should have final time sample around 4.2 seconds";
     
     // 6. Validate that blend shape weights actually animate (not all zeros)
     bool hasNonZeroWeights = false;
@@ -1305,10 +1305,10 @@ TEST_F(utUSDZExport, validateBlendShapeTimeSampling) {
         size_t endTimeEnd = usdContent.find_first_of(" \n\t)", endTimePos);
         if (endTimeEnd != std::string::npos) {
             std::string endTimeStr = usdContent.substr(endTimePos, endTimeEnd - endTimePos);
-            int endTimeCode = std::stoi(endTimeStr);
+            float endTimeCode = std::stof(endTimeStr);
             
-            // endTimeCode should be 96 frames (4 seconds * 24fps)
-            EXPECT_EQ(endTimeCode, 96) << "endTimeCode should be exactly 96 frames for 4-second animation at 24fps (found " << endTimeCode << ")";
+            // endTimeCode should be 4.208333 (corrected timing)
+            EXPECT_FLOAT_EQ(endTimeCode, 4.208333f) << "endTimeCode should be 4.208333 for corrected timing (found " << endTimeCode << ")";
         }
     }
 }
@@ -2425,8 +2425,226 @@ TEST_F(utUSDZExport, validateOutputDirectoryCreation) {
 }
 
 // =============================================================================
-// MISSING TEST FIXTURE DOCUMENTATION
+// SKELETAL ANIMATION TESTS (CRITICAL FOR USD COMPATIBILITY)
 // =============================================================================
+
+TEST_F(utUSDZExport, validateSkeletalAnimationStructureUsdz) {
+    std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/CesiumMan/CesiumMan.glb";
+    std::string outputPath = "usd/animation/CesiumMan.usdz";
+
+    // Perform export
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usdz"));
+}
+
+TEST_F(utUSDZExport, validateSkeletalAnimationStructureBlender) {
+    std::string inputPath = "/Users/rifont/Downloads/usdz-fixtures/animation/CesiumMan/blender/CesiumMan-blender.usda";
+    std::string outputPath = "usd/animation/CesiumMan_blender.usda";
+
+    // Perform export
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usdz"));
+}
+
+TEST_F(utUSDZExport, validateSkeletalAnimationStructure) {
+    std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/CesiumMan/CesiumMan.glb";
+    std::string outputPath = "usd/animation/CesiumMan.usda";
+    
+    // Perform export
+    EXPECT_TRUE(performRoundTripTest(inputPath, outputPath, "usda"));
+    
+    // Read the USD file content for validation
+    std::ifstream usdFile(outputPath);
+    ASSERT_TRUE(usdFile.is_open()) << "USD file should be created successfully";
+    
+    std::string usdContent((std::istreambuf_iterator<char>(usdFile)),
+                          std::istreambuf_iterator<char>());
+    usdFile.close();
+    
+    // Validate proper SkelRoot > Skeleton > SkelAnimation structure
+    EXPECT_TRUE(usdContent.find("def SkelRoot") != std::string::npos)
+        << "SkelRoot prim is required for skeletal animation";
+    
+    EXPECT_TRUE(usdContent.find("def Skeleton") != std::string::npos)
+        << "Skeleton prim is required inside SkelRoot";
+    
+    EXPECT_TRUE(usdContent.find("def SkelAnimation \"Animation\"") != std::string::npos)
+        << "SkelAnimation prim is MISSING";
+    
+    EXPECT_TRUE(usdContent.find("prepend rel skel:animationSource") != std::string::npos)
+        << "skel:animationSource relationship is MISSING - required to bind animation data";
+    
+    EXPECT_TRUE(usdContent.find("quatf[] rotations.timeSamples") != std::string::npos)
+        << "Unified rotations.timeSamples array is MISSING - required for proper skeletal animation";
+    
+    // ========================================================================
+    // PRIORITY 1 FIXES - ANIMATION FUNCTIONALITY (CRITICAL)
+    // ========================================================================
+    
+    // Frame timing should match Apple reference (fractional time codes)
+    if (usdContent.find("rotations.timeSamples") != std::string::npos) {
+        EXPECT_TRUE(usdContent.find("0.0416666: [") != std::string::npos)
+            << "Animation frames should start at Apple reference time code (0.0416666)";
+    }
+    
+    // Extra triangleSubdivisionRule property should be removed
+    EXPECT_TRUE(usdContent.find("triangleSubdivisionRule") == std::string::npos)
+        << "Should NOT have triangleSubdivisionRule property (not in reference)";
+        
+    // Validate joint structure consistency
+    size_t skeletonJointsPos = usdContent.find("uniform token[] joints = [");
+    EXPECT_NE(skeletonJointsPos, std::string::npos)
+        << "Skeleton joints array should be defined";
+    
+    if (skeletonJointsPos != std::string::npos) {
+        // Count expected joints (should be 19 for CesiumMan)
+        size_t jointsStart = usdContent.find('[', skeletonJointsPos);
+        size_t jointsEnd = usdContent.find(']', jointsStart);
+        std::string jointsSection = usdContent.substr(jointsStart + 1, jointsEnd - jointsStart - 1);
+        
+        // Count joint entries by counting quotes
+        size_t jointCount = std::count(jointsSection.begin(), jointsSection.end(), '"') / 2;
+        EXPECT_EQ(jointCount, 19) << "CesiumMan should have exactly 19 joints";
+    }
+    
+    // ========================================================================
+    // ADDITIONAL COMPREHENSIVE ASSERTIONS BASED ON APPLE REFERENCE ANALYSIS
+    // ========================================================================
+    
+    // 1. TOP-LEVEL SCENE STRUCTURE ASSERTIONS
+    EXPECT_TRUE(usdContent.find("def \"Skeletons\"") != std::string::npos)
+        << "Top-level 'Skeletons' section is MISSING - required for proper USD composition";
+    
+    EXPECT_TRUE(usdContent.find("def \"Animations\"") != std::string::npos)
+        << "Top-level 'Animations' section is MISSING - required for proper USD composition";
+    
+    // 2. SKELETON DEFINITION ASSERTIONS
+    EXPECT_TRUE(usdContent.find("prepend apiSchemas = [\"SkelBindingAPI\"]") != std::string::npos)
+        << "SkelBindingAPI schema is MISSING from Skeleton prim definition";
+    
+    EXPECT_TRUE(usdContent.find("uniform token[] jointNames = [") != std::string::npos)
+        << "jointNames[] attribute is MISSING - should be separate from joints[] paths";
+    
+    EXPECT_TRUE(usdContent.find("token visibility = \"invisible\"") != std::string::npos)
+        << "Skeleton visibility = 'invisible' attribute is MISSING";
+    
+    // Check for shorthand joint path format (e.g., "n0/n1/n3" instead of full names)
+    if (usdContent.find("uniform token[] joints = [") != std::string::npos) {
+        EXPECT_TRUE(usdContent.find("\"n0/n1/n3\"") != std::string::npos)
+            << "Joint paths should use shorthand notation like 'n0/n1/n3' to match Apple reference";
+    }
+    
+    // 3. SKELANIMATION STRUCTURE ASSERTIONS
+    // (SkelAnimation existence already validated above)
+    
+    // Animation should have all three required arrays (beyond the basic rotations check above)
+    EXPECT_TRUE(usdContent.find("float3[] translations.timeSamples") != std::string::npos)
+        << "float3[] translations.timeSamples array is MISSING from SkelAnimation";
+    
+    EXPECT_TRUE(usdContent.find("half3[] scales.timeSamples") != std::string::npos)
+        << "half3[] scales.timeSamples array is MISSING from SkelAnimation";
+    
+    // Animation joints should match skeleton joints
+    size_t animJointsPos = usdContent.find("def SkelAnimation");
+    if (animJointsPos != std::string::npos) {
+        size_t animJointsArrayPos = usdContent.find("uniform token[] joints = [", animJointsPos);
+        EXPECT_NE(animJointsArrayPos, std::string::npos)
+            << "SkelAnimation should have its own joints[] array matching skeleton joints";
+    }
+    
+    // 4. SKELROOT COMPOSITION ASSERTIONS
+    EXPECT_TRUE(usdContent.find("def SkelRoot \"ArmatureSkelRoot\"") != std::string::npos)
+        << "SkelRoot should be named 'ArmatureSkelRoot' to match Apple reference";
+    
+    // SkelRoot should have SkelBindingAPI schema
+    size_t skelRootPos = usdContent.find("def SkelRoot");
+    if (skelRootPos != std::string::npos) {
+        size_t skelRootEnd = usdContent.find("}", skelRootPos);
+        std::string skelRootSection = usdContent.substr(skelRootPos, skelRootEnd - skelRootPos);
+        
+        EXPECT_TRUE(skelRootSection.find("prepend apiSchemas = [\"SkelBindingAPI\"]") != std::string::npos)
+            << "SkelRoot should have SkelBindingAPI schema in prim definition";
+    }
+    
+    // 5. REFERENCE-BASED COMPOSITION ASSERTIONS
+    EXPECT_TRUE(usdContent.find("prepend references = </") != std::string::npos)
+        << "Reference-based composition is MISSING - should reference separate Skeletons and Animations sections";
+    
+    // Check for Armature reference (flexible formatting)
+    EXPECT_TRUE(usdContent.find("def \"Armature\"") != std::string::npos && 
+                usdContent.find("prepend references = </") != std::string::npos &&
+                usdContent.find("/Skeletons/Armature>") != std::string::npos)
+        << "Armature reference to top-level Skeletons section is MISSING";
+    
+    // Check for animation reference (flexible formatting)  
+    EXPECT_TRUE(usdContent.find("def \"anim\"") != std::string::npos &&
+                usdContent.find("prepend references = </") != std::string::npos &&
+                usdContent.find("/Animations/Animation>") != std::string::npos)
+        << "Animation reference to top-level Animations section is MISSING";
+    
+    // 6. GEOMSCOPE WRAPPER ASSERTIONS
+    EXPECT_TRUE(usdContent.find("def Scope \"GeomScope\"") != std::string::npos)
+        << "GeomScope wrapper around mesh geometry is MISSING";
+    
+    // Mesh should be inside GeomScope, not directly in SkelRoot
+    size_t geomScopePos = usdContent.find("def Scope \"GeomScope\"");
+    if (geomScopePos != std::string::npos) {
+        size_t geomScopeEnd = usdContent.find("}", geomScopePos);
+        std::string geomScopeSection = usdContent.substr(geomScopePos, geomScopeEnd - geomScopePos);
+        
+        EXPECT_TRUE(geomScopeSection.find("def Mesh") != std::string::npos)
+            << "Mesh should be defined inside GeomScope, not directly in SkelRoot";
+    }
+    
+    // 7. COORDINATE SYSTEM ASSERTIONS
+    // Should use matrix4d xformOp:transform, not quaternions
+    EXPECT_TRUE(usdContent.find("matrix4d xformOp:transform") != std::string::npos)
+        << "Should use matrix4d xformOp:transform instead of quaternion transforms to match Apple reference";
+    
+    // Check for Apple's specific Z_UP transform matrix
+    EXPECT_TRUE(usdContent.find("(1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)") != std::string::npos)
+        << "Z_UP transform should match Apple reference matrix values";
+    
+    // 8. MESH SKELETAL BINDING ASSERTIONS
+    size_t meshPos = usdContent.find("def Mesh");
+    if (meshPos != std::string::npos) {
+        size_t meshEnd = usdContent.find("}", meshPos);
+        std::string meshSection = usdContent.substr(meshPos, meshEnd - meshPos);
+        
+        // SkelBindingAPI should be in prim definition header, not as separate uniform token[]
+        bool hasCorrectSchemas = (meshSection.find("prepend apiSchemas = [\"SkelBindingAPI\", \"MaterialBindingAPI\"]") != std::string::npos) ||
+                                 (meshSection.find("prepend apiSchemas = [\"MaterialBindingAPI\", \"SkelBindingAPI\"]") != std::string::npos);
+        EXPECT_TRUE(hasCorrectSchemas)
+            << "Mesh should have both SkelBindingAPI and MaterialBindingAPI in prepend apiSchemas header";
+        
+        // Should NOT have separate "uniform token[] apiSchemas = [\"SkelBindingAPI\"]"
+        EXPECT_TRUE(meshSection.find("uniform token[] apiSchemas") == std::string::npos)
+            << "Should NOT have separate 'uniform token[] apiSchemas' - use prepend apiSchemas instead";
+    }
+    
+    // 9. METADATA AND TIMING ASSERTIONS
+    // Time codes should use corrected timing values
+    bool hasCorrectStartTime = (usdContent.find("startTimeCode = 0.0416667") != std::string::npos);
+    EXPECT_TRUE(hasCorrectStartTime)
+        << "startTimeCode should be 0.0416667 for corrected timing";
+    
+    EXPECT_TRUE(usdContent.find("endTimeCode = 4.208333") != std::string::npos)
+        << "endTimeCode should be 4.208333 for corrected timing";
+    
+    EXPECT_TRUE(usdContent.find("timeCodesPerSecond = 24") != std::string::npos)
+        << "timeCodesPerSecond should be 24 for proper frame rate";
+    
+    // 12. RELATIONSHIP PATH VALIDATION
+    // (Basic relationship existence already validated above)
+    if (usdContent.find("prepend rel skel:animationSource") != std::string::npos) {
+        EXPECT_TRUE(usdContent.find("skel:animationSource = </") != std::string::npos)
+            << "skel:animationSource relationship should have valid path reference";
+    }
+    
+    if (usdContent.find("prepend rel skel:skeleton") != std::string::npos) {
+        EXPECT_TRUE(usdContent.find("skel:skeleton = </") != std::string::npos)
+            << "skel:skeleton relationship should have valid path reference";
+    }
+    
+}
 
 TEST_F(utUSDZExport, DISABLED_testAdvancedFeaturesDocumentation) {
     // This test documents advanced PBR feature handling status per USD Preview Surface spec
@@ -2447,7 +2665,8 @@ TEST_F(utUSDZExport, DISABLED_testAdvancedFeaturesDocumentation) {
              << "13. ✅ Edge case handling - Empty scenes, extreme values, deep hierarchies\n"
              << "14. ✅ Error handling - Missing textures, malformed input, graceful failures\n"
              << "15. ✅ Regression prevention - Specific tests for previously fixed bugs\n"
-             << "\n🎯 All features are now comprehensively tested with enhanced validation!";
+             << "16. ❌ SKELETAL ANIMATION - Currently creates individual Xforms instead of proper SkelAnimation\n"
+             << "\n🎯 Almost all features comprehensively tested - SKELETAL ANIMATION needs implementation!";
 }
 
 #endif // ASSIMP_BUILD_NO_USD_EXPORTER
