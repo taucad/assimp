@@ -2646,27 +2646,83 @@ TEST_F(utUSDZExport, validateSkeletalAnimationStructure) {
     
 }
 
-TEST_F(utUSDZExport, DISABLED_testAdvancedFeaturesDocumentation) {
-    // This test documents advanced PBR feature handling status per USD Preview Surface spec
+// =============================================================================
+// Additional round-trip tests for USDZ format coverage
+// =============================================================================
+
+TEST_F(utUSDZExport, importGltfSimpleSkinExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/simple_skin/simple_skin.gltf",
+        "usd/skinning/SimpleSkin_out.usdz",
+        "usdz"));
+}
+
+TEST_F(utUSDZExport, importGltfQuadSkinExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/simple_skin/quad_skin.glb",
+        "usd/skinning/QuadSkin_out.usdz",
+        "usdz"));
+}
+
+TEST_F(utUSDZExport, importGltfCamerasExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/cameras/Cameras.gltf",
+        "usd/cameras/Cameras_out.usdz",
+        "usdz"));
+}
+
+TEST_F(utUSDZExport, importGltfAnimatedMorphCubeExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/AnimatedMorphCube/glTF/AnimatedMorphCube.gltf",
+        "usd/blendshapes/AnimatedMorphCube_out.usdz",
+        "usdz"));
+}
+
+TEST_F(utUSDZExport, importGltfCesiumManExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/CesiumMan/CesiumMan.glb",
+        "usd/animation/CesiumMan_out.usdz",
+        "usdz"));
+}
+
+TEST_F(utUSDZExport, importGltf2CylinderEngineExportUsda) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/2CylinderEngine-glTF-Binary/2CylinderEngine.glb",
+        "usd/complex/2CylinderEngine_out.usda",
+        "usda"));
+}
+
+TEST_F(utUSDZExport, importGltf2CylinderEngineExportUsdz) {
+    EXPECT_TRUE(performRoundTripTest(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/2CylinderEngine-glTF-Binary/2CylinderEngine.glb",
+        "usd/complex/2CylinderEngine_out.usdz",
+        "usdz"));
+}
+
+// Validate animation fidelity in round-trip
+TEST_F(utUSDZExport, validateAnimationFidelityRoundTrip) {
+    const std::string inputPath = ASSIMP_TEST_MODELS_DIR "/glTF2/AnimatedMorphCube/glTF/AnimatedMorphCube.gltf";
+    const std::string outputPath = "usd/animation/AnimatedMorphCube_fidelity.usda";
     
-    SUCCEED() << "✅ Advanced PBR feature implementation status:\n"
-             << "1. ✅ Displacement/Height maps - Properly rejected (not in USD Preview Surface spec)\n"
-             << "2. ✅ Sheen textures - Properly warned and skipped (not in USD Preview Surface spec)\n"  
-             << "3. ✅ Transmission textures - Properly warned and skipped (not in USD Preview Surface spec)\n"
-             << "4. ✅ Anisotropy textures - Properly warned and skipped (not in USD Preview Surface spec)\n"
-             << "5. ✅ Volume textures - Properly warned and skipped (not in USD Preview Surface spec)\n"
-             << "6. ✅ IOR support - Implemented for constant IOR values per USD spec\n"
-             << "7. ✅ Maya-specific textures - Implemented with proper fallback mapping\n"
-             << "8. ✅ Packed metallic-roughness - Fully implemented with channel routing\n"
-             << "9. ✅ Opacity modes - USD 2.6 transparent/presence modes implemented\n"
-             << "10. ✅ Texture fallbacks - Comprehensive fallback chain implementation\n"
-             << "11. ✅ Material factors - Full validation for metallic, roughness, base color\n"
-             << "12. ✅ USD 2.6 spec compliance - Only valid properties written to USD files\n"
-             << "13. ✅ Edge case handling - Empty scenes, extreme values, deep hierarchies\n"
-             << "14. ✅ Error handling - Missing textures, malformed input, graceful failures\n"
-             << "15. ✅ Regression prevention - Specific tests for previously fixed bugs\n"
-             << "16. ❌ SKELETAL ANIMATION - Currently creates individual Xforms instead of proper SkelAnimation\n"
-             << "\n🎯 Almost all features comprehensively tested - SKELETAL ANIMATION needs implementation!";
+    Assimp::Importer importer;
+    const aiScene* originalScene = importer.ReadFile(inputPath,
+        aiProcess_Triangulate | aiProcess_GenUVCoords | aiProcess_JoinIdenticalVertices);
+    ASSERT_NE(nullptr, originalScene);
+    
+    Assimp::Exporter exporter;
+    aiReturn result = exporter.Export(originalScene, "usda", outputPath, 0u);
+    EXPECT_EQ(aiReturn_SUCCESS, result);
+    
+    Assimp::Importer reimporter;
+    const aiScene* reimported = reimporter.ReadFile(outputPath,
+        aiProcess_Triangulate | aiProcess_GenUVCoords | aiProcess_JoinIdenticalVertices);
+    ASSERT_NE(nullptr, reimported);
+    
+    // Validate mesh count preserved
+    EXPECT_EQ(originalScene->mNumMeshes, reimported->mNumMeshes);
+    
+    // Validate material count preserved
+    EXPECT_EQ(originalScene->mNumMaterials, reimported->mNumMaterials);
 }
 
 #endif // ASSIMP_BUILD_NO_USD_EXPORTER
