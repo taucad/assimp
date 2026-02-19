@@ -1493,6 +1493,11 @@ std::unordered_map<unsigned int, AnimationSamplers> GatherSamplers(Animation &an
             continue;
         }
 
+        // Skip KHR_animation_pointer channels - they target properties, not node transforms
+        if (channel.target.path == AnimationPath_POINTER) {
+            continue;
+        }
+
         const unsigned int node_index = channel.target.node.GetIndex();
 
         AnimationSamplers &sampler = samplers[node_index];
@@ -1614,6 +1619,150 @@ void glTF2Importer::ImportAnimations(glTF2::Asset &r) {
 
         ai_anim->mDuration = maxDuration;
         ai_anim->mTicksPerSecond = 1000.0;
+
+        // Process KHR_animation_pointer channels
+        std::vector<aiPropertyAnim*> propertyAnims;
+        for (unsigned int c = 0; c < anim.channels.size(); ++c) {
+            Animation::Channel &channel = anim.channels[c];
+            if (channel.target.path != AnimationPath_POINTER) continue;
+            if (channel.target.pointerPath.empty()) continue;
+            if (channel.sampler < 0 || channel.sampler >= static_cast<int>(anim.samplers.size())) continue;
+
+            auto &animsampler = anim.samplers[channel.sampler];
+            if (!animsampler.input || !animsampler.output) continue;
+
+            const std::string &ptr = channel.target.pointerPath;
+
+            aiPropertyAnim *propAnim = new aiPropertyAnim();
+            propAnim->mTargetPath.Set(ptr.c_str());
+
+            // Parse pointer path to determine target type and index
+            if (ptr.find("/materials/") == 0) {
+                unsigned int matIdx = 0;
+                if (sscanf(ptr.c_str(), "/materials/%u", &matIdx) == 1) {
+                    propAnim->mTargetIndex = matIdx;
+                }
+                if (ptr.find("baseColorFactor") != std::string::npos) {
+                    propAnim->mTargetType = aiPropertyAnimTarget_MATERIAL_COLOR;
+                    propAnim->mTargetProperty.Set("baseColorFactor");
+                } else if (ptr.find("emissiveFactor") != std::string::npos) {
+                    propAnim->mTargetType = aiPropertyAnimTarget_MATERIAL_COLOR;
+                    propAnim->mTargetProperty.Set("emissiveFactor");
+                } else if (ptr.find("metallicFactor") != std::string::npos || ptr.find("roughnessFactor") != std::string::npos || ptr.find("alphaCutoff") != std::string::npos) {
+                    propAnim->mTargetType = aiPropertyAnimTarget_MATERIAL_SCALAR;
+                    size_t lastSlash = ptr.rfind('/');
+                    if (lastSlash != std::string::npos) {
+                        propAnim->mTargetProperty.Set(ptr.substr(lastSlash + 1).c_str());
+                    }
+                } else if (ptr.find("KHR_texture_transform") != std::string::npos) {
+                    propAnim->mTargetType = aiPropertyAnimTarget_TEXTURE_TRANSFORM;
+                    size_t lastSlash = ptr.rfind('/');
+                    if (lastSlash != std::string::npos) {
+                        propAnim->mTargetProperty.Set(ptr.substr(lastSlash + 1).c_str());
+                    }
+                } else {
+                    propAnim->mTargetType = aiPropertyAnimTarget_MATERIAL_SCALAR;
+                    size_t lastSlash = ptr.rfind('/');
+                    if (lastSlash != std::string::npos) {
+                        propAnim->mTargetProperty.Set(ptr.substr(lastSlash + 1).c_str());
+                    }
+                }
+            } else if (ptr.find("/nodes/") == 0) {
+                unsigned int nodeIdx = 0;
+                if (sscanf(ptr.c_str(), "/nodes/%u", &nodeIdx) == 1) {
+                    propAnim->mTargetIndex = nodeIdx;
+                }
+                if (ptr.find("visible") != std::string::npos) {
+                    propAnim->mTargetType = aiPropertyAnimTarget_VISIBILITY;
+                    propAnim->mTargetProperty.Set("visible");
+                } else {
+                    delete propAnim;
+                    continue;
+                }
+            } else {
+                delete propAnim;
+                continue;
+            }
+
+            // Extract keyframe times
+            float *times = nullptr;
+            animsampler.input->ExtractData(times);
+
+            unsigned int numKeys = static_cast<unsigned int>(animsampler.input->count);
+            unsigned int numComponents = animsampler.output->GetNumComponents();
+            unsigned int stride = (animsampler.interpolation == Interpolation_CUBICSPLINE) ? 3 : 1;
+            unsigned int valueOffset = (animsampler.interpolation == Interpolation_CUBICSPLINE) ? 1 : 0;
+
+            // Read output values with proper type conversion
+            uint8_t *rawData = animsampler.output->GetPointer();
+            size_t rawStride = animsampler.output->GetStride();
+            unsigned int compType = animsampler.output->componentType;
+            size_t totalElements = animsampler.output->count;
+
+            // Convert raw accessor data to float array
+            std::vector<float> floatValues(totalElements * numComponents);
+            for (size_t e = 0; e < totalElements; ++e) {
+                uint8_t *elem = rawData + e * rawStride;
+                for (unsigned int comp = 0; comp < numComponents; ++comp) {
+                    float val = 0.0f;
+                    switch (compType) {
+                    case ComponentType_FLOAT:
+                        val = *reinterpret_cast<float*>(elem + comp * 4);
+                        break;
+                    case ComponentType_UNSIGNED_BYTE:
+                        val = static_cast<float>(*(elem + comp));
+                        break;
+                    case ComponentType_BYTE:
+                        val = static_cast<float>(*reinterpret_cast<int8_t*>(elem + comp));
+                        break;
+                    case ComponentType_UNSIGNED_SHORT:
+                        val = static_cast<float>(*reinterpret_cast<uint16_t*>(elem + comp * 2));
+                        break;
+                    case ComponentType_SHORT:
+                        val = static_cast<float>(*reinterpret_cast<int16_t*>(elem + comp * 2));
+                        break;
+                    case ComponentType_UNSIGNED_INT:
+                        val = static_cast<float>(*reinterpret_cast<uint32_t*>(elem + comp * 4));
+                        break;
+                    }
+                    floatValues[e * numComponents + comp] = val;
+                }
+            }
+
+            propAnim->mNumKeys = numKeys;
+            propAnim->mKeys = new aiPropertyAnimKey[numKeys];
+
+            for (unsigned int k = 0; k < numKeys; ++k) {
+                propAnim->mKeys[k].mTime = static_cast<double>(times[k]) * 1000.0;
+                propAnim->mKeys[k].mNumValues = numComponents;
+                unsigned int idx = k * stride + valueOffset;
+                if (idx < totalElements) {
+                    for (unsigned int comp = 0; comp < numComponents && comp < 4; ++comp) {
+                        propAnim->mKeys[k].mValues[comp] = floatValues[idx * numComponents + comp];
+                    }
+                }
+                for (unsigned int comp = numComponents; comp < 4; ++comp) {
+                    propAnim->mKeys[k].mValues[comp] = 0.0f;
+                }
+
+                if (propAnim->mKeys[k].mTime > maxDuration) {
+                    maxDuration = propAnim->mKeys[k].mTime;
+                }
+            }
+
+            delete[] times;
+
+            propertyAnims.push_back(propAnim);
+        }
+
+        if (!propertyAnims.empty()) {
+            ai_anim->mNumPropertyChannels = static_cast<unsigned int>(propertyAnims.size());
+            ai_anim->mPropertyChannels = new aiPropertyAnim*[ai_anim->mNumPropertyChannels];
+            for (unsigned int j = 0; j < ai_anim->mNumPropertyChannels; ++j) {
+                ai_anim->mPropertyChannels[j] = propertyAnims[j];
+            }
+            ai_anim->mDuration = maxDuration;
+        }
     }
 }
 

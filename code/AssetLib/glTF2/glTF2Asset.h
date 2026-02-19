@@ -273,6 +273,7 @@ enum AnimationPath {
     AnimationPath_ROTATION,
     AnimationPath_SCALE,
     AnimationPath_WEIGHTS,
+    AnimationPath_POINTER,
 };
 
 //! Values for the Animation::Sampler::interpolation field
@@ -1016,6 +1017,7 @@ struct Animation : public Object {
 
         Ref<Node> node; //!< The node to animate.
         AnimationPath path; //!< The property of the node to animate.
+        std::string pointerPath; //!< JSON pointer for KHR_animation_pointer (e.g., "/materials/0/pbrMetallicRoughness/baseColorFactor")
     };
 
     struct Channel {
@@ -1148,6 +1150,7 @@ public:
         bool KHR_materials_emissive_strength;
         bool KHR_materials_anisotropy;
         bool KHR_draco_mesh_compression;
+        bool KHR_animation_pointer;
         bool FB_ngon_encoding;
         bool KHR_texture_basisu;
 
@@ -1165,6 +1168,7 @@ public:
                 KHR_materials_emissive_strength(false),
                 KHR_materials_anisotropy(false),
                 KHR_draco_mesh_compression(false),
+                KHR_animation_pointer(false),
                 FB_ngon_encoding(false),
                 KHR_texture_basisu(false) {
             // empty

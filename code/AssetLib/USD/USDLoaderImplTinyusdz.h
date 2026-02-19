@@ -67,7 +67,8 @@ public:
 
     void animations(
             const tinyusdz::tydra::RenderScene &render_scene,
-            aiScene *pScene);
+            aiScene *pScene,
+            const tinyusdz::Stage &stage);
 
     void meshes(
             const tinyusdz::tydra::RenderScene &render_scene,

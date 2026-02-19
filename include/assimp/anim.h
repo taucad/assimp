@@ -419,6 +419,49 @@ struct aiMeshMorphAnim {
 };
 
 // ---------------------------------------------------------------------------
+/** Target type for property animations (KHR_animation_pointer) */
+enum aiPropertyAnimTargetType {
+    aiPropertyAnimTarget_MATERIAL_COLOR = 0,
+    aiPropertyAnimTarget_MATERIAL_SCALAR = 1,
+    aiPropertyAnimTarget_TEXTURE_TRANSFORM = 2,
+    aiPropertyAnimTarget_VISIBILITY = 3,
+};
+
+// ---------------------------------------------------------------------------
+/** A key in a property animation (time + up to 4 float values) */
+struct aiPropertyAnimKey {
+    double mTime;
+    float mValues[4];
+    unsigned int mNumValues;
+};
+
+// ---------------------------------------------------------------------------
+/** Describes a property animation channel targeting material/visibility/etc.
+ *  Populated from KHR_animation_pointer extension data. */
+struct aiPropertyAnim {
+    C_STRUCT aiString mName;
+    C_STRUCT aiString mTargetPath;
+    enum aiPropertyAnimTargetType mTargetType;
+    unsigned int mTargetIndex;
+    C_STRUCT aiString mTargetProperty;
+    unsigned int mNumKeys;
+    C_STRUCT aiPropertyAnimKey *mKeys;
+
+#ifdef __cplusplus
+    aiPropertyAnim() AI_NO_EXCEPT
+            : mTargetType(aiPropertyAnimTarget_MATERIAL_COLOR),
+              mTargetIndex(0),
+              mNumKeys(0),
+              mKeys(nullptr) {
+    }
+
+    ~aiPropertyAnim() {
+        delete[] mKeys;
+    }
+#endif // __cplusplus
+};
+
+// ---------------------------------------------------------------------------
 /** An animation consists of key-frame data for a number of nodes. For
  *  each node affected by the animation a separate series of data is given.*/
 struct aiAnimation {
@@ -457,6 +500,14 @@ struct aiAnimation {
      *  The array is mNumMorphMeshChannels in size. */
     C_STRUCT aiMeshMorphAnim **mMorphMeshChannels;
 
+    /** The number of property animation channels (KHR_animation_pointer).
+     *  Each channel targets a material property, visibility, or texture transform. */
+    unsigned int mNumPropertyChannels;
+
+    /** The property animation channels. Each channel targets a specific property.
+     *  The array is mNumPropertyChannels in size. */
+    C_STRUCT aiPropertyAnim **mPropertyChannels;
+
 #ifdef __cplusplus
     aiAnimation() AI_NO_EXCEPT
             : mDuration(-1.),
@@ -466,7 +517,9 @@ struct aiAnimation {
               mNumMeshChannels(0),
               mMeshChannels(nullptr),
               mNumMorphMeshChannels(0),
-              mMorphMeshChannels(nullptr) {
+              mMorphMeshChannels(nullptr),
+              mNumPropertyChannels(0),
+              mPropertyChannels(nullptr) {
         // empty
     }
 
@@ -492,6 +545,13 @@ struct aiAnimation {
             }
 
             delete[] mMorphMeshChannels;
+        }
+        if (mNumPropertyChannels && mPropertyChannels) {
+            for (unsigned int a = 0; a < mNumPropertyChannels; a++) {
+                delete mPropertyChannels[a];
+            }
+
+            delete[] mPropertyChannels;
         }
     }
 #endif // __cplusplus

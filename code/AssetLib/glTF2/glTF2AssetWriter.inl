@@ -181,6 +181,9 @@ namespace glTF2 {
                         case AnimationPath_WEIGHTS:
                             valTarget.AddMember("path", "weights", w.mAl);
                             break;
+                        case AnimationPath_POINTER:
+                            valTarget.AddMember("path", "pointer", w.mAl);
+                            break;
                     }
                 }
                 valChannel.AddMember("target", valTarget, w.mAl);

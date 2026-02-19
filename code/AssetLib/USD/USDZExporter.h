@@ -422,6 +422,13 @@ private:
     void ConvertSkinningToMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     void ConvertBlendShapes(const aiMesh* mesh);
     
+    // Prim hierarchy search helpers
+    tinyusdz::Prim* FindPrimByName(const std::string& name);
+    tinyusdz::Prim* FindPrimByNameRecursive(tinyusdz::Prim& prim, const std::string& name);
+    
+    // Property animation export (KHR_animation_pointer)
+    void ExportPropertyAnimations(const aiAnimation* anim);
+    
     // Hierarchical joint path helpers
     struct JointPathMapping {
         std::vector<std::string> skeletonJoints;    // All joints in hierarchy order
@@ -487,7 +494,13 @@ private:
     // Shared texture processing template for eliminating code duplication
     template<typename TextureHandler>
     uint32_t ProcessEmbeddedTextures(TextureHandler handler, const std::string& pathPrefix = "");
+    
+    // External texture tracking for USDZ packaging
+    std::map<std::string, std::string> mExternalTexturePaths; // USD path -> original file path
 
+    // Stage cleanup
+    void DeduplicateSiblingPrimNames();
+    
     // Error handling
     void ReportError(const std::string& message);
     void ReportWarning(const std::string& message);
@@ -519,8 +532,17 @@ private:
     
     // Helper functions for proper hierarchy placement
     tinyusdz::Prim* FindMainScenePrim();
-    tinyusdz::Prim* FindArmaturePrim();
+    tinyusdz::Prim* FindSkeletonParentPrim();
     tinyusdz::Prim* FindGeomScopeInSkelRoot();
+    std::string ComputePrimPath(const tinyusdz::Prim* target);
+    
+    // Skeleton hierarchy state (computed during ExportSkeletons, reused elsewhere)
+    tinyusdz::Prim* mSkeletonParentPrim = nullptr;
+    std::string mSkelRootName;
+    std::string mSkeletonParentPrimPath;
+    std::string mSkelRootPrimPath;
+    std::string mSkeletonPrimPath;
+    std::string mAnimationPrimPath;
 
     // Export control flags
     bool mExportAnimations;

@@ -71,6 +71,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "io-util.hh" // namespace tinyusdz::io
 #include "tydra/scene-access.hh"
 #include "tydra/shader-network.hh"
+#include "usdSkel.hh"
+#include "stage.hh"
 #include "USDLoaderImplTinyusdzHelper.h"
 #include "USDLoaderImplTinyusdz.h"
 #include "USDLoaderUtil.h"
@@ -226,7 +228,7 @@ void USDImporterImplTinyusdz::InternReadFile(
     }
 
     // sanityCheckNodesRecursive(pScene->mRootNode);
-    animations(render_scene, pScene);
+    animations(render_scene, pScene, stage);
     meshes(render_scene, pScene, nameWExt);
     materials(render_scene, pScene, nameWExt);
     textures(render_scene, pScene, nameWExt);
@@ -246,42 +248,232 @@ void USDImporterImplTinyusdz::InternReadFile(
 }
 void USDImporterImplTinyusdz::animations(
     const tinyusdz::tydra::RenderScene& render_scene,
-    aiScene* pScene) {
+    aiScene* pScene,
+    const tinyusdz::Stage& stage) {
     
     if (render_scene.animations.empty()) {
-        // RenderSceneConverter doesn't extract SkelAnimation prims (used for morph animations)
-        // Create a minimal stub animation to satisfy tests until full SkelAnimation parsing is implemented
+        // Tydra RenderSceneConverter doesn't extract SkelAnimation prims.
+        // Parse them directly from the Stage (same approach as cameras/lights).
+        std::vector<const tinyusdz::SkelAnimation*> skelAnims;
+        std::function<void(const std::vector<tinyusdz::Prim>&)> findSkelAnims =
+            [&](const std::vector<tinyusdz::Prim>& prims) {
+            for (const auto& prim : prims) {
+                if (prim.is<tinyusdz::SkelAnimation>()) {
+                    const auto* sa = prim.as<tinyusdz::SkelAnimation>();
+                    if (sa) skelAnims.push_back(sa);
+                }
+                findSkelAnims(prim.children());
+            }
+        };
+        findSkelAnims(stage.root_prims());
         
-        // Create stub animation since RenderScene has no animations 
-        // but we know from export that SkelAnimation prims should be present
-        pScene->mNumAnimations = 1;
-        pScene->mAnimations = new aiAnimation*[1];
+        if (skelAnims.empty()) {
+            pScene->mNumAnimations = 0;
+            pScene->mAnimations = nullptr;
+            return;
+        }
         
-        auto stubAnimation = new aiAnimation();
-        stubAnimation->mName = "SkelAnimation_Stub";
-        stubAnimation->mDuration = 4.2; // Match the USD file duration
-        stubAnimation->mTicksPerSecond = 24.0;
+        pScene->mNumAnimations = static_cast<unsigned>(skelAnims.size());
+        pScene->mAnimations = new aiAnimation*[pScene->mNumAnimations];
         
-        // Add a minimal dummy channel to satisfy validation
-        stubAnimation->mNumChannels = 1;
-        stubAnimation->mChannels = new aiNodeAnim*[1];
+        double stageTimeCodesPerSecond = stage.metas().timeCodesPerSecond.get_value();
+        if (stageTimeCodesPerSecond <= 0.0) stageTimeCodesPerSecond = 24.0;
         
-        auto dummyChannel = new aiNodeAnim();
-        dummyChannel->mNodeName = "DummyNode"; 
-        dummyChannel->mNumPositionKeys = 1;
-        dummyChannel->mPositionKeys = new aiVectorKey[1];
-        dummyChannel->mPositionKeys[0].mTime = 0.0;
-        dummyChannel->mPositionKeys[0].mValue = aiVector3D(0, 0, 0);
-        dummyChannel->mNumRotationKeys = 0;
-        dummyChannel->mRotationKeys = nullptr;
-        dummyChannel->mNumScalingKeys = 0;  
-        dummyChannel->mScalingKeys = nullptr;
-        
-        stubAnimation->mChannels[0] = dummyChannel;
-        stubAnimation->mNumMorphMeshChannels = 0; // TODO: Parse SkelAnimation prims 
-        stubAnimation->mMorphMeshChannels = nullptr;
-        
-        pScene->mAnimations[0] = stubAnimation;
+        for (size_t animIdx = 0; animIdx < skelAnims.size(); ++animIdx) {
+            const auto* skelAnim = skelAnims[animIdx];
+            auto* newAnim = new aiAnimation();
+            pScene->mAnimations[animIdx] = newAnim;
+            
+            newAnim->mName = skelAnim->name;
+            newAnim->mTicksPerSecond = stageTimeCodesPerSecond;
+            
+            // Get joint names from the joints attribute directly (const-safe)
+            std::vector<tinyusdz::value::token> jointTokens;
+            if (skelAnim->joints.has_value()) {
+                auto optJoints = skelAnim->joints.get_value();
+                if (optJoints) {
+                    jointTokens = *optJoints;
+                }
+            }
+            
+            // Determine time range from rotation/translation/scale samples
+            double minTime = 1e18, maxTime = -1e18;
+            bool hasTimeSamples = false;
+            
+            // Check rotations for time samples
+            const auto& rotAttr = skelAnim->rotations;
+            auto rotOpt = rotAttr.get_value();
+            if (rotOpt && rotOpt->has_timesamples()) {
+                const auto& samples = rotOpt->get_timesamples().get_samples();
+                for (const auto& s : samples) {
+                    if (s.t < minTime) minTime = s.t;
+                    if (s.t > maxTime) maxTime = s.t;
+                    hasTimeSamples = true;
+                }
+            }
+            // Check translations
+            const auto& transAttr = skelAnim->translations;
+            auto transOpt = transAttr.get_value();
+            if (transOpt && transOpt->has_timesamples()) {
+                const auto& samples = transOpt->get_timesamples().get_samples();
+                for (const auto& s : samples) {
+                    if (s.t < minTime) minTime = s.t;
+                    if (s.t > maxTime) maxTime = s.t;
+                    hasTimeSamples = true;
+                }
+            }
+            
+            if (!hasTimeSamples) {
+                minTime = 0.0;
+                maxTime = 0.0;
+            }
+            newAnim->mDuration = maxTime - minTime;
+            
+            // Create a channel for each joint
+            uint32_t numJoints = static_cast<uint32_t>(jointTokens.size());
+            newAnim->mNumChannels = numJoints;
+            newAnim->mChannels = numJoints > 0 ? new aiNodeAnim*[numJoints] : nullptr;
+            
+            // Collect time samples for each animation type
+            std::vector<double> rotTimes, transTimes, scaleTimes;
+            std::vector<std::vector<tinyusdz::value::quatf>> rotValues;
+            std::vector<std::vector<tinyusdz::value::float3>> transValues;
+            std::vector<std::vector<tinyusdz::value::half3>> scaleValues;
+            
+            if (rotOpt && rotOpt->has_timesamples()) {
+                for (const auto& s : rotOpt->get_timesamples().get_samples()) {
+                    if (!s.blocked) {
+                        rotTimes.push_back(s.t);
+                        rotValues.push_back(s.value);
+                    }
+                }
+            }
+            if (transOpt && transOpt->has_timesamples()) {
+                for (const auto& s : transOpt->get_timesamples().get_samples()) {
+                    if (!s.blocked) {
+                        transTimes.push_back(s.t);
+                        transValues.push_back(s.value);
+                    }
+                }
+            }
+            const auto& scaleAttr = skelAnim->scales;
+            auto scaleOpt = scaleAttr.get_value();
+            if (scaleOpt && scaleOpt->has_timesamples()) {
+                for (const auto& s : scaleOpt->get_timesamples().get_samples()) {
+                    if (!s.blocked) {
+                        scaleTimes.push_back(s.t);
+                        scaleValues.push_back(s.value);
+                    }
+                }
+            }
+            
+            for (uint32_t j = 0; j < numJoints; ++j) {
+                auto* chan = new aiNodeAnim();
+                newAnim->mChannels[j] = chan;
+                
+                // Extract joint name from path (last component)
+                std::string jointPath = jointTokens[j].str();
+                std::string jointName = jointPath;
+                size_t lastSlash = jointPath.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    jointName = jointPath.substr(lastSlash + 1);
+                }
+                chan->mNodeName = jointName;
+                
+                // Rotation keys
+                chan->mNumRotationKeys = static_cast<uint32_t>(rotTimes.size());
+                if (chan->mNumRotationKeys > 0) {
+                    chan->mRotationKeys = new aiQuatKey[chan->mNumRotationKeys];
+                    for (uint32_t k = 0; k < chan->mNumRotationKeys; ++k) {
+                        chan->mRotationKeys[k].mTime = rotTimes[k] - minTime;
+                        if (j < rotValues[k].size()) {
+                            const auto& q = rotValues[k][j];
+                            chan->mRotationKeys[k].mValue = aiQuaternion(q.real, q.imag[0], q.imag[1], q.imag[2]);
+                        } else {
+                            chan->mRotationKeys[k].mValue = aiQuaternion(1, 0, 0, 0);
+                        }
+                    }
+                } else {
+                    chan->mRotationKeys = nullptr;
+                }
+                
+                // Position keys
+                chan->mNumPositionKeys = static_cast<uint32_t>(transTimes.size());
+                if (chan->mNumPositionKeys > 0) {
+                    chan->mPositionKeys = new aiVectorKey[chan->mNumPositionKeys];
+                    for (uint32_t k = 0; k < chan->mNumPositionKeys; ++k) {
+                        chan->mPositionKeys[k].mTime = transTimes[k] - minTime;
+                        if (j < transValues[k].size()) {
+                            const auto& v = transValues[k][j];
+                            chan->mPositionKeys[k].mValue = aiVector3D(v[0], v[1], v[2]);
+                        } else {
+                            chan->mPositionKeys[k].mValue = aiVector3D(0, 0, 0);
+                        }
+                    }
+                } else {
+                    chan->mPositionKeys = nullptr;
+                }
+                
+                // Scale keys
+                chan->mNumScalingKeys = static_cast<uint32_t>(scaleTimes.size());
+                if (chan->mNumScalingKeys > 0) {
+                    chan->mScalingKeys = new aiVectorKey[chan->mNumScalingKeys];
+                    for (uint32_t k = 0; k < chan->mNumScalingKeys; ++k) {
+                        chan->mScalingKeys[k].mTime = scaleTimes[k] - minTime;
+                        if (j < scaleValues[k].size()) {
+                            const auto& s = scaleValues[k][j];
+                            float sx = tinyusdz::value::half_to_float(s[0]);
+                            float sy = tinyusdz::value::half_to_float(s[1]);
+                            float sz = tinyusdz::value::half_to_float(s[2]);
+                            chan->mScalingKeys[k].mValue = aiVector3D(sx, sy, sz);
+                        } else {
+                            chan->mScalingKeys[k].mValue = aiVector3D(1, 1, 1);
+                        }
+                    }
+                } else {
+                    chan->mScalingKeys = nullptr;
+                }
+            }
+            
+            // Handle blend shape weight animations
+            std::vector<tinyusdz::value::token> bsTokens;
+            if (skelAnim->blendShapes.has_value()) {
+                auto optBS = skelAnim->blendShapes.get_value();
+                if (optBS) bsTokens = *optBS;
+            }
+            
+            const auto& bsWeightsAttr = skelAnim->blendShapeWeights;
+            auto bsWeightsOpt = bsWeightsAttr.get_value();
+            if (!bsTokens.empty() && bsWeightsOpt && bsWeightsOpt->has_timesamples()) {
+                const auto& bsSamples = bsWeightsOpt->get_timesamples().get_samples();
+                
+                newAnim->mNumMorphMeshChannels = static_cast<uint32_t>(bsTokens.size());
+                newAnim->mMorphMeshChannels = new aiMeshMorphAnim*[newAnim->mNumMorphMeshChannels];
+                
+                for (uint32_t bs = 0; bs < newAnim->mNumMorphMeshChannels; ++bs) {
+                    auto* morphChan = new aiMeshMorphAnim();
+                    newAnim->mMorphMeshChannels[bs] = morphChan;
+                    morphChan->mName = bsTokens[bs].str();
+                    
+                    morphChan->mNumKeys = static_cast<uint32_t>(bsSamples.size());
+                    morphChan->mKeys = new aiMeshMorphKey[morphChan->mNumKeys];
+                    
+                    for (uint32_t k = 0; k < morphChan->mNumKeys; ++k) {
+                        auto& key = morphChan->mKeys[k];
+                        key.mTime = bsSamples[k].t - minTime;
+                        key.mNumValuesAndWeights = 1;
+                        key.mValues = new unsigned int[1];
+                        key.mWeights = new double[1];
+                        key.mValues[0] = bs;
+                        key.mWeights[0] = (bs < bsSamples[k].value.size()) ? 
+                            static_cast<double>(bsSamples[k].value[bs]) : 0.0;
+                    }
+                }
+            } else {
+                newAnim->mNumMorphMeshChannels = 0;
+                newAnim->mMorphMeshChannels = nullptr;
+            }
+        }
         return;
     }
 

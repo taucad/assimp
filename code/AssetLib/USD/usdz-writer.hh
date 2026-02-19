@@ -36,6 +36,11 @@ bool SaveAsUSDZWithTextures(const std::string &filename, const std::string &usdC
                             const std::map<std::string, std::vector<uint8_t>> &textureDataMap,
                             std::string *warn, std::string *err);
 
+bool SaveAsUSDZToMemory(const std::string &usdContent,
+                        const std::map<std::string, std::vector<uint8_t>> &textureDataMap,
+                        std::vector<uint8_t> &outData,
+                        std::string *warn, std::string *err);
+
 #if defined(_WIN32)
 // WideChar(UNICODE) filename version.
 bool SaveAsUSDZ(const std::wstring &filename, const Stage &stage, std::string *warn, std::string *err);

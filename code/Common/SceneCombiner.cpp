@@ -1222,6 +1222,26 @@ void SceneCombiner::Copy(aiAnimation **_dest, const aiAnimation *src) {
     // and reallocate all arrays
     CopyPtrArray(dest->mChannels, src->mChannels, dest->mNumChannels);
     CopyPtrArray(dest->mMorphMeshChannels, src->mMorphMeshChannels, dest->mNumMorphMeshChannels);
+
+    // Deep copy property animation channels
+    if (dest->mNumPropertyChannels && dest->mPropertyChannels) {
+        aiPropertyAnim **newArr = new aiPropertyAnim*[dest->mNumPropertyChannels];
+        for (unsigned int i = 0; i < dest->mNumPropertyChannels; ++i) {
+            newArr[i] = new aiPropertyAnim();
+            *newArr[i] = *src->mPropertyChannels[i];
+            if (newArr[i]->mNumKeys && src->mPropertyChannels[i]->mKeys) {
+                newArr[i]->mKeys = new aiPropertyAnimKey[newArr[i]->mNumKeys];
+                std::memcpy(newArr[i]->mKeys, src->mPropertyChannels[i]->mKeys,
+                           newArr[i]->mNumKeys * sizeof(aiPropertyAnimKey));
+            } else {
+                newArr[i]->mKeys = nullptr;
+            }
+        }
+        dest->mPropertyChannels = newArr;
+    } else {
+        dest->mPropertyChannels = nullptr;
+        dest->mNumPropertyChannels = 0;
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
