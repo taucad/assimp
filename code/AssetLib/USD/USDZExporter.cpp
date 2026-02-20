@@ -1560,15 +1560,45 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
         }
         skelAnim.blendShapes.set_value(blendShapeTokens);
         
-        // Generate proper time samples from scene animation data
-        tinyusdz::Animatable<std::vector<float>> animatedWeights;
+        // Read default weights from aiAnimMesh::mWeight (set by glTF importer from mesh.weights[])
+        std::vector<float> defaultWeights(blendShapeNames.size(), 0.0f);
+        if (mesh && mesh->mAnimMeshes) {
+            for (size_t i = 0; i < blendShapeNames.size() && i < mesh->mNumAnimMeshes; ++i) {
+                if (mesh->mAnimMeshes[i]) {
+                    defaultWeights[i] = mesh->mAnimMeshes[i]->mWeight;
+                }
+            }
+        }
         
-        // Use integer frame numbers (matching skeletal animation convention)
-        double frameRate = 24.0;
-        int totalFrames = 1;
-        
-        // Get actual animation duration from scene data and convert to frame count
+        // Check if any morph animation channel in the scene targets this mesh
+        bool hasMorphAnimation = false;
+        std::string origMeshName = mesh ? mesh->mName.C_Str() : "";
         if (mScene && mScene->mNumAnimations > 0) {
+            for (uint32_t animIdx = 0; animIdx < mScene->mNumAnimations && !hasMorphAnimation; ++animIdx) {
+                const aiAnimation* anim = mScene->mAnimations[animIdx];
+                for (uint32_t morphIdx = 0; morphIdx < anim->mNumMorphMeshChannels; ++morphIdx) {
+                    const aiMeshMorphAnim* morphAnim = anim->mMorphMeshChannels[morphIdx];
+                    std::string morphMeshName = morphAnim->mName.C_Str();
+                    bool nameMatches = morphMeshName.empty() || 
+                                     morphMeshName == origMeshName || 
+                                     morphMeshName == parentNodeOrigName ||
+                                     morphMeshName.find("node") != std::string::npos ||
+                                     morphMeshName.find(origMeshName) != std::string::npos ||
+                                     origMeshName.find(morphMeshName) != std::string::npos;
+                    if (nameMatches && morphAnim->mNumKeys > 0) {
+                        hasMorphAnimation = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (hasMorphAnimation) {
+            // Animated morph targets: generate time samples from scene animation data
+            tinyusdz::Animatable<std::vector<float>> animatedWeights;
+            double frameRate = 24.0;
+            int totalFrames = 1;
+            
             double maxDuration = 0.0;
             for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
                 const aiAnimation* anim = mScene->mAnimations[i];
@@ -1579,34 +1609,23 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
                 totalFrames = static_cast<int>(std::round(maxDuration * frameRate));
                 if (totalFrames < 1) totalFrames = 1;
             }
-        }
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Generating " + std::to_string(totalFrames) + 
-                        " time samples (frames 1-" + std::to_string(totalFrames) + ") at " + std::to_string(frameRate) + "fps");
-        
-        // Generate time samples using integer frame numbers (1, 2, 3, ...)
-        for (int frame = 0; frame < totalFrames; ++frame) {
-            double timeCode = frame + 1;  // Integer frame numbers: 1, 2, 3, ...
-            std::vector<float> frameWeights(blendShapeNames.size(), 0.0f);
             
-            // Sample animation data from scene if available
-            if (mScene && mScene->mNumAnimations > 0) {
+            ASSIMP_LOG_DEBUG("USDZExporter: Generating " + std::to_string(totalFrames) + 
+                            " time samples (frames 1-" + std::to_string(totalFrames) + ") at " + std::to_string(frameRate) + "fps");
+            
+            for (int frame = 0; frame < totalFrames; ++frame) {
+                double timeCode = frame + 1;
+                std::vector<float> frameWeights(blendShapeNames.size(), 0.0f);
+                
                 for (uint32_t animIdx = 0; animIdx < mScene->mNumAnimations; ++animIdx) {
                     const aiAnimation* anim = mScene->mAnimations[animIdx];
-                    
-                    // Convert frame number to animation ticks: frame / frameRate = seconds, * ticksPerSecond = ticks
                     double ticksPerSecond = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 24.0;
                     double animTime = (timeCode / frameRate) * ticksPerSecond;
                     
-                    // Sample morph mesh channels
                     for (uint32_t morphIdx = 0; morphIdx < anim->mNumMorphMeshChannels; ++morphIdx) {
                         const aiMeshMorphAnim* morphAnim = anim->mMorphMeshChannels[morphIdx];
-                        
                         std::string morphMeshName = morphAnim->mName.C_Str();
-                        std::string origMeshName = mesh->mName.C_Str();
                         
-                        // glTF morph channels target nodes, not meshes directly.
-                        // Match by: morph channel name == node name, or substring matches with mesh name.
                         bool nameMatches = morphMeshName.empty() || 
                                          morphMeshName == origMeshName || 
                                          morphMeshName == parentNodeOrigName ||
@@ -1614,64 +1633,45 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
                                          morphMeshName.find(origMeshName) != std::string::npos ||
                                          origMeshName.find(morphMeshName) != std::string::npos;
                         
-                        if (nameMatches) {
-                            if (morphAnim->mNumKeys > 0 && morphAnim->mKeys) {
-                                for (uint32_t keyIdx = 0; keyIdx < morphAnim->mNumKeys; ++keyIdx) {
-                                    const aiMeshMorphKey& key = morphAnim->mKeys[keyIdx];
-                                    if (keyIdx == morphAnim->mNumKeys - 1) {
-                                        if (animTime >= key.mTime) {
-                                            for (uint32_t weightIdx = 0; weightIdx < key.mNumValuesAndWeights && weightIdx < frameWeights.size(); ++weightIdx) {
-                                                frameWeights[weightIdx] = static_cast<float>(key.mWeights[weightIdx]);
-                                            }
-                                            break;
-                                        }
-                                    } else if (animTime >= key.mTime && animTime < morphAnim->mKeys[keyIdx + 1].mTime) {
-                                        const aiMeshMorphKey& nextKey = morphAnim->mKeys[keyIdx + 1];
-                                        double t = (animTime - key.mTime) / (nextKey.mTime - key.mTime);
+                        if (nameMatches && morphAnim->mNumKeys > 0 && morphAnim->mKeys) {
+                            for (uint32_t keyIdx = 0; keyIdx < morphAnim->mNumKeys; ++keyIdx) {
+                                const aiMeshMorphKey& key = morphAnim->mKeys[keyIdx];
+                                if (keyIdx == morphAnim->mNumKeys - 1) {
+                                    if (animTime >= key.mTime) {
                                         for (uint32_t weightIdx = 0; weightIdx < key.mNumValuesAndWeights && weightIdx < frameWeights.size(); ++weightIdx) {
-                                            frameWeights[weightIdx] = static_cast<float>(
-                                                key.mWeights[weightIdx] + t * (nextKey.mWeights[weightIdx] - key.mWeights[weightIdx]));
+                                            frameWeights[weightIdx] = static_cast<float>(key.mWeights[weightIdx]);
                                         }
                                         break;
                                     }
+                                } else if (animTime >= key.mTime && animTime < morphAnim->mKeys[keyIdx + 1].mTime) {
+                                    const aiMeshMorphKey& nextKey = morphAnim->mKeys[keyIdx + 1];
+                                    double t = (animTime - key.mTime) / (nextKey.mTime - key.mTime);
+                                    for (uint32_t weightIdx = 0; weightIdx < key.mNumValuesAndWeights && weightIdx < frameWeights.size(); ++weightIdx) {
+                                        frameWeights[weightIdx] = static_cast<float>(
+                                            key.mWeights[weightIdx] + t * (nextKey.mWeights[weightIdx] - key.mWeights[weightIdx]));
+                                    }
+                                    break;
                                 }
                             }
                         }
                     }
                 }
-            } else {
-                float normalizedTime = static_cast<float>(frame) / static_cast<float>(totalFrames - 1);
                 
-                // Create smooth animation curves as fallback
-                for (size_t i = 0; i < blendShapeNames.size(); ++i) {
-                    if (i == 0) {
-                        // First blend shape: sine wave animation
-                        frameWeights[i] = 0.5f * (1.0f + std::sin(normalizedTime * 2.0f * M_PI - M_PI_2));
-                    } else if (i == 1) {
-                        // Second blend shape: different phase
-                        frameWeights[i] = 0.5f * (1.0f + std::sin(normalizedTime * 2.0f * M_PI));
-                    }
-                }
+                animatedWeights.add_sample(timeCode, frameWeights);
             }
             
-            animatedWeights.add_sample(timeCode, frameWeights);
-        }
-        
-        // For SimpleMorph test: only time samples, no default value
-        // But tinyusdz validation requires either time samples OR default value
-        // So we set a default value for validation, but use set_value_empty() to avoid writing it
-        if (animatedWeights.has_timesamples()) {
-            // Set a default value for tinyusdz validation
-            std::vector<float> defaultWeights(blendShapeNames.size(), 0.0f);
-            animatedWeights.set_default(defaultWeights);
+            std::vector<float> animDefault(blendShapeNames.size(), 0.0f);
+            animatedWeights.set_default(animDefault);
             skelAnim.blendShapeWeights.set_value(animatedWeights);
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Added blendShapeWeights.timeSamples with " + std::to_string(totalFrames) + 
+                            " samples for " + std::to_string(blendShapeNames.size()) + " blend shapes");
         } else {
-            // No time samples, use set_value_empty
-            skelAnim.blendShapeWeights.set_value_empty();
+            // Static morph targets (no animation): use default weights from aiAnimMesh::mWeight
+            skelAnim.blendShapeWeights.set_value(defaultWeights);
+            
+            ASSIMP_LOG_DEBUG("USDZExporter: Set static blendShapeWeights for " + std::to_string(blendShapeNames.size()) + " blend shapes (no animation)");
         }
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Added blendShapeWeights.timeSamples with " + std::to_string(totalFrames) + 
-                        " samples for " + std::to_string(blendShapeNames.size()) + " blend shapes");
         
         // Add SkelAnimation as child of skeleton
         tinyusdz::Prim skelAnimPrim(skelAnim);
@@ -2672,12 +2672,9 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             ProcessTextureProperty(mat, config, surface.emissiveColor, surface);
         }},
         
-        // Occlusion texture (with lightmap fallback)
-        {TextureConfig("occlusion", "r"), [&]() {
-            TextureConfig config("occlusion", "r");
-            config.fallbackTypes = {aiTextureType_AMBIENT_OCCLUSION, aiTextureType_LIGHTMAP, aiTextureType_GLTF_METALLIC_ROUGHNESS};
-            ProcessTextureProperty(mat, config, surface.occlusion, surface);
-        }},
+        // Occlusion texture intentionally skipped: Hydra Storm renders the entire
+        // material as black when inputs:occlusion is connected to a UsdUVTexture.
+        // The UsdPreviewSurface default (1.0 = fully lit) is acceptable.
         
         // Opacity texture
         {TextureConfig("opacity", "a"), [&]() {
@@ -3015,12 +3012,41 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
 }
 
 // ------------------------------------------------------------------------------------------------
+// Decode percent-encoded URI sequences (e.g. %20 -> space)
+static std::string UrlDecode(const std::string& str) {
+    std::string result;
+    result.reserve(str.size());
+    for (size_t i = 0; i < str.size(); ++i) {
+        if (str[i] == '%' && i + 2 < str.size()) {
+            auto fromHex = [](char ch) -> unsigned char {
+                if (ch >= '0' && ch <= '9') return static_cast<unsigned char>(ch - '0');
+                if (ch >= 'a' && ch <= 'f') return static_cast<unsigned char>(ch - 'a' + 10);
+                if (ch >= 'A' && ch <= 'F') return static_cast<unsigned char>(ch - 'A' + 10);
+                return 0;
+            };
+            unsigned char hi = fromHex(str[i + 1]);
+            unsigned char lo = fromHex(str[i + 2]);
+            result += static_cast<char>((hi << 4) | lo);
+            i += 2;
+        } else if (str[i] == '+') {
+            result += ' ';
+        } else {
+            result += str[i];
+        }
+    }
+    return result;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Handle external texture using tinyusdz APIs
 void USDZExporter::HandleExternalTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture) {
-    std::string filename = texPath;
-    size_t lastSlash = texPath.find_last_of("/\\");
+    // glTF stores URIs with percent-encoding (e.g. %20 for spaces); decode before use
+    std::string decodedPath = UrlDecode(texPath);
+
+    std::string filename = decodedPath;
+    size_t lastSlash = decodedPath.find_last_of("/\\");
     if (lastSlash != std::string::npos) {
-        filename = texPath.substr(lastSlash + 1);
+        filename = decodedPath.substr(lastSlash + 1);
     }
     
     std::string sanitizedFilename = SanitizeFilename(filename);
@@ -3028,9 +3054,9 @@ void USDZExporter::HandleExternalTexture(const std::string& texPath, tinyusdz::U
     tinyusdz::value::AssetPath assetPath(texturePath);
     uvTexture.file.set_value(assetPath);
     
-    // Track for USDZ packaging so the file can be read and embedded
+    // Store decoded path for file I/O (the actual filename on disk)
     std::string usdzKey = "textures/" + sanitizedFilename;
-    mExternalTexturePaths[usdzKey] = texPath;
+    mExternalTexturePaths[usdzKey] = decodedPath;
     
     ASSIMP_LOG_DEBUG("USDZExporter: Prepared external texture: " + texPath + " -> " + sanitizedFilename);
 }
