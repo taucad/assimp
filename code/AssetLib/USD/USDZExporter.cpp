@@ -71,6 +71,7 @@ struct Assimp::USDZExporter::BlendShapeResult {
 // Standard library
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 // tinyusdz includes
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/usda-writer.hh"
@@ -133,6 +134,7 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
 
     try {
         // Execute the export pipeline
+        BuildEmbeddedTextureFilenameMap();
         ExportMetadata();
         ExportScene();  // Create root prim FIRST
         
@@ -149,6 +151,14 @@ USDZExporter::USDZExporter(const char* filename, IOSystem* pIOSystem, const aiSc
             ExportNodeHierarchy(mScene->mRootNode, rootPrim);  // Pass root prim as parent
         }
         
+        // Pre-scan meshes to identify materials used by vertex-colored meshes
+        for (uint32_t i = 0; i < mScene->mNumMeshes; ++i) {
+            const aiMesh* mesh = mScene->mMeshes[i];
+            if (mesh->mColors[0] && mesh->mMaterialIndex < mScene->mNumMaterials) {
+                mMaterialsWithVertexColors.insert(mesh->mMaterialIndex);
+            }
+        }
+
         ExportMaterials();
         ExportSkeletons();
         
@@ -286,6 +296,11 @@ void USDZExporter::ExportMetadata() {
 void USDZExporter::ExportScene() {
     // Create root scene prim
     std::string rootPrimName = GetSceneName();
+    
+    // Register root prim name with NameRegistry so that child nodes with
+    // the same name get unique suffixes (prevents mesh placement bug where
+    // meshes attach to the root prim instead of the child Xform node)
+    GenerateUniqueName(rootPrimName);
     
     tinyusdz::Xform rootXform;
     rootXform.name = rootPrimName;
@@ -593,7 +608,7 @@ void USDZExporter::ExportMeshes() {
             }
             
             // Add standard USD mesh attributes for point primitives too using pipeline
-            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage, this);
             pipeline.ExecuteAttributeConversion();
             
             meshPrim = tinyusdz::Prim(usdMesh);
@@ -644,7 +659,7 @@ void USDZExporter::ExportMeshes() {
             };
             
             // Use pipeline to get complete mesh with blend shapes if they exist
-            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage, this);
             pipeline.ExecuteFullPipeline(boneNameConverter);
             
             if (!pipeline.IsValid()) {
@@ -681,14 +696,16 @@ void USDZExporter::ExportMeshes() {
         bool isSharedMesh = mSharedMeshInfo.count(i) > 0; // Re-enabled with correct API usage
         
         if (meshToNodes.count(i)) {
-            // Get the first parent node name for skeletal treatment (most meshes have one parent)
+            // Build full USD prim path from root to the parent node for relationship paths
             const aiNode* firstParentNode = meshToNodes[i][0];
-            std::string firstParentNodeName = SanitizeName(firstParentNode->mName.C_Str());
+            std::string rootName = GetSceneName();
+            std::string firstParentPrimPath = BuildFullHierarchyPath(firstParentNode, rootName);
+            std::string firstParentOrigName = firstParentNode->mName.C_Str();
             
             // Apply skeletal treatment based on mesh type
             if (hasBlendShapesOnly) {
                 // Blend shapes only: create dedicated SkelRoot with dummy skeleton
-                finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, firstParentNodeName);
+                finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, firstParentPrimPath, firstParentOrigName);
                 ASSIMP_LOG_DEBUG("USDZExporter: Created SkelRoot for blend-shape-only mesh: " + meshName);
             } else if (hasSkinnedBones) {
                 // ✅ FIX: Add SkelBindingAPI to skeletal mesh (USD schema requirement)
@@ -749,17 +766,20 @@ void USDZExporter::ExportMeshes() {
                         props.erase("skel:animationSource");
                         props.erase("skel:blendShapes");
                         props.erase("skel:blendShapeTargets");
-                        // Clear the built-in skeleton relationship field
                         const_cast<nonstd::optional<tinyusdz::Relationship>&>(meshData->skeleton).reset();
                     }
                     ASSIMP_LOG_WARN("USDZExporter: Could not find GeomScope for skeletal mesh " + meshName + " - removed skeletal data");
                 }
+                
             }
             
             // Only process through node hierarchy if mesh hasn't been placed yet
             if (!meshPlaced) {
             for (const aiNode* parentNode : meshToNodes[i]) {
-                std::string parentNodeName = SanitizeName(parentNode->mName.C_Str());
+                auto nodeMapIt = mNodeIdMap.find(parentNode);
+                std::string parentNodeName = (nodeMapIt != mNodeIdMap.end())
+                    ? nodeMapIt->second
+                    : SanitizeName(parentNode->mName.C_Str());
                 
                 // Find the corresponding USD node in our stage
                 std::function<bool(tinyusdz::Prim&)> addMeshToNode = [&](tinyusdz::Prim& prim) -> bool {
@@ -786,7 +806,26 @@ void USDZExporter::ExportMeshes() {
                                     ConvertMesh(mesh, dupMesh);
                                     dupMesh.name = meshName + "_inst";
 
-                                    prim.children().emplace_back(tinyusdz::Prim(dupMesh));
+                                    if (mesh->mMaterialIndex < mScene->mNumMaterials) {
+                                        const aiMaterial* material = mScene->mMaterials[mesh->mMaterialIndex];
+                                        auto matIt = mMaterialIdMap.find(material);
+                                        if (matIt != mMaterialIdMap.end()) {
+                                            tinyusdz::Relationship materialRel;
+                                            std::string rootPrimName = GetSceneName();
+                                            std::string materialPathStr = "/" + rootPrimName + "/Materials/" + matIt->second;
+                                            tinyusdz::Path materialPath(materialPathStr, "");
+                                            materialRel.set(materialPath);
+                                            dupMesh.set_materialBinding(materialRel);
+                                        }
+                                    }
+
+                                    tinyusdz::Prim dupPrim(dupMesh);
+                                    tinyusdz::APISchemas dupBindingAPI;
+                                    dupBindingAPI.listOpQual = tinyusdz::ListEditQual::Prepend;
+                                    dupBindingAPI.names.push_back({tinyusdz::APISchemas::APIName::MaterialBindingAPI, ""});
+                                    dupPrim.metas().apiSchemas = dupBindingAPI;
+
+                                    prim.children().emplace_back(std::move(dupPrim));
 
                                     ASSIMP_LOG_DEBUG("USDZExporter: Added shared mesh " + meshName + " COPY to node " + parentNodeName);
                                 }
@@ -841,7 +880,8 @@ void USDZExporter::ExportMeshes() {
             if (!mStage->root_prims().empty()) {
                 if (hasBlendShapesOnly) {
                     // Create SkelRoot for blend-shape-only mesh and add to root
-                    finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, "");
+                    std::string rootPath = "/" + GetSceneName();
+                    finalMeshPrim = CreateSkelRootForMesh(mesh, meshName, std::move(finalMeshPrim), meshBlendShapeNames, rootPath, "");
                     mStage->root_prims()[0].children().emplace_back(std::move(finalMeshPrim));
                     ASSIMP_LOG_DEBUG("USDZExporter: Added SkelRoot for blend-shape-only mesh " + meshName + " to root prim");
                 } else {
@@ -897,6 +937,22 @@ void USDZExporter::ExportMaterials() {
         tinyusdz::UsdPreviewSurface surface;
         CreatePreviewSurface(mat, surface);
         
+        // If this material is used by a vertex-colored mesh and has no diffuse texture,
+        // connect diffuseColor to a UsdPrimvarReader_float3 for vertex color support
+        bool hasDiffuseTexture = std::any_of(
+            mCurrentMaterialTextureShaders.begin(),
+            mCurrentMaterialTextureShaders.end(),
+            [](const auto& p) { return p.first == "diffuseColor"; });
+        bool needsVertexColorReader = false;
+        if (mMaterialsWithVertexColors.count(i) > 0 && !hasDiffuseTexture) {
+            needsVertexColorReader = true;
+            std::string readerPath = mCurrentMaterialPath + "/displayColorReader";
+            tinyusdz::Path connPath(readerPath, "outputs:result");
+            surface.diffuseColor.set_connection(connPath);
+            surface.diffuseColor.set_value_empty();
+            ASSIMP_LOG_DEBUG("USDZExporter: Connected diffuseColor to vertex color reader for material " + matName);
+        }
+        
         // Use ShaderBuilder for optimized shader and material creation
         ShaderBuilder builder(mCurrentMaterialPath);
         std::string shaderName = "UsdPreviewSurface";
@@ -918,13 +974,26 @@ void USDZExporter::ExportMaterials() {
         // Add main shader as child of material
         materialPrim.children().emplace_back(std::move(shaderPrim));
         
-        // Create and add UV coordinate reader shader
+        // Collect unique UV indices needed across all textures and create readers
+        std::map<int, std::string> uvReaderNames;
         if (!mCurrentMaterialTextureShaders.empty()) {
-            tinyusdz::Shader texCoordReader = CreateTexCoordReader();
-            tinyusdz::Prim texCoordReaderPrim(texCoordReader);
-            materialPrim.children().emplace_back(std::move(texCoordReaderPrim));
-            
-            ASSIMP_LOG_DEBUG("USDZExporter: Added texCoordReader shader");
+            std::set<int> uvIndices;
+            for (const auto& texPair : mCurrentMaterialTextureShaders) {
+                auto it = mCurrentMaterialTextureUVIndices.find(texPair.first);
+                int idx = (it != mCurrentMaterialTextureUVIndices.end()) ? it->second : 0;
+                uvIndices.insert(idx);
+            }
+            for (int idx : uvIndices) {
+                std::string varName = (idx == 0) ? "st" : ("st" + std::to_string(idx));
+                std::string readerName = (idx == 0) ? "texCoordReader" : ("texCoordReader_st" + std::to_string(idx));
+                uvReaderNames[idx] = readerName;
+                
+                tinyusdz::Shader reader = CreateTexCoordReader(varName);
+                reader.name = readerName;
+                tinyusdz::Prim readerPrim(reader);
+                materialPrim.children().emplace_back(std::move(readerPrim));
+                ASSIMP_LOG_DEBUG("USDZExporter: Added " + readerName + " shader (primvar: " + varName + ")");
+            }
         }
         
         // Process texture shaders and create stTransform shaders
@@ -934,7 +1003,10 @@ void USDZExporter::ExportMaterials() {
             
             // Create stTransform shader for this texture
             std::string stTransformName = texName + "_stTransform";
-            std::string texCoordReaderConnection = mCurrentMaterialPath + "/texCoordReader.outputs:result";
+            auto uvIt = mCurrentMaterialTextureUVIndices.find(texName);
+            int texUvIndex = (uvIt != mCurrentMaterialTextureUVIndices.end()) ? uvIt->second : 0;
+            std::string readerName = uvReaderNames[texUvIndex];
+            std::string texCoordReaderConnection = mCurrentMaterialPath + "/" + readerName + ".outputs:result";
             
             // Get texture transform if available
             const aiUVTransform* uvTransform = nullptr;
@@ -955,13 +1027,8 @@ void USDZExporter::ExportMaterials() {
             tinyusdz::UsdUVTexture connectedTexture = texUV;
             std::string stConnection = mCurrentMaterialPath + "/" + stTransformName + ".outputs:result";
             
-            // Set the CRITICAL st connection - this is what makes textures work!
             tinyusdz::Path stPath(stConnection, "");
             connectedTexture.st.set_connection(stPath);
-            
-            // UV primvar type is texCoord2f[] (set in ExecuteUVConversion)
-            
-            // Clear the default st value since we're using a connection (avoid redundant inputs:st and inputs:st.connect)
             connectedTexture.st.set_value_empty();
             
             textureShader.value = connectedTexture;
@@ -973,7 +1040,7 @@ void USDZExporter::ExportMaterials() {
             } else {
                 fallbackAttr.set_value(tinyusdz::value::float4{1.0f, 1.0f, 1.0f, 1.0f});
             }
-            fallbackAttr.set_type_name("float4");  // USD expects float4 for fallback
+            fallbackAttr.set_type_name("float4");
             tinyusdz::Property fallbackProp(fallbackAttr, false);
             textureShader.props["inputs:fallback"] = fallbackProp;
             
@@ -984,7 +1051,23 @@ void USDZExporter::ExportMaterials() {
             materialPrim.children().emplace_back(std::move(stTransformPrim));
             materialPrim.children().emplace_back(std::move(textureShaderPrim));
             
-            ASSIMP_LOG_DEBUG("USDZExporter: Added texture pipeline for " + texName);
+            ASSIMP_LOG_DEBUG("USDZExporter: Added texture pipeline for " + texName + " (UV" + std::to_string(texUvIndex) + ")");
+        }
+        
+        // Add vertex color PrimvarReader if this material needs it
+        if (needsVertexColorReader) {
+            tinyusdz::Shader colorReader;
+            colorReader.name = "displayColorReader";
+            colorReader.info_id = "UsdPrimvarReader_float3";
+            
+            tinyusdz::UsdPrimvarReader_float3 primvarReader;
+            primvarReader.varname.set_value(std::string("displayColor"));
+            primvarReader.result.set_authored(true);
+            
+            colorReader.value = primvarReader;
+            tinyusdz::Prim readerPrim(colorReader);
+            materialPrim.children().emplace_back(std::move(readerPrim));
+            ASSIMP_LOG_DEBUG("USDZExporter: Added displayColor PrimvarReader shader");
         }
         
         // Add material to Materials scope
@@ -1079,6 +1162,12 @@ void USDZExporter::ExportSkeletons() {
     
     // Then build joint paths using skeleton bone ordering (like gltfImport.cpp skin.joints)
     JointPathMapping jointPaths = BuildJointPathsFromNodeHierarchy(nodeMapping, allBoneNames, boneDataMap);
+    
+    // Populate global bone-to-skeleton-index mapping for use in ConvertMesh
+    mGlobalBoneToSkeletonIndex.clear();
+    for (size_t i = 0; i < jointPaths.skeletonJointNames.size(); ++i) {
+        mGlobalBoneToSkeletonIndex[jointPaths.skeletonJointNames[i]] = static_cast<uint32_t>(i);
+    }
     
     // Create joint data using the hierarchical ordering (like gltfImport.cpp)
     std::vector<tinyusdz::value::token> jointNameTokens;  // Descriptive names in skeleton order
@@ -1226,6 +1315,11 @@ void USDZExporter::ExportAnimations() {
     if (hasSkeletalMeshes) {
         ASSIMP_LOG_DEBUG("USDZExporter: Creating centralized SkelAnimation for skeletal data");
         CreateCentralizedSkelAnimation();
+        // Also apply Xform animations for non-bone node channels
+        for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
+            const aiAnimation* anim = mScene->mAnimations[i];
+            ConvertAnimation(anim);
+        }
     } else {
         ASSIMP_LOG_DEBUG("USDZExporter: Using traditional animation export for non-skeletal data");
         for (uint32_t i = 0; i < mScene->mNumAnimations; ++i) {
@@ -1424,7 +1518,7 @@ bool USDZExporter::NeedsSkeletalTreatment(const aiMesh* mesh) {
 // NOTE: For blend-shape-only meshes, USD requires a skeleton infrastructure even without actual bones.
 // This "dummy skeleton" approach is the standard USD pattern for blend-shape-only meshes.
 // USD's blendShapeWeights can only exist within SkelAnimation, which requires a Skeleton reference.
-tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames, const std::string& parentNodeName) {
+tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames, const std::string& parentPrimPath, const std::string& parentNodeOrigName) {
     tinyusdz::SkelRoot skelRoot;
     skelRoot.name = meshName;
     
@@ -1509,13 +1603,16 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
                         const aiMeshMorphAnim* morphAnim = anim->mMorphMeshChannels[morphIdx];
                         
                         std::string morphMeshName = morphAnim->mName.C_Str();
-                        std::string meshName = mesh->mName.C_Str();
+                        std::string origMeshName = mesh->mName.C_Str();
                         
-                        // Be flexible with name matching - morph animations often target nodes, not meshes directly
-                        bool nameMatches = morphMeshName.empty() || morphMeshName == meshName || 
+                        // glTF morph channels target nodes, not meshes directly.
+                        // Match by: morph channel name == node name, or substring matches with mesh name.
+                        bool nameMatches = morphMeshName.empty() || 
+                                         morphMeshName == origMeshName || 
+                                         morphMeshName == parentNodeOrigName ||
                                          morphMeshName.find("node") != std::string::npos ||
-                                         morphMeshName.find(meshName) != std::string::npos ||
-                                         meshName.find(morphMeshName) != std::string::npos;
+                                         morphMeshName.find(origMeshName) != std::string::npos ||
+                                         origMeshName.find(morphMeshName) != std::string::npos;
                         
                         if (nameMatches) {
                             if (morphAnim->mNumKeys > 0 && morphAnim->mKeys) {
@@ -1580,16 +1677,10 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
         tinyusdz::Prim skelAnimPrim(skelAnim);
         skeletonPrim.children().emplace_back(std::move(skelAnimPrim));
         
-        // Add animation source reference to skeleton with dynamically constructed absolute path
+        // Add animation source reference to skeleton using full parent path
         tinyusdz::Relationship animSourceRel;
         
-        std::string rootName = GetSceneName();
-        std::string skelAnimPath;
-        if (parentNodeName.empty() || parentNodeName == rootName) {
-            skelAnimPath = "/" + rootName + "/" + meshName + "/Skel/Anim";
-        } else {
-            skelAnimPath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Skel/Anim";
-        }
+        std::string skelAnimPath = parentPrimPath + "/" + meshName + "/Skel/Anim";
         tinyusdz::Path animSourcePath(skelAnimPath, "");
         animSourceRel.set(animSourcePath);
         
@@ -1624,32 +1715,16 @@ tinyusdz::Prim USDZExporter::CreateSkelRootForMesh(const aiMesh* mesh, const std
     }
     
     if (auto* meshData = meshPrim.as<tinyusdz::GeomMesh>()) {
-        std::string rootName = GetSceneName();
-        
-        // Construct skeleton path relative to where the SkelRoot will be placed
-        // SkelRoot is at /<rootName>/<meshName>, skeleton at /<rootName>/<meshName>/Skel
-        std::string skeletonPath;
-        if (parentNodeName.empty() || parentNodeName == rootName) {
-            skeletonPath = "/" + rootName + "/" + meshName + "/Skel";
-        } else {
-            skeletonPath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Skel";
-        }
+        std::string skeletonPath = parentPrimPath + "/" + meshName + "/Skel";
         tinyusdz::Path skelPath(skeletonPath, "");
         tinyusdz::Relationship skelRel;
         skelRel.set(skelPath);
         
-        // Set the skeleton relationship on the mesh
         const_cast<nonstd::optional<tinyusdz::Relationship>&>(meshData->skeleton) = skelRel;
         ASSIMP_LOG_DEBUG("USDZExporter: Added skel:skeleton relationship to blend-shape mesh " + meshName + " -> " + skeletonPath);
         
-        // Fix skel:blendShapeTargets to use absolute paths (override MeshConverterPipeline's relative paths)
         if (!blendShapeNames.empty()) {
-            std::string basePath;
-            if (parentNodeName.empty() || parentNodeName == rootName) {
-                basePath = "/" + rootName + "/" + meshName + "/Geometry_" + meshName + "/" + meshName;
-            } else {
-                basePath = "/" + rootName + "/" + parentNodeName + "/" + meshName + "/Geometry_" + meshName + "/" + meshName;
-            }
+            std::string basePath = parentPrimPath + "/" + meshName + "/Geometry_" + meshName + "/" + meshName;
             std::vector<tinyusdz::Path> blendShapeTargetPaths;
             for (const std::string& blendShapeName : blendShapeNames) {
                 blendShapeTargetPaths.emplace_back(basePath + "/" + blendShapeName, "");
@@ -1695,7 +1770,7 @@ void USDZExporter::ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh) 
     };
     
                 // Use MeshConverterPipeline for structured conversion with scene context
-            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage);
+            MeshConverterPipeline pipeline(mesh, usdMesh, mScene, mNameRegistry, *mStage, this);
             pipeline.ExecuteFullPipeline(boneNameConverter);
             
             if (!pipeline.IsValid()) {
@@ -1894,93 +1969,18 @@ void USDZExporter::MeshConverterPipeline::ExecuteSkinningConversion(BoneNameConv
     if (mMesh && mMesh->mNumBones > 0) {
         ASSIMP_LOG_DEBUG("USDZExporter: Adding skinning primvars for " + std::to_string(mMesh->mNumBones) + " bones");
         
-        // ✅ FIX: Get skeleton joint ordering (same as ExportSkeletons) to avoid index mismatch
-        std::set<std::string> allBoneNames;
-        std::map<std::string, const aiBone*> boneDataMap;
-        
-        // Collect bones from this mesh
-        for (uint32_t i = 0; i < mMesh->mNumBones; ++i) {
-            const aiBone* bone = mMesh->mBones[i];
-            std::string boneName = bone->mName.C_Str();
-            allBoneNames.insert(boneName);
-            boneDataMap[boneName] = bone;
-        }
-        
-        // Build scene node hierarchy (local implementation to avoid coupling)
-        std::map<const aiNode*, int> nodeToIndex;
-        std::map<int, std::string> indexToHierarchicalPath;
-        std::map<std::string, std::string> nodeNameToPath;
-        int nextIndex = 0;
-        
-        // First pass: Assign indices to all nodes
-        std::function<void(const aiNode*)> assignIndices = [&](const aiNode* node) {
-            nodeToIndex[node] = nextIndex++;
-            for (uint32_t i = 0; i < node->mNumChildren; ++i) {
-                assignIndices(node->mChildren[i]);
-            }
-        };
-        
-        // Second pass: Build hierarchical names
-        std::function<void(const aiNode*, int)> buildHierarchicalNames = 
-            [&](const aiNode* node, int parentIndex) {
-                int nodeIndex = nodeToIndex[node];
-                std::string name = "n" + std::to_string(nodeIndex);
-                std::string hierarchicalPath = parentIndex >= 0 ? 
-                    indexToHierarchicalPath[parentIndex] + "/" + name : name;
-                
-                indexToHierarchicalPath[nodeIndex] = hierarchicalPath;
-                nodeNameToPath[node->mName.C_Str()] = hierarchicalPath;
-                
-                for (uint32_t i = 0; i < node->mNumChildren; ++i) {
-                    buildHierarchicalNames(node->mChildren[i], nodeIndex);
-                }
-            };
-        
-        // Build the hierarchy mapping
-        assignIndices(mScene->mRootNode);
-        buildHierarchicalNames(mScene->mRootNode, -1);
-        
-        // Build joint paths using skeleton bone ordering (fallback to mesh bone ordering)
-        std::vector<std::string> skeletonJointNames;
-        
-        // Try to use skeleton ordering first
-        bool foundSkeletonOrdering = false;
-        for (uint32_t skelIdx = 0; skelIdx < mScene->mNumSkeletons && !foundSkeletonOrdering; ++skelIdx) {
-            const aiSkeleton* skeleton = mScene->mSkeletons[skelIdx];
-            
-            for (uint32_t boneIdx = 0; boneIdx < skeleton->mNumBones; ++boneIdx) {
-                const aiSkeletonBone* skelBone = skeleton->mBones[boneIdx];
-                const aiNode* boneNode = skelBone->mNode;
-                if (!boneNode) continue;
-                
-                std::string boneName = boneNode->mName.C_Str();
-                if (allBoneNames.find(boneName) != allBoneNames.end()) {
-                    auto pathIt = nodeNameToPath.find(boneName);
-                    if (pathIt != nodeNameToPath.end()) {
-                        skeletonJointNames.push_back(boneName);
-                        foundSkeletonOrdering = true;
-                    }
-                }
-            }
-        }
-        
-        // Fallback: Use mesh bone ordering if no skeleton found
-        if (!foundSkeletonOrdering) {
-            ASSIMP_LOG_DEBUG("USDZExporter: No skeleton found, using mesh bone ordering");
-            for (uint32_t i = 0; i < mMesh->mNumBones; ++i) {
-                const aiBone* bone = mMesh->mBones[i];
-                std::string boneName = bone->mName.C_Str();
-                if (allBoneNames.find(boneName) != allBoneNames.end()) {
-                    skeletonJointNames.push_back(boneName);
-                }
-            }
-        }
-        
-        // Create bone name -> skeleton joint index mapping
+        // Use global bone-to-skeleton-index mapping if available (set by ExportSkeletons),
+        // otherwise fall back to local mesh bone ordering
         std::map<std::string, uint32_t> boneToSkeletonIndex;
-        for (size_t i = 0; i < skeletonJointNames.size(); ++i) {
-            boneToSkeletonIndex[skeletonJointNames[i]] = static_cast<uint32_t>(i);
-            ASSIMP_LOG_DEBUG("USDZExporter: Bone '" + skeletonJointNames[i] + "' -> skeleton index " + std::to_string(i));
+        
+        if (!mExporter->mGlobalBoneToSkeletonIndex.empty()) {
+            // Use the global mapping for correct multi-skeleton joint index remapping
+            boneToSkeletonIndex = mExporter->mGlobalBoneToSkeletonIndex;
+        } else {
+            // Fallback: local mesh bone ordering (single-skeleton case)
+            for (uint32_t i = 0; i < mMesh->mNumBones; ++i) {
+                boneToSkeletonIndex[mMesh->mBones[i]->mName.C_Str()] = i;
+            }
         }
         
         // Determine maximum weights per vertex
@@ -1990,10 +1990,10 @@ void USDZExporter::MeshConverterPipeline::ExecuteSkinningConversion(BoneNameConv
         std::vector<int> jointIndices(mMesh->mNumVertices * maxWeightsPerVertex, 0);
         std::vector<float> jointWeights(mMesh->mNumVertices * maxWeightsPerVertex, 0.0f);
         
-        // Collect joint names using skeleton ordering
+        // Collect joint name tokens for this mesh's bones
         std::vector<tinyusdz::value::token> jointTokens;
-        for (const std::string& jointName : skeletonJointNames) {
-            jointTokens.push_back(tinyusdz::value::token(jointName));
+        for (uint32_t i = 0; i < mMesh->mNumBones; ++i) {
+            jointTokens.push_back(tinyusdz::value::token(mMesh->mBones[i]->mName.C_Str()));
         }
         
         // Process bone weights and fill joint data arrays using skeleton indices
@@ -2311,10 +2311,7 @@ void USDZExporter::MeshConverterPipeline::ExecuteAttributeConversion() {
         }
     }
     
-    tinyusdz::Attribute doubleSidedAttr = tinyusdz::Attribute::Uniform(doubleSided);
-    doubleSidedAttr.set_type_name("bool");
-    tinyusdz::Property doubleSidedProp(doubleSidedAttr, false);
-    mUsdMesh.props["doubleSided"] = doubleSidedProp;
+    mUsdMesh.doubleSided.set_value(doubleSided);
     
     // 2. Set subdivisionScheme = "none" (standard for triangle meshes) - must be uniform
     tinyusdz::Attribute subdivisionSchemeAttr = tinyusdz::Attribute::Uniform(tinyusdz::value::token("none"));
@@ -2608,6 +2605,7 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     // Store texture shaders to be added as children later
     mCurrentMaterialTextureShaders.clear();
     mCurrentMaterialTextureTransforms.clear();
+    mCurrentMaterialTextureUVIndices.clear();
     
     // Define texture configurations for all supported texture types
     // Using initializer list for optimal performance and readability
@@ -2616,6 +2614,11 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         {TextureConfig("diffuseColor", "rgb"), [&]() {
             TextureConfig config("diffuseColor", "rgb");
             config.fallbackTypes = {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE, aiTextureType_MAYA_BASE};
+            aiColor3D baseColor(1.0f, 1.0f, 1.0f);
+            if (mat->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS ||
+                mat->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) == AI_SUCCESS) {
+                config.scale = {baseColor.r, baseColor.g, baseColor.b, 1.0f};
+            }
             ProcessTextureProperty(mat, config, surface.diffuseColor, surface);
         }},
         
@@ -2660,6 +2663,12 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
                 config.fallbackTypes.push_back(aiTextureType_BASE_COLOR);
                 config.fallbackTypes.push_back(aiTextureType_DIFFUSE);
             }
+            aiColor3D emissive(1.0f, 1.0f, 1.0f);
+            if (mat->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS) {
+                if (emissive.r != 0.0f || emissive.g != 0.0f || emissive.b != 0.0f) {
+                    config.scale = {emissive.r, emissive.g, emissive.b, 1.0f};
+                }
+            }
             ProcessTextureProperty(mat, config, surface.emissiveColor, surface);
         }},
         
@@ -2702,12 +2711,25 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             aiString clearcoatTexPath;
             if (mat->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &clearcoatTexPath) == AI_SUCCESS) {
                 tinyusdz::UsdUVTexture clearcoatTexture = CreateUVTexture(clearcoatTexPath.C_Str(), "clearcoat", mat, aiTextureType_CLEARCOAT, 0);
-        std::string texShaderPath = mCurrentMaterialPath + "/clearcoat";
+                std::string texShaderPath = mCurrentMaterialPath + "/clearcoat";
                 tinyusdz::Path connPath(std::move(texShaderPath), "outputs:r");
                 surface.clearcoat.set_connection(std::move(connPath));
-        surface.clearcoat.set_value_empty();
+                surface.clearcoat.set_value_empty();
+                
+                aiUVTransform uvTransform;
+                if (mat->Get(AI_MATKEY_UVTRANSFORM(aiTextureType_CLEARCOAT, 0), uvTransform) == AI_SUCCESS) {
+                    if (uvTransform.mScaling.x != 1.0f || uvTransform.mScaling.y != 1.0f ||
+                        uvTransform.mTranslation.x != 0.0f || uvTransform.mTranslation.y != 0.0f ||
+                        uvTransform.mRotation != 0.0f) {
+                        mCurrentMaterialTextureTransforms["clearcoat"] = uvTransform;
+                    }
+                }
+                int uvIndex = 0;
+                mat->Get(AI_MATKEY_UVWSRC(aiTextureType_CLEARCOAT, 0), uvIndex);
+                mCurrentMaterialTextureUVIndices["clearcoat"] = uvIndex;
+                
                 mCurrentMaterialTextureShaders.emplace_back("clearcoat", std::move(clearcoatTexture));
-                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat texture: " + std::string(clearcoatTexPath.C_Str()));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat texture: " + std::string(clearcoatTexPath.C_Str()) + " (UV" + std::to_string(uvIndex) + ")");
             }
         }},
         
@@ -2718,12 +2740,25 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             aiString clearcoatRoughnessTexPath;
             if (mat->GetTexture(AI_MATKEY_CLEARCOAT_ROUGHNESS_TEXTURE, &clearcoatRoughnessTexPath) == AI_SUCCESS) {
                 tinyusdz::UsdUVTexture clearcoatRoughnessTexture = CreateUVTexture(clearcoatRoughnessTexPath.C_Str(), "clearcoatRoughness", mat, aiTextureType_CLEARCOAT, 1);
-        std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
+                std::string texShaderPath = mCurrentMaterialPath + "/clearcoatRoughness";
                 tinyusdz::Path connPath(std::move(texShaderPath), "outputs:g");
                 surface.clearcoatRoughness.set_connection(std::move(connPath));
                 surface.clearcoatRoughness.set_value_empty();
+                
+                aiUVTransform uvTransform;
+                if (mat->Get(AI_MATKEY_UVTRANSFORM(aiTextureType_CLEARCOAT, 1), uvTransform) == AI_SUCCESS) {
+                    if (uvTransform.mScaling.x != 1.0f || uvTransform.mScaling.y != 1.0f ||
+                        uvTransform.mTranslation.x != 0.0f || uvTransform.mTranslation.y != 0.0f ||
+                        uvTransform.mRotation != 0.0f) {
+                        mCurrentMaterialTextureTransforms["clearcoatRoughness"] = uvTransform;
+                    }
+                }
+                int uvIndex = 0;
+                mat->Get(AI_MATKEY_UVWSRC(aiTextureType_CLEARCOAT, 1), uvIndex);
+                mCurrentMaterialTextureUVIndices["clearcoatRoughness"] = uvIndex;
+                
                 mCurrentMaterialTextureShaders.emplace_back("clearcoatRoughness", std::move(clearcoatRoughnessTexture));
-                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(clearcoatRoughnessTexPath.C_Str()));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(clearcoatRoughnessTexPath.C_Str()) + " (UV" + std::to_string(uvIndex) + ")");
             }
         }}
     };
@@ -2867,8 +2902,8 @@ tinyusdz::UsdUVTexture USDZExporter::CreateUVTexture(const std::string& filePath
                     " -> " + (usdWrapT == tinyusdz::UsdUVTexture::Wrap::Clamp ? "clamp" : 
                              usdWrapT == tinyusdz::UsdUVTexture::Wrap::Mirror ? "mirror" : "repeat"));
     
-    uvTexture.wrapS.set_value(usdWrapT);
-    uvTexture.wrapT.set_value(usdWrapS);
+    uvTexture.wrapS.set_value(usdWrapS);
+    uvTexture.wrapT.set_value(usdWrapT);
     
     // Add appropriate outputs based on texture type
     AddTextureOutputs(uvTexture, paramName);
@@ -2940,17 +2975,21 @@ bool USDZExporter::ProcessTextureProperty(const aiMaterial* mat, const TextureCo
     surfaceProperty.set_connection(std::move(connPath));
     surfaceProperty.set_value_empty();
     
-    // Store texture shader for later addition with perfect forwarding
+    // Read UV channel index (glTF texCoord override)
+    int uvIndex = 0;
+    mat->Get(AI_MATKEY_UVWSRC(foundType, 0), uvIndex);
+    mCurrentMaterialTextureUVIndices[config.paramName] = uvIndex;
+    
+    // Store texture shader for later addition
     mCurrentMaterialTextureShaders.emplace_back(config.paramName, std::move(uvTexture));
     
-    ASSIMP_LOG_DEBUG("USDZExporter: Connected " + config.paramName + " texture: " + texturePath.C_Str());
+    ASSIMP_LOG_DEBUG("USDZExporter: Connected " + config.paramName + " texture: " + texturePath.C_Str() + " (UV" + std::to_string(uvIndex) + ")");
     return true;
 }
 
 // ------------------------------------------------------------------------------------------------
 // Handle embedded texture using tinyusdz APIs
 void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::UsdUVTexture& uvTexture) {
-    // Extract texture index from embedded texture path (format: "*0", "*1", etc.)
     if (texPath.empty() || texPath[0] != '*') {
         ASSIMP_LOG_WARN("USDZExporter: Invalid embedded texture path: " + texPath);
         return;
@@ -2963,44 +3002,7 @@ void USDZExporter::HandleEmbeddedTexture(const std::string& texPath, tinyusdz::U
             return;
         }
         
-        const aiTexture* tex = mScene->mTextures[textureIndex];
-        if (!tex) {
-            ASSIMP_LOG_WARN("USDZExporter: Null embedded texture at index: " + ai_to_string(textureIndex));
-            return;
-        }
-        
-        // Generate filename for embedded texture (preserving proper extension)
-        std::string baseTextureName;
-        if (tex->mFilename.length > 0) {
-            baseTextureName = tex->mFilename.C_Str();
-        } else {
-            baseTextureName = "embedded_texture_" + ai_to_string(textureIndex);
-        }
-        
-        // Generate descriptive name based on texture usage context
-        std::string descriptiveName = GenerateDescriptiveTextureName(textureIndex, baseTextureName);
-        if (descriptiveName != baseTextureName) {
-            baseTextureName = descriptiveName;
-        }
-        
-        // Add appropriate extension if not present
-        std::string extension = ".png"; // Default extension
-        if (tex->mHeight == 0 && tex->achFormatHint[0] != '\0') {
-            std::string formatHint(tex->achFormatHint);
-            if (formatHint.find('.') == std::string::npos) {
-                extension = "." + formatHint;
-        } else {
-                extension = formatHint; // Already includes dot
-            }
-        }
-        
-        // Ensure base name has extension and sanitize the complete filename
-        if (baseTextureName.find('.') == std::string::npos) {
-            baseTextureName += extension;
-        }
-        std::string textureName = SanitizeFilename(baseTextureName);
-        
-        // Set asset path with textures/ subdirectory for USDA/USDZ compatibility
+        std::string textureName = GetEmbeddedTextureFilename(textureIndex);
         std::string texturePath = "./textures/" + textureName;
         tinyusdz::value::AssetPath assetPath(texturePath);
         uvTexture.file.set_value(assetPath);
@@ -3111,36 +3113,18 @@ void USDZExporter::CreateCentralizedSkelAnimation() {
     skelAnim.name = animationName;
     skelAnim.joints.set_value(animationJointTokens);  // Use hierarchical animation joint paths
     
-    // PHASE 4: Extract timing from Assimp animation using frame numbers
+    // PHASE 4: Generate per-frame time samples with interpolation
     double ticksPerSecond = anim->mTicksPerSecond > 0 ? anim->mTicksPerSecond : 24.0;
     double usdFrameRate = 24.0;
     
-    // Find all unique time keys across all channels, converting to frame numbers
+    // Compute total frame count from animation duration
+    double durationInSeconds = anim->mDuration / ticksPerSecond;
+    int totalFrames = std::max(1, static_cast<int>(std::round(durationInSeconds * usdFrameRate)));
+    
+    // Generate one time sample per frame for smooth interpolation
     std::set<double> allTimeKeys;
-    for (uint32_t chanIdx = 0; chanIdx < anim->mNumChannels; ++chanIdx) {
-        const aiNodeAnim* nodeAnim = anim->mChannels[chanIdx];
-        if (!nodeAnim) continue;
-        
-        for (uint32_t keyIdx = 0; keyIdx < nodeAnim->mNumRotationKeys; ++keyIdx) {
-            double timeInSeconds = nodeAnim->mRotationKeys[keyIdx].mTime / ticksPerSecond;
-            double frameNumber = std::round(timeInSeconds * usdFrameRate);
-            if (frameNumber < 1.0) frameNumber = 1.0;
-            allTimeKeys.insert(frameNumber);
-        }
-        
-        for (uint32_t keyIdx = 0; keyIdx < nodeAnim->mNumPositionKeys; ++keyIdx) {
-            double timeInSeconds = nodeAnim->mPositionKeys[keyIdx].mTime / ticksPerSecond;
-            double frameNumber = std::round(timeInSeconds * usdFrameRate);
-            if (frameNumber < 1.0) frameNumber = 1.0;
-            allTimeKeys.insert(frameNumber);
-        }
-        
-        for (uint32_t keyIdx = 0; keyIdx < nodeAnim->mNumScalingKeys; ++keyIdx) {
-            double timeInSeconds = nodeAnim->mScalingKeys[keyIdx].mTime / ticksPerSecond;
-            double frameNumber = std::round(timeInSeconds * usdFrameRate);
-            if (frameNumber < 1.0) frameNumber = 1.0;
-            allTimeKeys.insert(frameNumber);
-        }
+    for (int f = 1; f <= totalFrames; ++f) {
+        allTimeKeys.insert(static_cast<double>(f));
     }
     
     // PHASE 5: Create time-sampled animation data aligned with animation joint ordering
@@ -3188,71 +3172,99 @@ void USDZExporter::CreateCentralizedSkelAnimation() {
             };
         }
         
-        // Fill in actual animation data for bones that have channels
+        // Fill in actual animation data using linear interpolation between keyframes
+        double animTimeTicks = timeInSeconds * ticksPerSecond;
+        
         for (uint32_t chanIdx = 0; chanIdx < anim->mNumChannels; ++chanIdx) {
             const aiNodeAnim* nodeAnim = anim->mChannels[chanIdx];
             if (!nodeAnim) continue;
             std::string boneName = nodeAnim->mNodeName.C_Str();
             
-            ASSIMP_LOG_DEBUG("USDZExporter: ANIM_CHANNEL[" + std::to_string(chanIdx) + "]: Processing bone '" + boneName + "' with " + 
-                             std::to_string(nodeAnim->mNumRotationKeys) + " rotation keys at frame " + std::to_string(frameNumber));
-            
-            // Find bone index in animation joint ordering (not skeleton ordering)
             auto animJointIt = boneToAnimJointIndex.find(boneName);
             if (animJointIt != boneToAnimJointIndex.end()) {
                 uint32_t boneIdx = animJointIt->second;
                 
-                double tickToSec = 1.0 / ticksPerSecond;
+                // Interpolate rotations (slerp)
                 if (nodeAnim->mNumRotationKeys > 0) {
-                    uint32_t keyIdx = 0;
-                    for (uint32_t k = 0; k < nodeAnim->mNumRotationKeys - 1; ++k) {
-                        double keyTime = nodeAnim->mRotationKeys[k].mTime * tickToSec;
-                        if (std::abs(keyTime - timeInSeconds) < std::abs(nodeAnim->mRotationKeys[keyIdx].mTime * tickToSec - timeInSeconds)) {
-                            keyIdx = k;
+                    if (nodeAnim->mNumRotationKeys == 1 || animTimeTicks <= nodeAnim->mRotationKeys[0].mTime) {
+                        const auto& q = nodeAnim->mRotationKeys[0].mValue;
+                        rotations[boneIdx].real = q.w;
+                        rotations[boneIdx].imag = {q.x, q.y, q.z};
+                    } else if (animTimeTicks >= nodeAnim->mRotationKeys[nodeAnim->mNumRotationKeys - 1].mTime) {
+                        const auto& q = nodeAnim->mRotationKeys[nodeAnim->mNumRotationKeys - 1].mValue;
+                        rotations[boneIdx].real = q.w;
+                        rotations[boneIdx].imag = {q.x, q.y, q.z};
+                    } else {
+                        // Find bracketing keyframes and interpolate
+                        for (uint32_t k = 0; k < nodeAnim->mNumRotationKeys - 1; ++k) {
+                            if (animTimeTicks >= nodeAnim->mRotationKeys[k].mTime && 
+                                animTimeTicks < nodeAnim->mRotationKeys[k + 1].mTime) {
+                                double dt = nodeAnim->mRotationKeys[k + 1].mTime - nodeAnim->mRotationKeys[k].mTime;
+                                float t = (dt > 0) ? static_cast<float>((animTimeTicks - nodeAnim->mRotationKeys[k].mTime) / dt) : 0.0f;
+                                
+                                aiQuaternion result;
+                                aiQuaternion::Interpolate(result, nodeAnim->mRotationKeys[k].mValue, 
+                                                          nodeAnim->mRotationKeys[k + 1].mValue, t);
+                                result.Normalize();
+                                rotations[boneIdx].real = result.w;
+                                rotations[boneIdx].imag = {result.x, result.y, result.z};
+                                break;
+                            }
                         }
                     }
-                    
-                    const aiQuatKey& rotKey = nodeAnim->mRotationKeys[keyIdx];
-                    rotations[boneIdx].real = rotKey.mValue.w;
-                    rotations[boneIdx].imag = {rotKey.mValue.x, rotKey.mValue.y, rotKey.mValue.z};
-                    
-                    ASSIMP_LOG_DEBUG("USDZExporter: ANIM_SET: bone '" + boneName + "' at index " + std::to_string(boneIdx) + 
-                                     " frame " + std::to_string(frameNumber) + " quat(" + std::to_string(rotKey.mValue.w) + 
-                                     ", " + std::to_string(rotKey.mValue.x) + ", " + std::to_string(rotKey.mValue.y) + 
-                                     ", " + std::to_string(rotKey.mValue.z) + ")");
                 }
                 
+                // Interpolate translations (lerp)
                 if (nodeAnim->mNumPositionKeys > 0) {
-                    uint32_t keyIdx = 0;
-                    for (uint32_t k = 0; k < nodeAnim->mNumPositionKeys - 1; ++k) {
-                        double keyTime = nodeAnim->mPositionKeys[k].mTime * tickToSec;
-                        if (std::abs(keyTime - timeInSeconds) < std::abs(nodeAnim->mPositionKeys[keyIdx].mTime * tickToSec - timeInSeconds)) {
-                            keyIdx = k;
+                    if (nodeAnim->mNumPositionKeys == 1 || animTimeTicks <= nodeAnim->mPositionKeys[0].mTime) {
+                        const auto& p = nodeAnim->mPositionKeys[0].mValue;
+                        translations[boneIdx] = {p.x, p.y, p.z};
+                    } else if (animTimeTicks >= nodeAnim->mPositionKeys[nodeAnim->mNumPositionKeys - 1].mTime) {
+                        const auto& p = nodeAnim->mPositionKeys[nodeAnim->mNumPositionKeys - 1].mValue;
+                        translations[boneIdx] = {p.x, p.y, p.z};
+                    } else {
+                        for (uint32_t k = 0; k < nodeAnim->mNumPositionKeys - 1; ++k) {
+                            if (animTimeTicks >= nodeAnim->mPositionKeys[k].mTime && 
+                                animTimeTicks < nodeAnim->mPositionKeys[k + 1].mTime) {
+                                double dt = nodeAnim->mPositionKeys[k + 1].mTime - nodeAnim->mPositionKeys[k].mTime;
+                                float t = (dt > 0) ? static_cast<float>((animTimeTicks - nodeAnim->mPositionKeys[k].mTime) / dt) : 0.0f;
+                                const auto& p0 = nodeAnim->mPositionKeys[k].mValue;
+                                const auto& p1 = nodeAnim->mPositionKeys[k + 1].mValue;
+                                translations[boneIdx] = {p0.x + t * (p1.x - p0.x), p0.y + t * (p1.y - p0.y), p0.z + t * (p1.z - p0.z)};
+                                break;
+                            }
                         }
                     }
-                    
-                    const aiVectorKey& posKey = nodeAnim->mPositionKeys[keyIdx];
-                    translations[boneIdx] = {posKey.mValue.x, posKey.mValue.y, posKey.mValue.z};
                 }
                 
+                // Interpolate scales (lerp)
                 if (nodeAnim->mNumScalingKeys > 0) {
-                    uint32_t keyIdx = 0;
-                    for (uint32_t k = 0; k < nodeAnim->mNumScalingKeys - 1; ++k) {
-                        double keyTime = nodeAnim->mScalingKeys[k].mTime * tickToSec;
-                        if (std::abs(keyTime - timeInSeconds) < std::abs(nodeAnim->mScalingKeys[keyIdx].mTime * tickToSec - timeInSeconds)) {
-                            keyIdx = k;
+                    aiVector3D scaledVal;
+                    if (nodeAnim->mNumScalingKeys == 1 || animTimeTicks <= nodeAnim->mScalingKeys[0].mTime) {
+                        scaledVal = nodeAnim->mScalingKeys[0].mValue;
+                    } else if (animTimeTicks >= nodeAnim->mScalingKeys[nodeAnim->mNumScalingKeys - 1].mTime) {
+                        scaledVal = nodeAnim->mScalingKeys[nodeAnim->mNumScalingKeys - 1].mValue;
+                    } else {
+                        scaledVal = nodeAnim->mScalingKeys[0].mValue;
+                        for (uint32_t k = 0; k < nodeAnim->mNumScalingKeys - 1; ++k) {
+                            if (animTimeTicks >= nodeAnim->mScalingKeys[k].mTime && 
+                                animTimeTicks < nodeAnim->mScalingKeys[k + 1].mTime) {
+                                double dt = nodeAnim->mScalingKeys[k + 1].mTime - nodeAnim->mScalingKeys[k].mTime;
+                                float t = (dt > 0) ? static_cast<float>((animTimeTicks - nodeAnim->mScalingKeys[k].mTime) / dt) : 0.0f;
+                                const auto& s0 = nodeAnim->mScalingKeys[k].mValue;
+                                const auto& s1 = nodeAnim->mScalingKeys[k + 1].mValue;
+                                scaledVal = {s0.x + t * (s1.x - s0.x), s0.y + t * (s1.y - s0.y), s0.z + t * (s1.z - s0.z)};
+                                break;
+                            }
                         }
                     }
                     
-                    const aiVectorKey& scaleKey = nodeAnim->mScalingKeys[keyIdx];
                     scales[boneIdx] = {
-                        tinyusdz::value::float_to_half_full(scaleKey.mValue.x),
-                        tinyusdz::value::float_to_half_full(scaleKey.mValue.y),
-                        tinyusdz::value::float_to_half_full(scaleKey.mValue.z)
+                        tinyusdz::value::float_to_half_full(scaledVal.x),
+                        tinyusdz::value::float_to_half_full(scaledVal.y),
+                        tinyusdz::value::float_to_half_full(scaledVal.z)
                     };
                 }
-            } else {
-                ASSIMP_LOG_DEBUG("USDZExporter: ANIM_SKIP: bone '" + boneName + "' not found in animation joint index (not in animated bone set)");
             }
         }
         
@@ -3561,6 +3573,7 @@ void USDZExporter::ExportPropertyAnimations(const aiAnimation* anim) {
                         propAnim->mKeys[k].mValues[1],
                         propAnim->mKeys[k].mValues[2]
                     };
+                    if (k == 0) animColor.set_default(color);
                     animColor.add_sample(timeCode, color);
                 }
                 surface->diffuseColor.set_value(animColor);
@@ -3574,6 +3587,7 @@ void USDZExporter::ExportPropertyAnimations(const aiAnimation* anim) {
                         propAnim->mKeys[k].mValues[1],
                         propAnim->mKeys[k].mValues[2]
                     };
+                    if (k == 0) animColor.set_default(color);
                     animColor.add_sample(timeCode, color);
                 }
                 surface->emissiveColor.set_value(animColor);
@@ -3614,8 +3628,9 @@ void USDZExporter::ExportPropertyAnimations(const aiAnimation* anim) {
             tinyusdz::Animatable<tinyusdz::Visibility> animVis;
             for (uint32_t k = 0; k < propAnim->mNumKeys; ++k) {
                 double timeCode = propAnim->mKeys[k].mTime * timeScale;
-                bool visible = propAnim->mKeys[k].mValues[0] > 0.5f;
-                animVis.add_sample(timeCode, visible ? tinyusdz::Visibility::Inherited : tinyusdz::Visibility::Invisible);
+                auto vis = propAnim->mKeys[k].mValues[0] > 0.5f ? tinyusdz::Visibility::Inherited : tinyusdz::Visibility::Invisible;
+                if (k == 0) animVis.set_default(vis);
+                animVis.add_sample(timeCode, vis);
             }
             const_cast<tinyusdz::Xform*>(xformData)->visibility.set_value(animVis);
             ASSIMP_LOG_DEBUG("USDZExporter: Applied visibility animation to node '" + nodeIt->second + "' with " + ai_to_string(propAnim->mNumKeys) + " keyframes");
@@ -4283,13 +4298,17 @@ std::string USDZExporter::GetSceneName() const {
 std::string USDZExporter::BuildFullHierarchyPath(const aiNode* node, const std::string& rootPrimName) const {
     if (!node) return "/" + rootPrimName;
     
-    // Build path components by traversing up to the root
+    // Build path components by traversing up to the root, using mNodeIdMap
+    // for actual USD prim names (which may differ from aiNode names due to
+    // deduplication by GenerateUniqueName)
     std::vector<std::string> pathComponents;
     const aiNode* current = node;
     
-    // Traverse up to collect all parent node names
     while (current && current != mScene->mRootNode) {
-        std::string nodeName = SanitizeName(current->mName.C_Str());
+        auto nodeIt = mNodeIdMap.find(current);
+        std::string nodeName = (nodeIt != mNodeIdMap.end())
+            ? nodeIt->second
+            : SanitizeName(current->mName.C_Str());
         if (nodeName.empty()) {
             nodeName = "UnnamedNode";
         }
@@ -4297,18 +4316,18 @@ std::string USDZExporter::BuildFullHierarchyPath(const aiNode* node, const std::
         current = current->mParent;
     }
     
-    // Add the scene root node name if we have one
     if (current == mScene->mRootNode) {
-        std::string rootNodeName = SanitizeName(mScene->mRootNode->mName.C_Str());
+        auto rootIt = mNodeIdMap.find(mScene->mRootNode);
+        std::string rootNodeName = (rootIt != mNodeIdMap.end())
+            ? rootIt->second
+            : SanitizeName(mScene->mRootNode->mName.C_Str());
         if (!rootNodeName.empty()) {
             pathComponents.push_back(rootNodeName);
         }
     }
     
-    // Build the path string from root to target (reverse the components)
     std::string fullPath = "/" + rootPrimName;
     
-    // Add path components in reverse order (from root down to target)
     for (auto it = pathComponents.rbegin(); it != pathComponents.rend(); ++it) {
         fullPath += "/" + *it;
     }
@@ -4323,15 +4342,18 @@ tinyusdz::Shader USDZExporter::CreateTexCoordReader(const std::string& varName) 
     texCoordReader.name = "texCoordReader";
     texCoordReader.info_id = "UsdPrimvarReader_float2";
     
-    // Create UsdPrimvarReader_float2 to read UV coordinates
     tinyusdz::UsdPrimvarReader_float2 primvarReader;
     
-    // Set varname connection - this connects to the material's stPrimvarName input
-    std::string varNamePath = mCurrentMaterialPath + ".inputs:stPrimvarName";
-    tinyusdz::Path varNameConnection(varNamePath, "");
-    primvarReader.varname.set_connection(varNameConnection);
+    if (varName.empty() || varName == "st") {
+        // Default: connect to material's stPrimvarName input for backward compat
+        std::string varNamePath = mCurrentMaterialPath + ".inputs:stPrimvarName";
+        tinyusdz::Path varNameConnection(varNamePath, "");
+        primvarReader.varname.set_connection(varNameConnection);
+    } else {
+        // Specific UV channel: set varname directly
+        primvarReader.varname.set_value(varName);
+    }
     
-    // Set output
     primvarReader.result.set_authored(true);
     
     texCoordReader.value = primvarReader;
@@ -4397,18 +4419,20 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
         transform2d.translation.set_value(tinyusdz::value::float2{transX, transY});
         
         // Apply rotation if present (convert from radians to degrees)
+        // The Assimp glTF2 importer stores mRotation = -theta_gltf (negated).
+        // USD UsdTransform2d uses Convention A rotation (standard CCW in V-up space),
+        // while glTF uses Convention B (CCW in V-down space). Since scale.y is negated
+        // to flip V, the rotation operates in V-up space after scaling. Convention A
+        // in V-up produces the same visual rotation as Convention B in V-down for the
+        // same angle, so we need theta_gltf = -mRotation.
         if (uvTransform->mRotation != 0.0f) {
-            float rotationDegrees = uvTransform->mRotation * 180.0f / M_PI;
-            // Flip rotation sign for Y-flip coordinate system
-            if (flipY) {
-                rotationDegrees = -rotationDegrees;
-            }
+            float rotationDegrees = -uvTransform->mRotation * 180.0f / M_PI;
             transform2d.rotation.set_value(rotationDegrees);
         }
         
         ASSIMP_LOG_DEBUG("USDZExporter: Refined result: scale(" + ai_to_string(scaleX) + "," + ai_to_string(scaleY) + 
                        ") trans(" + ai_to_string(transX) + "," + ai_to_string(transY) + 
-                       ") rot(" + ai_to_string(uvTransform->mRotation * 180.0f / M_PI) + ")");
+                       ") rot(" + ai_to_string(-uvTransform->mRotation * 180.0f / M_PI) + ")");
     } else {
         // Default Y-flip transformation (common for textures)
         if (flipY) {
@@ -4613,52 +4637,25 @@ uint32_t USDZExporter::ProcessEmbeddedTextures(TextureHandler handler, const std
         const aiTexture* tex = mScene->mTextures[i];
         if (!tex) continue;
         
-        // Generate filename for embedded texture
-        std::string baseTextureName;
-        if (tex->mFilename.length > 0) {
-            baseTextureName = tex->mFilename.C_Str();
-        } else {
-            baseTextureName = GenerateDescriptiveTextureName(i, "");
-        }
-        
-        // Add appropriate extension if not present
-        std::string extension = ".png"; // Default
-        if (tex->mHeight == 0 && tex->achFormatHint[0] != '\0') {
-            std::string formatHint(tex->achFormatHint);
-            if (formatHint.find('.') == std::string::npos) {
-                extension = "." + formatHint;
-            } else {
-                extension = formatHint;
-            }
-        }
-        
-        if (baseTextureName.find('.') == std::string::npos) {
-            baseTextureName += extension;
-        }
-        
-        std::string sanitizedFilename = SanitizeFilename(baseTextureName);
-        std::string texturePath = pathPrefix + sanitizedFilename;
+        std::string uniqueFilename = GetEmbeddedTextureFilename(static_cast<int>(i));
+        std::string texturePath = pathPrefix + uniqueFilename;
         
         // Extract texture data
         std::vector<uint8_t> textureData;
         if (tex->mHeight == 0 && tex->pcData && tex->mWidth > 0) {
-            // Compressed texture data
             textureData.assign(
                 reinterpret_cast<const uint8_t*>(tex->pcData),
                 reinterpret_cast<const uint8_t*>(tex->pcData) + tex->mWidth
             );
         } else {
-            // Raw RGBA texture data - convert to PNG or store as-is
             std::vector<uint8_t> pngData;
             if (ConvertRawTextureToPNG(tex, pngData)) {
                 textureData = std::move(pngData);
-                // Update path to PNG if it wasn't already
                 if (texturePath.length() >= 4 && texturePath.substr(texturePath.length() - 4) != ".png") {
                     texturePath = texturePath.substr(0, texturePath.find_last_of('.')) + ".png";
                 }
             } else {
-                // Fallback: store raw RGBA data (not ideal but better than nothing)
-                size_t dataSize = tex->mWidth * tex->mHeight * 4; // RGBA
+                size_t dataSize = tex->mWidth * tex->mHeight * 4;
                 textureData.assign(
                     reinterpret_cast<const uint8_t*>(tex->pcData),
                     reinterpret_cast<const uint8_t*>(tex->pcData) + dataSize
@@ -4666,7 +4663,6 @@ uint32_t USDZExporter::ProcessEmbeddedTextures(TextureHandler handler, const std
             }
         }
         
-        // Delegate to handler for output-specific processing
         if (!textureData.empty()) {
             if (handler(texturePath, textureData)) {
                 ++processedCount;
@@ -4902,12 +4898,9 @@ std::string USDZExporter::GenerateDescriptiveTextureName(int textureIndex, const
         return baseTextureName;
     }
     
-    // Analyze material usage to generate descriptive names like the reference USDZ
-    // We need to track which texture indices are used for which purposes
-    static std::map<int, std::string> textureUsageMap;
+    std::map<int, std::string> textureUsageMap;
     
-    // First pass: collect texture usage information from materials
-    if (textureUsageMap.empty() && mScene && mScene->mNumMaterials > 0) {
+    if (mScene && mScene->mNumMaterials > 0) {
         for (unsigned int matIdx = 0; matIdx < mScene->mNumMaterials; ++matIdx) {
             const aiMaterial* material = mScene->mMaterials[matIdx];
             if (!material) continue;
@@ -4967,6 +4960,88 @@ std::string USDZExporter::GenerateDescriptiveTextureName(int textureIndex, const
     }
     
     return "embedded_texture_" + ai_to_string(textureIndex);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Build a centralized mapping from texture index to unique filename.
+// Handles duplicate names from GLB images (same name, different data) and
+// duplicate descriptive names (multiple unnamed images used for the same type).
+void USDZExporter::BuildEmbeddedTextureFilenameMap() {
+    mEmbeddedTextureFilenames.clear();
+    if (!mScene || mScene->mNumTextures == 0) return;
+
+    // First pass: generate initial filenames for every embedded texture
+    std::map<int, std::string> initialNames;
+    for (uint32_t i = 0; i < mScene->mNumTextures; ++i) {
+        const aiTexture* tex = mScene->mTextures[i];
+        if (!tex) continue;
+
+        std::string name;
+        if (tex->mFilename.length > 0) {
+            name = tex->mFilename.C_Str();
+            size_t lastSlash = name.find_last_of("/\\");
+            if (lastSlash != std::string::npos) {
+                name = name.substr(lastSlash + 1);
+            }
+        }
+
+        if (name.empty() || name.find("embedded_texture_") == 0) {
+            name = GenerateDescriptiveTextureName(static_cast<int>(i), "");
+        }
+
+        std::string extension = ".png";
+        if (tex->mHeight == 0 && tex->achFormatHint[0] != '\0') {
+            std::string formatHint(tex->achFormatHint);
+            if (formatHint.find('.') == std::string::npos) {
+                extension = "." + formatHint;
+            } else {
+                extension = formatHint;
+            }
+        }
+        if (name.find('.') == std::string::npos) {
+            name += extension;
+        }
+
+        name = SanitizeFilename(name);
+        initialNames[static_cast<int>(i)] = name;
+    }
+
+    // Second pass: detect duplicates and append texture index to disambiguate
+    std::map<std::string, std::vector<int>> nameToIndices;
+    for (const auto& entry : initialNames) {
+        nameToIndices[entry.second].push_back(entry.first);
+    }
+
+    for (const auto& entry : nameToIndices) {
+        const std::string& name = entry.first;
+        const std::vector<int>& indices = entry.second;
+        if (indices.size() == 1) {
+            mEmbeddedTextureFilenames[indices[0]] = name;
+        } else {
+            for (int idx : indices) {
+                std::string base = name;
+                std::string ext;
+                auto dotPos = base.find_last_of('.');
+                if (dotPos != std::string::npos) {
+                    ext = base.substr(dotPos);
+                    base = base.substr(0, dotPos);
+                }
+                mEmbeddedTextureFilenames[idx] = base + "_" + ai_to_string(idx) + ext;
+            }
+            ASSIMP_LOG_DEBUG("USDZExporter: Disambiguated " + ai_to_string(static_cast<uint32_t>(indices.size())) +
+                            " textures with name \"" + name + "\"");
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Look up the unique filename for an embedded texture index.
+std::string USDZExporter::GetEmbeddedTextureFilename(int textureIndex) {
+    auto it = mEmbeddedTextureFilenames.find(textureIndex);
+    if (it != mEmbeddedTextureFilenames.end()) {
+        return it->second;
+    }
+    return "embedded_texture_" + ai_to_string(textureIndex) + ".png";
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -5071,24 +5146,25 @@ bool USDZExporter::ShouldSkipBoneNode(const std::string& nodeName) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Pre-detect shared meshes before hierarchy export
+// ------------------------------------------------------------------------------------------------
 // Check if node only contains skeletal meshes
 bool USDZExporter::NodeOnlyContainsSkeletalMeshes(const aiNode* node) {
     if (!node || node->mNumMeshes == 0) {
-        return false; // Nodes without meshes are not "skeletal-only"
+        return false;
     }
     
-    // Check if all meshes in this node are skeletal
     for (uint32_t i = 0; i < node->mNumMeshes; ++i) {
         uint32_t meshIndex = node->mMeshes[i];
         if (meshIndex < mScene->mNumMeshes) {
             const aiMesh* mesh = mScene->mMeshes[meshIndex];
             if (!mesh->HasBones()) {
-                return false; // Found a non-skeletal mesh
+                return false;
             }
         }
     }
     
-    return true; // All meshes are skeletal
+    return true;
 }
 
 // ------------------------------------------------------------------------------------------------

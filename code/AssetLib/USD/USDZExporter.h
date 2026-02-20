@@ -146,7 +146,7 @@ private:
     bool IsPointPrimitive(const aiMesh* mesh);
     void ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     bool NeedsSkeletalTreatment(const aiMesh* mesh);
-    tinyusdz::Prim CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames = {}, const std::string& parentNodeName = "");
+    tinyusdz::Prim CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames = {}, const std::string& parentPrimPath = "", const std::string& parentNodeOrigName = "");
     
     // Forward declaration for BlendShapeResult
     struct BlendShapeResult;
@@ -276,9 +276,9 @@ private:
         using BoneNameConverter = std::function<std::string(const std::string&)>;
         
         explicit MeshConverterPipeline(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh, const aiScene* scene, 
-                                     NameRegistry& nameRegistry, tinyusdz::Stage& stage)
-            : mMesh(mesh), mUsdMesh(usdMesh), mScene(scene), mNameRegistry(nameRegistry), mStage(stage), mValid(mesh != nullptr) {
-            // Suppress unused parameter warnings - kept for future extensibility
+                                     NameRegistry& nameRegistry, tinyusdz::Stage& stage,
+                                     const USDZExporter* exporter = nullptr)
+            : mMesh(mesh), mUsdMesh(usdMesh), mScene(scene), mNameRegistry(nameRegistry), mStage(stage), mExporter(exporter), mValid(mesh != nullptr) {
             (void)mStage;
             (void)mNameRegistry;
         }
@@ -368,6 +368,7 @@ private:
         const aiScene* mScene;
         NameRegistry& mNameRegistry;
         tinyusdz::Stage& mStage;
+        const USDZExporter* mExporter;
         bool mValid;
         // Store blend shapes to be added as children of the mesh prim
         std::vector<std::string> mBlendShapeNames;  // Store blend shape names for SkelRoot creation
@@ -510,6 +511,9 @@ private:
     
     // Texture naming utilities  
     std::string GenerateDescriptiveTextureName(int textureIndex, const std::string& baseTextureName);
+    void BuildEmbeddedTextureFilenameMap();
+    std::string GetEmbeddedTextureFilename(int textureIndex);
+    std::map<int, std::string> mEmbeddedTextureFilenames;
 
     // Core members
     std::unique_ptr<tinyusdz::Stage> mStage;
@@ -535,6 +539,9 @@ private:
     tinyusdz::Prim* FindSkeletonParentPrim();
     tinyusdz::Prim* FindGeomScopeInSkelRoot();
     std::string ComputePrimPath(const tinyusdz::Prim* target);
+    
+    // Global bone-to-skeleton-index mapping (computed in ExportSkeletons, used in ConvertMesh)
+    std::map<std::string, uint32_t> mGlobalBoneToSkeletonIndex;
     
     // Skeleton hierarchy state (computed during ExportSkeletons, reused elsewhere)
     tinyusdz::Prim* mSkeletonParentPrim = nullptr;
@@ -571,10 +578,14 @@ private:
     // Critical for ensuring mesh skel:joints references match skeleton joint paths exactly
     std::map<std::string, std::string> mBoneNameToUSDPath;
 
+    // Vertex color tracking: material indices that are used by meshes with vertex colors
+    std::set<uint32_t> mMaterialsWithVertexColors;
+
     // Texture processing helpers (for current material being processed)
     std::string mCurrentMaterialPath;
     std::vector<std::pair<std::string, tinyusdz::UsdUVTexture>> mCurrentMaterialTextureShaders;
     std::map<std::string, aiUVTransform> mCurrentMaterialTextureTransforms;
+    std::map<std::string, int> mCurrentMaterialTextureUVIndices;
     
     // Shared mesh tracking for programmatic reference system (data-driven instancing)
     struct SharedMeshInfo {

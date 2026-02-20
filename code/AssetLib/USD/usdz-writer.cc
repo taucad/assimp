@@ -110,19 +110,9 @@ bool CreateUSDZArchiveWithTextures(const std::string &filename, const std::strin
             
             extraFieldData = reinterpret_cast<const char*>(extraData.data());
             extraFieldLength = static_cast<mz_uint>(extraData.size());
-        } else {
-            // For perfectly aligned start, include minimal USDZ extra field
-            extraData.resize(4, 0);
-            const uint16_t extraFieldID = 0x1986;
-            
-            extraData[0] = static_cast<uint8_t>(extraFieldID & 0xFF);
-            extraData[1] = static_cast<uint8_t>((extraFieldID >> 8) & 0xFF);
-            extraData[2] = 0; // No padding data
-            extraData[3] = 0;
-            
-            extraFieldData = reinterpret_cast<const char*>(extraData.data());
-            extraFieldLength = static_cast<mz_uint>(extraData.size());
         }
+        // When already aligned (actualPaddingNeeded == 0), skip extra field entirely
+        // to preserve 64-byte alignment
         
         // KEY INSIGHT: Use mz_zip_writer_add_read_buf_callback which respects MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE
         // From miniz.c line 6528: gen_flags = (MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE) ? 0 : MZ_ZIP_LDH_BIT_FLAG_HAS_LOCATOR
@@ -344,16 +334,12 @@ bool SaveAsUSDZToMemory(const std::string &usdContent,
             extraData[1] = static_cast<uint8_t>((extraFieldID >> 8) & 0xFF);
             extraData[2] = static_cast<uint8_t>(paddingDataSize & 0xFF);
             extraData[3] = static_cast<uint8_t>((paddingDataSize >> 8) & 0xFF);
-        } else {
-            extraData.resize(4, 0);
-            const uint16_t extraFieldID = 0x1986;
-            extraData[0] = static_cast<uint8_t>(extraFieldID & 0xFF);
-            extraData[1] = static_cast<uint8_t>((extraFieldID >> 8) & 0xFF);
-            extraData[2] = 0;
-            extraData[3] = 0;
         }
-        extraFieldData = reinterpret_cast<const char*>(extraData.data());
-        extraFieldLength = static_cast<mz_uint>(extraData.size());
+        // When already aligned (actualPaddingNeeded == 0), skip extra field entirely
+        if (!extraData.empty()) {
+            extraFieldData = reinterpret_cast<const char*>(extraData.data());
+            extraFieldLength = static_cast<mz_uint>(extraData.size());
+        }
 
         struct MemCtx { const void* d; size_t sz; };
         MemCtx ctx{data, size};
