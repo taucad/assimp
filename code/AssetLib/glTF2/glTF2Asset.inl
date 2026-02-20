@@ -1150,9 +1150,30 @@ inline void Image::Read(Value &obj, Asset &r) {
                 }
             } else {
                 this->uri = uristr;
-                // Load external texture into memory for export compatibility
-                // This ensures external textures are available when exporting to other formats
-                std::unique_ptr<IOStream> textureFile(r.OpenFile(uristr, "rb"));
+                // URL-decode the URI for file I/O (glTF URIs may be percent-encoded, e.g. %20 for space)
+                std::string decodedUri(uristr);
+                {
+                    std::string decoded;
+                    decoded.reserve(decodedUri.size());
+                    for (size_t di = 0; di < decodedUri.size(); ++di) {
+                        if (decodedUri[di] == '%' && di + 2 < decodedUri.size()) {
+                            auto hexVal = [](char ch) -> unsigned char {
+                                if (ch >= '0' && ch <= '9') return static_cast<unsigned char>(ch - '0');
+                                if (ch >= 'a' && ch <= 'f') return static_cast<unsigned char>(ch - 'a' + 10);
+                                if (ch >= 'A' && ch <= 'F') return static_cast<unsigned char>(ch - 'A' + 10);
+                                return 0;
+                            };
+                            decoded += static_cast<char>((hexVal(decodedUri[di + 1]) << 4) | hexVal(decodedUri[di + 2]));
+                            di += 2;
+                        } else {
+                            decoded += decodedUri[di];
+                        }
+                    }
+                    decodedUri = std::move(decoded);
+                }
+                const std::string &assetDir = r.GetCurrentAssetDir();
+                std::string fullPath = assetDir.empty() ? decodedUri : assetDir + decodedUri;
+                std::unique_ptr<IOStream> textureFile(r.OpenFile(fullPath, "rb"));
                 if (textureFile && textureFile->FileSize() > 0) {
                     size_t fileSize = textureFile->FileSize();
                     uint8_t* textureData = new uint8_t[fileSize];
@@ -1417,6 +1438,19 @@ inline void Material::Read(Value &material, Asset &r) {
                 ReadTextureProperty(r, *curMaterialTransmission, "transmissionTexture", transmission.transmissionTexture);
 
                 this->materialTransmission = Nullable<MaterialTransmission>(transmission);
+            }
+        }
+
+        if (r.extensionsUsed.KHR_materials_diffuse_transmission) {
+            if (Value *ext = FindObject(*extensions, "KHR_materials_diffuse_transmission")) {
+                MaterialDiffuseTransmission dt;
+
+                ReadMember(*ext, "diffuseTransmissionFactor", dt.diffuseTransmissionFactor);
+                ReadTextureProperty(r, *ext, "diffuseTransmissionTexture", dt.diffuseTransmissionTexture);
+                ReadMember(*ext, "diffuseTransmissionColorFactor", dt.diffuseTransmissionColorFactor);
+                ReadTextureProperty(r, *ext, "diffuseTransmissionColorTexture", dt.diffuseTransmissionColorTexture);
+
+                this->materialDiffuseTransmission = Nullable<MaterialDiffuseTransmission>(dt);
             }
         }
 
@@ -2243,6 +2277,7 @@ inline void Asset::ReadExtensionsUsed(Document &doc) {
     CHECK_EXT(KHR_materials_sheen);
     CHECK_EXT(KHR_materials_clearcoat);
     CHECK_EXT(KHR_materials_transmission);
+    CHECK_EXT(KHR_materials_diffuse_transmission);
     CHECK_EXT(KHR_materials_volume);
     CHECK_EXT(KHR_materials_ior);
     CHECK_EXT(KHR_materials_emissive_strength);

@@ -1880,9 +1880,25 @@ void glTF2Importer::ImportTextures(glTF2::Asset &r) {
         size_t length = img.GetDataLength();
         void *data = img.StealData();
 
-        // Set filename - prefer original filename, fallback to URI or name
+        // Set filename - prefer decoded URI (spaces instead of %20), fallback to name
         if (!img.uri.empty()) {
-            tex->mFilename = img.uri;  // External texture - use original URI
+            std::string decoded;
+            decoded.reserve(img.uri.size());
+            for (size_t ci = 0; ci < img.uri.size(); ++ci) {
+                if (img.uri[ci] == '%' && ci + 2 < img.uri.size()) {
+                    auto hv = [](char ch) -> unsigned char {
+                        if (ch >= '0' && ch <= '9') return static_cast<unsigned char>(ch - '0');
+                        if (ch >= 'a' && ch <= 'f') return static_cast<unsigned char>(ch - 'a' + 10);
+                        if (ch >= 'A' && ch <= 'F') return static_cast<unsigned char>(ch - 'A' + 10);
+                        return 0;
+                    };
+                    decoded += static_cast<char>((hv(img.uri[ci + 1]) << 4) | hv(img.uri[ci + 2]));
+                    ci += 2;
+                } else {
+                    decoded += img.uri[ci];
+                }
+            }
+            tex->mFilename = decoded;
         } else if (!img.name.empty()) {
             tex->mFilename = img.name;  // Use image name if available
         }

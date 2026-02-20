@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *   KHR_materials_sheen full
  *   KHR_materials_clearcoat full
  *   KHR_materials_transmission full
+ *   KHR_materials_diffuse_transmission full
  *   KHR_materials_volume full
  *   KHR_materials_ior full
  *   KHR_materials_emissive_strength full
@@ -799,6 +800,21 @@ struct MaterialTransmission {
     float transmissionFactor = 0.f;
 };
 
+struct MaterialDiffuseTransmission {
+    float diffuseTransmissionFactor = 0.f;
+    TextureInfo diffuseTransmissionTexture;
+    vec3 diffuseTransmissionColorFactor;
+    TextureInfo diffuseTransmissionColorTexture;
+
+    MaterialDiffuseTransmission() { SetDefaults(); }
+    void SetDefaults() {
+        diffuseTransmissionFactor = 0.f;
+        diffuseTransmissionColorFactor[0] = 1.f;
+        diffuseTransmissionColorFactor[1] = 1.f;
+        diffuseTransmissionColorFactor[2] = 1.f;
+    }
+};
+
 struct MaterialVolume {
     float thicknessFactor = 0.f;
     TextureInfo thicknessTexture;
@@ -860,6 +876,9 @@ struct Material : public Object {
 
     //extension: KHR_materials_transmission
     Nullable<MaterialTransmission> materialTransmission;
+
+    //extension: KHR_materials_diffuse_transmission
+    Nullable<MaterialDiffuseTransmission> materialDiffuseTransmission;
 
     //extension: KHR_materials_volume
     Nullable<MaterialVolume> materialVolume;
@@ -1145,6 +1164,7 @@ public:
         bool KHR_materials_sheen;
         bool KHR_materials_clearcoat;
         bool KHR_materials_transmission;
+        bool KHR_materials_diffuse_transmission;
         bool KHR_materials_volume;
         bool KHR_materials_ior;
         bool KHR_materials_emissive_strength;
@@ -1163,6 +1183,7 @@ public:
                 KHR_materials_sheen(false),
                 KHR_materials_clearcoat(false),
                 KHR_materials_transmission(false),
+                KHR_materials_diffuse_transmission(false),
                 KHR_materials_volume(false),
                 KHR_materials_ior(false),
                 KHR_materials_emissive_strength(false),
@@ -1246,6 +1267,8 @@ public:
     std::string FindUniqueID(const std::string &str, const char *suffix);
 
     Ref<Buffer> GetBodyBuffer() { return mBodyBuffer; }
+
+    const std::string &GetCurrentAssetDir() const { return mCurrentAssetDir; }
 
     IOStream *OpenFile(const std::string &path, const char *mode, bool absolute = false);
 
