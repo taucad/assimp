@@ -78,11 +78,18 @@ private:
     void ImportCommonMetadata(glTF2::Asset &a);
     aiNode *ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr);
 
+    aiMesh *DuplicateMeshGeometry(const aiMesh *src);
+
 private:
     std::vector<unsigned int> meshOffsets;
     std::vector<int> mEmbeddedTexIdxs;
     std::vector<std::vector<unsigned int>> mVertexRemappingTables; // for each converted aiMesh in the scene, it stores a list of vertices that are actually used
     aiScene *mScene;
+
+    // Multi-skin mesh duplication support: tracks which skin index was first applied
+    // to each aiMesh index, so we can detect when a different skin needs a duplicate
+    std::map<unsigned int, unsigned int> mMeshSkinMap;
+    std::vector<aiMesh *> mDuplicatedMeshes;
 
     /// An instance of rapidjson::IRemoteSchemaDocumentProvider
     void *mSchemaDocumentProvider = nullptr;

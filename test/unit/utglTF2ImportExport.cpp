@@ -53,6 +53,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rapidjson/schema.h>
 
 #include <array>
+#include <map>
+#include <queue>
 
 #include <assimp/material.h>
 #include <assimp/GltfMaterial.h>
@@ -1054,5 +1056,62 @@ TEST_F(utglTF2ImportExport, testSetIdentityMatrixEpsilon) {
     EXPECT_FALSE(m.IsIdentity(epsilon));
     m = aiMatrix4x4(1.00009f, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
     EXPECT_TRUE(m.IsIdentity(epsilon));
+}
+
+TEST_F(utglTF2ImportExport, import_multi_skin_mesh_duplication) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/multi_skin/multi_skin.gltf",
+            aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+
+    // 1 glTF mesh + 2 different skins -> 2 aiMeshes
+    EXPECT_EQ(2u, scene->mNumMeshes);
+
+    // Both meshes must have identical geometry
+    EXPECT_EQ(scene->mMeshes[0]->mNumVertices, scene->mMeshes[1]->mNumVertices);
+    for (unsigned int v = 0; v < scene->mMeshes[0]->mNumVertices; ++v) {
+        EXPECT_FLOAT_EQ(scene->mMeshes[0]->mVertices[v].x,
+                        scene->mMeshes[1]->mVertices[v].x);
+        EXPECT_FLOAT_EQ(scene->mMeshes[0]->mVertices[v].y,
+                        scene->mMeshes[1]->mVertices[v].y);
+        EXPECT_FLOAT_EQ(scene->mMeshes[0]->mVertices[v].z,
+                        scene->mMeshes[1]->mVertices[v].z);
+    }
+
+    // Each mesh must have its own bone set from its respective skin
+    ASSERT_EQ(2u, scene->mMeshes[0]->mNumBones);
+    ASSERT_EQ(2u, scene->mMeshes[1]->mNumBones);
+    EXPECT_STREQ("joint_a0", scene->mMeshes[0]->mBones[0]->mName.C_Str());
+    EXPECT_STREQ("joint_a1", scene->mMeshes[0]->mBones[1]->mName.C_Str());
+    EXPECT_STREQ("joint_b0", scene->mMeshes[1]->mBones[0]->mName.C_Str());
+    EXPECT_STREQ("joint_b1", scene->mMeshes[1]->mBones[1]->mName.C_Str());
+
+    // Nodes must reference different mesh indices
+    std::queue<const aiNode *> q;
+    q.push(scene->mRootNode);
+    std::map<std::string, unsigned int> nodeMeshMap;
+    while (!q.empty()) {
+        const aiNode *n = q.front();
+        q.pop();
+        if (n->mNumMeshes == 1) {
+            nodeMeshMap[n->mName.C_Str()] = n->mMeshes[0];
+        }
+        for (unsigned int i = 0; i < n->mNumChildren; ++i) {
+            q.push(n->mChildren[i]);
+        }
+    }
+    ASSERT_NE(nodeMeshMap.find("skinned_node_a"), nodeMeshMap.end());
+    ASSERT_NE(nodeMeshMap.find("skinned_node_b"), nodeMeshMap.end());
+    EXPECT_NE(nodeMeshMap["skinned_node_a"], nodeMeshMap["skinned_node_b"]);
+}
+
+TEST_F(utglTF2ImportExport, import_single_skin_no_duplication) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/simple_skin/simple_skin.gltf",
+            aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    EXPECT_EQ(1u, scene->mNumMeshes);
 }
 

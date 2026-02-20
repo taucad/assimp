@@ -1137,6 +1137,64 @@ void ParseExtras(aiMetadata* metadata, const Extras& extras) {
     }
 }
 
+aiMesh *glTF2Importer::DuplicateMeshGeometry(const aiMesh *src) {
+    aiMesh *dst = new aiMesh();
+
+    dst->mName = src->mName;
+    dst->mPrimitiveTypes = src->mPrimitiveTypes;
+    dst->mMaterialIndex = src->mMaterialIndex;
+    dst->mMethod = src->mMethod;
+    dst->mNumVertices = src->mNumVertices;
+    dst->mNumFaces = src->mNumFaces;
+    dst->mAABB = src->mAABB;
+
+    if (src->mVertices && src->mNumVertices > 0) {
+        dst->mVertices = new aiVector3D[src->mNumVertices];
+        memcpy(dst->mVertices, src->mVertices, src->mNumVertices * sizeof(aiVector3D));
+    }
+    if (src->mNormals) {
+        dst->mNormals = new aiVector3D[src->mNumVertices];
+        memcpy(dst->mNormals, src->mNormals, src->mNumVertices * sizeof(aiVector3D));
+    }
+    if (src->mTangents) {
+        dst->mTangents = new aiVector3D[src->mNumVertices];
+        memcpy(dst->mTangents, src->mTangents, src->mNumVertices * sizeof(aiVector3D));
+    }
+    if (src->mBitangents) {
+        dst->mBitangents = new aiVector3D[src->mNumVertices];
+        memcpy(dst->mBitangents, src->mBitangents, src->mNumVertices * sizeof(aiVector3D));
+    }
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++n) {
+        if (src->mTextureCoords[n]) {
+            dst->mTextureCoords[n] = new aiVector3D[src->mNumVertices];
+            memcpy(dst->mTextureCoords[n], src->mTextureCoords[n], src->mNumVertices * sizeof(aiVector3D));
+            dst->mNumUVComponents[n] = src->mNumUVComponents[n];
+        }
+    }
+    for (unsigned int n = 0; n < AI_MAX_NUMBER_OF_COLOR_SETS; ++n) {
+        if (src->mColors[n]) {
+            dst->mColors[n] = new aiColor4D[src->mNumVertices];
+            memcpy(dst->mColors[n], src->mColors[n], src->mNumVertices * sizeof(aiColor4D));
+        }
+    }
+    if (src->mFaces && src->mNumFaces > 0) {
+        dst->mFaces = new aiFace[src->mNumFaces];
+        for (unsigned int f = 0; f < src->mNumFaces; ++f) {
+            dst->mFaces[f].mNumIndices = src->mFaces[f].mNumIndices;
+            dst->mFaces[f].mIndices = new unsigned int[src->mFaces[f].mNumIndices];
+            memcpy(dst->mFaces[f].mIndices, src->mFaces[f].mIndices, src->mFaces[f].mNumIndices * sizeof(unsigned int));
+        }
+    }
+
+    // Bones and anim meshes intentionally NOT copied -- caller applies fresh skin data
+    dst->mNumBones = 0;
+    dst->mBones = nullptr;
+    dst->mNumAnimMeshes = 0;
+    dst->mAnimMeshes = nullptr;
+
+    return dst;
+}
+
 aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr) {
     Node &node = *ptr;
 
@@ -1180,12 +1238,43 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
             ainode->mNumMeshes = count;
             ainode->mMeshes = new unsigned int[count];
 
+            // Initialize per-primitive mesh indices (may be overridden by skin duplication)
+            std::vector<unsigned int> nodeMeshIndices(count);
+            for (int k = 0; k < count; ++k) {
+                nodeMeshIndices[k] = meshOffsets[mesh_idx] + k;
+            }
+
             if (node.skin) {
+                unsigned int skinIdx = node.skin.GetIndex();
+
                 for (int primitiveNo = 0; primitiveNo < count; ++primitiveNo) {
-                    unsigned int aiMeshIdx = meshOffsets[mesh_idx] + primitiveNo;
-                    aiMesh *mesh = mScene->mMeshes[aiMeshIdx];
+                    unsigned int origMeshIdx = meshOffsets[mesh_idx] + primitiveNo;
+
+                    auto skinIt = mMeshSkinMap.find(origMeshIdx);
+                    if (skinIt != mMeshSkinMap.end() && skinIt->second == skinIdx) {
+                        // Same skin already applied to this mesh -- reuse as-is
+                        continue;
+                    }
+
+                    aiMesh *mesh;
+                    unsigned int targetMeshIdx;
+
+                    if (skinIt != mMeshSkinMap.end()) {
+                        // Different skin -- duplicate mesh geometry
+                        mesh = DuplicateMeshGeometry(mScene->mMeshes[origMeshIdx]);
+                        targetMeshIdx = mScene->mNumMeshes + static_cast<unsigned int>(mDuplicatedMeshes.size());
+                        mDuplicatedMeshes.push_back(mesh);
+                        nodeMeshIndices[primitiveNo] = targetMeshIdx;
+                        mMeshSkinMap[targetMeshIdx] = skinIdx;
+                    } else {
+                        // First skin assignment for this mesh
+                        mesh = mScene->mMeshes[origMeshIdx];
+                        targetMeshIdx = origMeshIdx;
+                        mMeshSkinMap[origMeshIdx] = skinIdx;
+                    }
+
                     unsigned int numBones = static_cast<unsigned int>(node.skin->jointNames.size());
-                    std::vector<unsigned int> *vertexRemappingTablePtr = mVertexRemappingTables[aiMeshIdx].empty() ? nullptr : &mVertexRemappingTables[aiMeshIdx];
+                    std::vector<unsigned int> *vertexRemappingTablePtr = mVertexRemappingTables[origMeshIdx].empty() ? nullptr : &mVertexRemappingTables[origMeshIdx];
 
                     std::vector<std::vector<aiVertexWeight>> weighting(numBones);
                     BuildVertexWeightMapping(node.meshes[0]->primitives[primitiveNo], weighting, vertexRemappingTablePtr);
@@ -1193,16 +1282,6 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                     mesh->mNumBones = static_cast<unsigned int>(numBones);
                     mesh->mBones = new aiBone *[mesh->mNumBones];
                     std::fill(mesh->mBones, mesh->mBones + mesh->mNumBones, nullptr);
-
-                    // GLTF and Assimp choose to store bone weights differently.
-                    // GLTF has each vertex specify which bones influence the vertex.
-                    // Assimp has each bone specify which vertices it has influence over.
-                    // To convert this data, we first read over the vertex data and pull
-                    // out the bone-to-vertex mapping.  Then, when creating the aiBones,
-                    // we copy the bone-to-vertex mapping into the bone.  This is unfortunate
-                    // both because it's somewhat slow and because, for many applications,
-                    // we then need to reconvert the data back into the vertex-to-bone
-                    // mapping which makes things doubly-slow.
 
                     mat4 *pbindMatrices = nullptr;
                     node.skin->inverseBindMatrices->ExtractData(pbindMatrices, nullptr);
@@ -1215,7 +1294,6 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                         if (!joint->name.empty()) {
                             bone->mName = joint->name;
                         } else {
-                            // Assimp expects each bone to have a unique name.
                             static const std::string kDefaultName = "bone_";
                             char postfix[10] = { 0 };
                             ASSIMP_itoa10(postfix, i);
@@ -1229,7 +1307,6 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                             bone->mWeights = new aiVertexWeight[bone->mNumWeights];
                             memcpy(bone->mWeights, weights.data(), bone->mNumWeights * sizeof(aiVertexWeight));
                         } else {
-                            // Assimp expects all bones to have at least 1 weight.
                             bone->mWeights = new aiVertexWeight[1];
                             bone->mNumWeights = 1;
                             bone->mWeights->mVertexId = 0;
@@ -1244,9 +1321,8 @@ aiNode *glTF2Importer::ImportNode(glTF2::Asset &r, glTF2::Ref<glTF2::Node> &ptr)
                 }
             }
 
-            int k = 0;
-            for (unsigned int j = meshOffsets[mesh_idx]; j < meshOffsets[mesh_idx + 1]; ++j, ++k) {
-                ainode->mMeshes[k] = j;
+            for (int k = 0; k < count; ++k) {
+                ainode->mMeshes[k] = nodeMeshIndices[k];
             }
         }
 
@@ -1865,6 +1941,8 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     meshOffsets.clear();
     mVertexRemappingTables.clear();
     mEmbeddedTexIdxs.clear();
+    mMeshSkinMap.clear();
+    mDuplicatedMeshes.clear();
 
     this->mScene = pScene;
 
@@ -1888,6 +1966,23 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     ImportLights(asset);
 
     ImportNodes(asset);
+
+    // Merge any meshes duplicated during ImportNode (multi-skin support)
+    if (!mDuplicatedMeshes.empty()) {
+        unsigned int oldCount = pScene->mNumMeshes;
+        unsigned int newCount = oldCount + static_cast<unsigned int>(mDuplicatedMeshes.size());
+        aiMesh **newArray = new aiMesh *[newCount];
+        if (pScene->mMeshes) {
+            memcpy(newArray, pScene->mMeshes, oldCount * sizeof(aiMesh *));
+            delete[] pScene->mMeshes;
+        }
+        for (size_t i = 0; i < mDuplicatedMeshes.size(); ++i) {
+            newArray[oldCount + i] = mDuplicatedMeshes[i];
+        }
+        pScene->mMeshes = newArray;
+        pScene->mNumMeshes = newCount;
+        mDuplicatedMeshes.clear();
+    }
 
     ImportAnimations(asset);
 
