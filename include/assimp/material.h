@@ -1071,6 +1071,14 @@ extern "C" {
 // Multiplied by AI_MATKEY_TRANSMISSION_FACTOR
 #define AI_MATKEY_TRANSMISSION_TEXTURE aiTextureType_TRANSMISSION, 0
 
+// Diffuse Transmission
+// --------------------
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_diffuse_transmission
+#define AI_MATKEY_DIFFUSE_TRANSMISSION_FACTOR "$mat.diffuseTransmission.factor", 0, 0
+#define AI_MATKEY_DIFFUSE_TRANSMISSION_TEXTURE aiTextureType_TRANSMISSION, 2
+#define AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_FACTOR "$mat.diffuseTransmission.colorFactor", 0, 0
+#define AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_TEXTURE aiTextureType_TRANSMISSION, 3
+
 // Volume
 // ------------
 // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_volume
