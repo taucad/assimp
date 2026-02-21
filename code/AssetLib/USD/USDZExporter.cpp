@@ -2540,6 +2540,32 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         }
     }
 
+    // Map glTF KHR_materials_diffuse_transmission to UsdPreviewSurface
+    // Blend diffuseColor = lerp(baseColor, transmissionColor, factor).
+    // Only apply when no diffuseTransmissionTexture exists (texture-modulated cases
+    // have spatially varying factors, so a uniform blend is incorrect).
+    float dtFactor = 0.0f;
+    if (mat->Get(AI_MATKEY_DIFFUSE_TRANSMISSION_FACTOR, dtFactor) == AI_SUCCESS && dtFactor > 0.0f) {
+        aiString dtTexPath;
+        bool hasDtTexture = (mat->GetTexture(aiTextureType_TRANSMISSION, 2, &dtTexPath) == AI_SUCCESS);
+
+        if (!hasDtTexture) {
+            aiColor3D dtColor(1.0f, 1.0f, 1.0f);
+            mat->Get(AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_FACTOR, dtColor);
+
+            float blendedR = baseColor.r * (1.0f - dtFactor) + dtColor.r * dtFactor;
+            float blendedG = baseColor.g * (1.0f - dtFactor) + dtColor.g * dtFactor;
+            float blendedB = baseColor.b * (1.0f - dtFactor) + dtColor.b * dtFactor;
+
+            tinyusdz::value::color3f blended{blendedR, blendedG, blendedB};
+            surface.diffuseColor.set_value(blended);
+
+            ASSIMP_LOG_DEBUG("USDZExporter: Diffuse transmission factor=" + std::to_string(dtFactor) +
+                             " blended diffuseColor (" + std::to_string(blendedR) + ", " +
+                             std::to_string(blendedG) + ", " + std::to_string(blendedB) + ")");
+        }
+    }
+
     // Handle glTF alphaMode for proper transparency
     aiString alphaMode;
     if (mat->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS) {
@@ -2730,6 +2756,52 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             }
         }},
         
+        // Diffuse transmission color texture → diffuseColor with bias+scale blending
+        // Formula: output = (1-factor)*baseColor + factor*colorFactor*texture.rgb
+        //   bias  = (1-factor)*baseColor
+        //   scale = factor*colorFactor
+        {TextureConfig("dtColor", "rgb"), [&]() {
+            float dtf = 0.0f;
+            if (mat->Get(AI_MATKEY_DIFFUSE_TRANSMISSION_FACTOR, dtf) != AI_SUCCESS || dtf < 0.5f)
+                return;
+
+            aiString dtcTexPath;
+            if (mat->GetTexture(aiTextureType_TRANSMISSION, 3, &dtcTexPath) == AI_SUCCESS) {
+                aiColor3D dtColorFactor(1.0f, 1.0f, 1.0f);
+                mat->Get(AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_FACTOR, dtColorFactor);
+
+                aiColor3D bc(0.8f, 0.8f, 0.8f);
+                if (mat->Get(AI_MATKEY_BASE_COLOR, bc) != AI_SUCCESS)
+                    mat->Get(AI_MATKEY_COLOR_DIFFUSE, bc);
+
+                float invF = 1.0f - dtf;
+                tinyusdz::UsdUVTexture dtcTex = CreateUVTexture(dtcTexPath.C_Str(), "dtColor", mat, aiTextureType_TRANSMISSION, 3);
+                dtcTex.bias.set_value(tinyusdz::value::float4{
+                    invF * bc.r, invF * bc.g, invF * bc.b, 0.0f});
+                dtcTex.scale.set_value(tinyusdz::value::float4{
+                    dtf * dtColorFactor.r, dtf * dtColorFactor.g, dtf * dtColorFactor.b, 1.0f});
+
+                std::string texPath = mCurrentMaterialPath + "/dtColor";
+                tinyusdz::Path connPath(std::move(texPath), "outputs:rgb");
+                surface.diffuseColor.set_connection(std::move(connPath));
+                surface.diffuseColor.set_value_empty();
+
+                aiUVTransform uvTransform;
+                if (mat->Get(AI_MATKEY_UVTRANSFORM(aiTextureType_TRANSMISSION, 3), uvTransform) == AI_SUCCESS) {
+                    if (uvTransform.mScaling.x != 1.0f || uvTransform.mScaling.y != 1.0f ||
+                        uvTransform.mTranslation.x != 0.0f || uvTransform.mTranslation.y != 0.0f ||
+                        uvTransform.mRotation != 0.0f) {
+                        mCurrentMaterialTextureTransforms["dtColor"] = uvTransform;
+                    }
+                }
+                int uvIdx = 0;
+                mat->Get(AI_MATKEY_UVWSRC(aiTextureType_TRANSMISSION, 3), uvIdx);
+                mCurrentMaterialTextureUVIndices["dtColor"] = uvIdx;
+                mCurrentMaterialTextureShaders.emplace_back("dtColor", std::move(dtcTex));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected diffuse transmission color texture to diffuseColor (factor=" + std::to_string(dtf) + ")");
+            }
+        }},
+
         // Clearcoat roughness texture (requires clearcoat export enabled)
         {TextureConfig("clearcoatRoughness", "g"), [&]() {
             if (!mExportClearcoat) return;
