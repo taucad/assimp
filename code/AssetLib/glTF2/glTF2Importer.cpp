@@ -359,6 +359,16 @@ static aiMaterial *ImportMaterial(std::vector<int> &embeddedTexIdxs, Asset &r, M
             SetMaterialTextureProperty(embeddedTexIdxs, r, transmission.transmissionTexture, aimat, AI_MATKEY_TRANSMISSION_TEXTURE);
         }
 
+        // KHR_materials_diffuse_transmission
+        if (mat.materialDiffuseTransmission.isPresent) {
+            MaterialDiffuseTransmission &dt = mat.materialDiffuseTransmission.value;
+
+            aimat->AddProperty(&dt.diffuseTransmissionFactor, 1, AI_MATKEY_DIFFUSE_TRANSMISSION_FACTOR);
+            SetMaterialTextureProperty(embeddedTexIdxs, r, dt.diffuseTransmissionTexture, aimat, AI_MATKEY_DIFFUSE_TRANSMISSION_TEXTURE);
+            SetMaterialColorProperty(r, dt.diffuseTransmissionColorFactor, aimat, AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_FACTOR);
+            SetMaterialTextureProperty(embeddedTexIdxs, r, dt.diffuseTransmissionColorTexture, aimat, AI_MATKEY_DIFFUSE_TRANSMISSION_COLOR_TEXTURE);
+        }
+
         // KHR_materials_volume
         if (mat.materialVolume.isPresent) {
             MaterialVolume &volume = mat.materialVolume.value;
