@@ -1917,10 +1917,21 @@ void USDZExporter::MeshConverterPipeline::ExecuteUVConversion() {
 }
 
 void USDZExporter::MeshConverterPipeline::ExecuteVertexColorConversion() {
-    if (!mMesh->mColors[0]) return; // Check if vertex colors exist
-    
-    // Only process the first color set
-        std::vector<tinyusdz::value::color3f> colors;
+    if (!mMesh->mColors[0]) return;
+
+    // USD's UsdPreviewSurface has no multiply node, so primvars:displayColor cannot be
+    // combined with a diffuse texture. Skip vertex colors when the material has a diffuse
+    // texture to avoid renderer-dependent interference (e.g. inverted colors).
+    if (mMesh->mMaterialIndex < mScene->mNumMaterials) {
+        const aiMaterial* material = mScene->mMaterials[mMesh->mMaterialIndex];
+        aiString texPath;
+        if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
+            return;
+        }
+    }
+
+    std::vector<tinyusdz::value::color3f> colors;
     colors.reserve(mMesh->mNumVertices);
     
     for (uint32_t i = 0; i < mMesh->mNumVertices; ++i) {
@@ -2433,28 +2444,25 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         mat->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) == AI_SUCCESS) {
         tinyusdz::value::color3f color{baseColor.r, baseColor.g, baseColor.b};
         surface.diffuseColor.set_value(color);
-        
-        if (isUnlit) {
-            surface.emissiveColor.set_value(color);
-            surface.metallic.set_value(0.0f);
-            surface.roughness.set_value(1.0f);
-            ASSIMP_LOG_DEBUG("USDZExporter: Unlit material - mapped baseColor to emissiveColor");
-        }
     }
     
-    // Specular workflow detection - check for specular factor, glossiness factor, or specular color
+    // Specular workflow detection
+    // IMPORTANT: Only KHR_materials_pbrSpecularGlossiness (detected by AI_MATKEY_GLOSSINESS_FACTOR)
+    // should switch to USD's specular workflow. KHR_materials_specular (detected by
+    // AI_MATKEY_SPECULAR_FACTOR / AI_MATKEY_COLOR_SPECULAR without glossiness) modifies F0
+    // dielectric reflectance within the metallic/roughness workflow and must NOT switch workflows.
     float specularFactor = 1.0f;
     float glossinessFactor = 1.0f;
     aiColor3D specularColor(1.0f, 1.0f, 1.0f);
-    
+
     bool hasSpecularFactor = mat->Get(AI_MATKEY_SPECULAR_FACTOR, specularFactor) == AI_SUCCESS;
     bool hasGlossinessFactor = mat->Get(AI_MATKEY_GLOSSINESS_FACTOR, glossinessFactor) == AI_SUCCESS;
     bool hasSpecularColor = mat->Get(AI_MATKEY_COLOR_SPECULAR, specularColor) == AI_SUCCESS;
-    
-    // Use specular workflow if any specular-related properties are present
-    if (hasSpecularFactor || hasGlossinessFactor || hasSpecularColor) {
+
+    if (hasGlossinessFactor) {
+        // KHR_materials_pbrSpecularGlossiness: use USD specular workflow
         surface.useSpecularWorkflow.set_value(1);
-        
+
         auto clamp01 = [](float v) { return std::min(1.0f, std::max(0.0f, v)); };
         if (hasSpecularColor) {
             float r = specularColor.r, g = specularColor.g, b = specularColor.b;
@@ -2468,16 +2476,24 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
             tinyusdz::value::color3f grayscaleSpecular{v, v, v};
             surface.specularColor.set_value(grayscaleSpecular);
         }
-        
-        // Convert glossiness to roughness if available (roughness = 1 - glossiness)
-        if (hasGlossinessFactor) {
-            float roughnessFromGlossiness = 1.0f - glossinessFactor;
-            surface.roughness.set_value(roughnessFromGlossiness);
-            ASSIMP_LOG_DEBUG("USDZExporter: Converted glossiness to roughness: " + std::to_string(roughnessFromGlossiness));
+
+        float roughnessFromGlossiness = 1.0f - glossinessFactor;
+        surface.roughness.set_value(roughnessFromGlossiness);
+        ASSIMP_LOG_DEBUG("USDZExporter: pbrSpecularGlossiness workflow - glossiness: " + std::to_string(glossinessFactor) +
+                        " -> roughness: " + std::to_string(roughnessFromGlossiness));
+    } else if (hasSpecularFactor || hasSpecularColor) {
+        // KHR_materials_specular: stay in metallic workflow.
+        // Approximate IOR from specularFactor via the Fresnel equation:
+        //   F0 = 0.04 * specularFactor, IOR = (1 + sqrt(F0)) / (1 - sqrt(F0))
+        if (hasSpecularFactor && specularFactor != 1.0f) {
+            float f0 = 0.04f * std::max(0.0f, specularFactor);
+            float sqrtF0 = std::sqrt(f0);
+            if (sqrtF0 < 1.0f) {
+                float approxIor = (1.0f + sqrtF0) / (1.0f - sqrtF0);
+                surface.ior.set_value(approxIor);
+            }
         }
-        
-        ASSIMP_LOG_DEBUG("USDZExporter: Set specular workflow - specularFactor: " + std::to_string(specularFactor) + 
-                        ", glossinessFactor: " + std::to_string(glossinessFactor));
+        ASSIMP_LOG_DEBUG("USDZExporter: KHR_materials_specular detected - staying in metallic workflow");
     }
     
     // Metallic factor
@@ -2566,6 +2582,28 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         }
     }
 
+    // Map KHR_materials_volume attenuationColor into diffuseColor.
+    // UsdPreviewSurface has no volume absorption, so we approximate by tinting
+    // diffuseColor toward attenuationColor weighted by transmissionFactor.
+    // For fully transmissive materials (t=1), diffuseColor becomes attenuationColor.
+    aiColor3D attenuationColor(1.0f, 1.0f, 1.0f);
+    if (hasTransmission &&
+        mat->Get(AI_MATKEY_VOLUME_ATTENUATION_COLOR, attenuationColor) == AI_SUCCESS) {
+        bool isNonWhite = (attenuationColor.r < 0.99f || attenuationColor.g < 0.99f || attenuationColor.b < 0.99f);
+        if (isNonWhite) {
+            float t = transmission;
+            baseColor.r = baseColor.r * (1.0f - t) + attenuationColor.r * t;
+            baseColor.g = baseColor.g * (1.0f - t) + attenuationColor.g * t;
+            baseColor.b = baseColor.b * (1.0f - t) + attenuationColor.b * t;
+
+            surface.diffuseColor.set_value(tinyusdz::value::color3f{baseColor.r, baseColor.g, baseColor.b});
+
+            ASSIMP_LOG_DEBUG("USDZExporter: Volume attenuationColor (" +
+                std::to_string(attenuationColor.r) + ", " + std::to_string(attenuationColor.g) + ", " +
+                std::to_string(attenuationColor.b) + ") blended into diffuseColor at t=" + std::to_string(t));
+        }
+    }
+
     // Handle glTF alphaMode for proper transparency
     aiString alphaMode;
     if (mat->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS) {
@@ -2573,7 +2611,12 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         if (mode == "MASK") {
             float alphaCutoff = 0.5f;
             mat->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
-            surface.opacityThreshold.set_value(alphaCutoff);
+            if (hasTransmission && transmission > 0.5f) {
+                float opacityScale = std::max(1.0f - transmission, 0.1f);
+                surface.opacityThreshold.set_value(alphaCutoff * opacityScale);
+            } else {
+                surface.opacityThreshold.set_value(alphaCutoff);
+            }
         } else if (mode == "BLEND") {
             if (opacity >= 1.0f) {
                 surface.opacity.set_value(0.99f);
@@ -2599,8 +2642,19 @@ void USDZExporter::MapPBRProperties(const aiMaterial* mat, tinyusdz::UsdPreviewS
         surface.ior.set_value(ior);
     }
     
-    // Note: useSpecularWorkflow is now set dynamically based on material properties above
-    // Default metallic workflow (useSpecularWorkflow = 0) unless specular properties are detected
+    // useSpecularWorkflow = 1 only when pbrSpecularGlossiness (glossiness factor) is present.
+    // KHR_materials_specular stays in metallic workflow (useSpecularWorkflow = 0).
+
+    // Unlit override: applied last so it wins over any earlier PBR defaults.
+    // diffuseColor = black eliminates all diffuse lighting contribution;
+    // emissiveColor = baseColor provides flat, unshaded color output.
+    if (isUnlit) {
+        surface.diffuseColor.set_value(tinyusdz::value::color3f{0.0f, 0.0f, 0.0f});
+        surface.emissiveColor.set_value(tinyusdz::value::color3f{baseColor.r, baseColor.g, baseColor.b});
+        surface.metallic.set_value(0.0f);
+        surface.roughness.set_value(1.0f);
+        ASSIMP_LOG_DEBUG("USDZExporter: Unlit material - diffuseColor zeroed, baseColor mapped to emissiveColor");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2637,13 +2691,27 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
     // Using initializer list for optimal performance and readability
     std::vector<std::pair<TextureConfig, std::function<void()>>> textureConfigs = {
     // Base color / Diffuse texture (includes Maya support)
+        // For unlit materials, skip: diffuseColor must stay black (emissiveColor carries the color)
         {TextureConfig("diffuseColor", "rgb"), [&]() {
+            if (isUnlit) return;
             TextureConfig config("diffuseColor", "rgb");
             config.fallbackTypes = {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE, aiTextureType_MAYA_BASE};
             aiColor3D baseColor(1.0f, 1.0f, 1.0f);
             if (mat->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS ||
                 mat->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) == AI_SUCCESS) {
                 config.scale = {baseColor.r, baseColor.g, baseColor.b, 1.0f};
+            }
+            // Tint textured diffuseColor toward attenuationColor for volume materials.
+            // scale = lerp(baseColor, attenuationColor, transmission) preserves texture
+            // detail while adding the volume absorption tint.
+            float txFactor = 0.0f;
+            aiColor3D attenColor(1.0f, 1.0f, 1.0f);
+            if (mat->Get(AI_MATKEY_TRANSMISSION_FACTOR, txFactor) == AI_SUCCESS && txFactor > 0.0f &&
+                mat->Get(AI_MATKEY_VOLUME_ATTENUATION_COLOR, attenColor) == AI_SUCCESS &&
+                (attenColor.r < 0.99f || attenColor.g < 0.99f || attenColor.b < 0.99f)) {
+                config.scale[0] = config.scale[0] * (1.0f - txFactor) + attenColor.r * txFactor;
+                config.scale[1] = config.scale[1] * (1.0f - txFactor) + attenColor.g * txFactor;
+                config.scale[2] = config.scale[2] * (1.0f - txFactor) + attenColor.b * txFactor;
             }
             ProcessTextureProperty(mat, config, surface.diffuseColor, surface);
         }},
@@ -2706,6 +2774,15 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         {TextureConfig("opacity", "a"), [&]() {
             TextureConfig config("opacity", "a");
             config.fallbackTypes = {aiTextureType_OPACITY};
+            // When transmission is present, scale the opacity texture alpha so that
+            // fully-opaque texels (alpha=1) become semi-transparent per the
+            // transmission factor, while fully-transparent texels (alpha=0, e.g.
+            // MASK cutouts) stay transparent.
+            float txFactor = 0.0f;
+            if (mat->Get(AI_MATKEY_TRANSMISSION_FACTOR, txFactor) == AI_SUCCESS && txFactor > 0.0f) {
+                float opacityScale = std::max(1.0f - txFactor, 0.1f);
+                config.scale = {1.0f, 1.0f, 1.0f, opacityScale};
+            }
             ProcessTextureProperty(mat, config, surface.opacity, surface);
         }},
         
@@ -2716,14 +2793,16 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
             ProcessTextureProperty(mat, config, surface.displacement, surface);
         }},
         
-        // Specular texture (triggers specular workflow when present)
+        // Specular texture (only for pbrSpecularGlossiness workflow)
         {TextureConfig("specularColor", "rgb"), [&]() {
+            float glossiness = 0.0f;
+            bool isSpecGloss = mat->Get(AI_MATKEY_GLOSSINESS_FACTOR, glossiness) == AI_SUCCESS;
+            if (!isSpecGloss) return;
             TextureConfig config("specularColor", "rgb");
             config.fallbackTypes = {aiTextureType_SPECULAR, aiTextureType_MAYA_SPECULAR, aiTextureType_MAYA_SPECULAR_COLOR};
             if (ProcessTextureProperty(mat, config, surface.specularColor, surface)) {
-                // Switch to specular workflow when specular texture is present
                 surface.useSpecularWorkflow.set_value(1);
-                ASSIMP_LOG_DEBUG("USDZExporter: Switched to specular workflow due to specular texture");
+                ASSIMP_LOG_DEBUG("USDZExporter: Switched to specular workflow due to specular texture (pbrSpecularGlossiness)");
             }
         }},
         
@@ -2763,6 +2842,13 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
         {TextureConfig("dtColor", "rgb"), [&]() {
             float dtf = 0.0f;
             if (mat->Get(AI_MATKEY_DIFFUSE_TRANSMISSION_FACTOR, dtf) != AI_SUCCESS || dtf < 0.5f)
+                return;
+
+            bool hasBaseColorTex = std::any_of(
+                mCurrentMaterialTextureShaders.begin(),
+                mCurrentMaterialTextureShaders.end(),
+                [](const auto& p) { return p.first == "diffuseColor"; });
+            if (hasBaseColorTex)
                 return;
 
             aiString dtcTexPath;
@@ -2828,6 +2914,46 @@ void USDZExporter::MapTextureProperties(const aiMaterial* mat, tinyusdz::UsdPrev
                 
                 mCurrentMaterialTextureShaders.emplace_back("clearcoatRoughness", std::move(clearcoatRoughnessTexture));
                 ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat roughness texture: " + std::string(clearcoatRoughnessTexPath.C_Str()) + " (UV" + std::to_string(uvIndex) + ")");
+            }
+        }},
+
+        // Clearcoat normal texture -> surface normal fallback (requires clearcoat export enabled)
+        // UsdPreviewSurface has only one normal input, so we use the clearcoat normal
+        // as the surface normal when no base normal texture exists.
+        {TextureConfig("clearcoatNormal", "rgb"), [&]() {
+            if (!mExportClearcoat) return;
+
+            aiString baseNormalPath;
+            if (mat->GetTexture(aiTextureType_NORMALS, 0, &baseNormalPath) == AI_SUCCESS ||
+                mat->GetTexture(aiTextureType_HEIGHT, 0, &baseNormalPath) == AI_SUCCESS) {
+                return;
+            }
+
+            aiString clearcoatNormalTexPath;
+            if (mat->GetTexture(AI_MATKEY_CLEARCOAT_NORMAL_TEXTURE, &clearcoatNormalTexPath) == AI_SUCCESS) {
+                tinyusdz::UsdUVTexture clearcoatNormalTexture = CreateUVTexture(clearcoatNormalTexPath.C_Str(), "normal", mat, aiTextureType_CLEARCOAT, 2);
+                clearcoatNormalTexture.bias.set_value(tinyusdz::value::float4{-1.0f, -1.0f, -1.0f, 0.0f});
+                clearcoatNormalTexture.scale.set_value(tinyusdz::value::float4{2.0f, 2.0f, 2.0f, 1.0f});
+
+                std::string texShaderPath = mCurrentMaterialPath + "/normal";
+                tinyusdz::Path connPath(std::move(texShaderPath), "outputs:rgb");
+                surface.normal.set_connection(std::move(connPath));
+                surface.normal.set_value_empty();
+
+                aiUVTransform uvTransform;
+                if (mat->Get(AI_MATKEY_UVTRANSFORM(aiTextureType_CLEARCOAT, 2), uvTransform) == AI_SUCCESS) {
+                    if (uvTransform.mScaling.x != 1.0f || uvTransform.mScaling.y != 1.0f ||
+                        uvTransform.mTranslation.x != 0.0f || uvTransform.mTranslation.y != 0.0f ||
+                        uvTransform.mRotation != 0.0f) {
+                        mCurrentMaterialTextureTransforms["normal"] = uvTransform;
+                    }
+                }
+                int uvIndex = 0;
+                mat->Get(AI_MATKEY_UVWSRC(aiTextureType_CLEARCOAT, 2), uvIndex);
+                mCurrentMaterialTextureUVIndices["normal"] = uvIndex;
+
+                mCurrentMaterialTextureShaders.emplace_back("normal", std::move(clearcoatNormalTexture));
+                ASSIMP_LOG_DEBUG("USDZExporter: Connected clearcoat normal texture as surface normal: " + std::string(clearcoatNormalTexPath.C_Str()) + " (UV" + std::to_string(uvIndex) + ")");
             }
         }}
     };
@@ -4251,7 +4377,23 @@ tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* p
     mNodeIdMap[node] = nodeName;
     
     SetupNodeTransform(node, *xform);
-    
+
+    if (node->mMetaData) {
+        aiMetadata extensions;
+        if (node->mMetaData->Get("extensions", extensions)) {
+            aiMetadata nodeVis;
+            if (extensions.Get("KHR_node_visibility", nodeVis)) {
+                bool visible = true;
+                nodeVis.Get("visible", visible);
+                if (!visible) {
+                    tinyusdz::Animatable<tinyusdz::Visibility> vis;
+                    vis.set_default(tinyusdz::Visibility::Invisible);
+                    xform->visibility.set_value(vis);
+                }
+            }
+        }
+    }
+
     // Convert to Prim
     tinyusdz::Prim xformPrim(*xform);
     
@@ -4270,7 +4412,10 @@ tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* p
 // ------------------------------------------------------------------------------------------------
 // Setup node transform using the node's actual transformation matrix
 void USDZExporter::SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform) {
-    if (!node || node->mTransformation.IsIdentity()) {
+    // Use a tight epsilon (1e-6) instead of Assimp's default (10e-3 = 0.01) which
+    // incorrectly classifies small but meaningful transforms as identity -- e.g.
+    // translations of 0.001 in MetalRoughSpheresNoTextures.
+    if (!node || node->mTransformation.IsIdentity(static_cast<ai_real>(1e-6))) {
         return;
     }
 
@@ -4569,7 +4714,7 @@ void USDZExporter::AddSourceColorSpace(tinyusdz::UsdUVTexture& uvTexture, const 
 // Add texture outputs
 void USDZExporter::AddTextureOutputs(tinyusdz::UsdUVTexture& uvTexture, const std::string& textureType) {
     // Set appropriate outputs based on texture type
-    if (textureType == "diffuseColor" || textureType == "emissiveColor") {
+    if (textureType == "diffuseColor" || textureType == "emissiveColor" || textureType == "dtColor") {
         // Color textures output RGB + alpha
         uvTexture.outputsRGB.set_authored(true);
         uvTexture.outputsA.set_authored(true);
