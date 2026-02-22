@@ -1928,9 +1928,9 @@ void glTF2Importer::ImportTextures(glTF2::Asset &r) {
                 }
 
                 size_t len = strlen(ext);
-                if (len > 3) len = 3;
-                tex->achFormatHint[3] = '\0';
+                if (len >= HINTMAXTEXTURELEN) len = HINTMAXTEXTURELEN - 1;
                 memcpy(tex->achFormatHint, ext, len);
+                tex->achFormatHint[len] = '\0';
             }
         }
     }

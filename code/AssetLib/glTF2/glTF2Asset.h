@@ -1173,6 +1173,7 @@ public:
         bool KHR_animation_pointer;
         bool FB_ngon_encoding;
         bool KHR_texture_basisu;
+        bool EXT_texture_webp;
 
         Extensions() :
                 KHR_materials_pbrSpecularGlossiness(false),
@@ -1191,7 +1192,8 @@ public:
                 KHR_draco_mesh_compression(false),
                 KHR_animation_pointer(false),
                 FB_ngon_encoding(false),
-                KHR_texture_basisu(false) {
+                KHR_texture_basisu(false),
+                EXT_texture_webp(false) {
             // empty
         }
     } extensionsUsed;
