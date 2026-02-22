@@ -714,6 +714,8 @@ if (NOT ASSIMP_NO_EXPORT)
       AssetLib/USD/USDZExporterHelper.cpp
       AssetLib/USD/usdz-writer.hh
       AssetLib/USD/usdz-writer.cc)
+  else()
+    add_definitions(-DASSIMP_BUILD_NO_USD_EXPORTER)
   endif()
 
 endif()
