@@ -172,6 +172,7 @@ void USDImporterImplTinyusdz::InternReadFile(
     tinyusdz::tydra::RenderScene render_scene;
     tinyusdz::tydra::RenderSceneConverter converter;
     tinyusdz::tydra::RenderSceneConverterEnv env(stage);
+    env.scene_config.load_texture_assets = false;
     std::string usd_basedir = tinyusdz::io::GetBaseDir(pFile);
     env.set_search_paths({ usd_basedir }); // {} needed to convert to vector of char
 
@@ -1086,16 +1087,20 @@ static aiTexture *ownedEmbeddedTextureFor(
     size_t pos = image.asset_identifier.find_last_of('/');
     string embTexName{image.asset_identifier.substr(pos + 1)};
     tex->mFilename.Set(image.asset_identifier.c_str());
-    tex->mHeight = image.height;
 
-    tex->mWidth = image.width;
-    if (tex->mHeight == 0) {
+    const bool isCompressed = !image.decoded || image.height <= 0 || image.width <= 0;
+
+    if (isCompressed) {
+        tex->mHeight = 0;
         pos = embTexName.find_last_of('.');
         strncpy(tex->achFormatHint, embTexName.substr(pos + 1).c_str(), 3);
         const size_t imageBytesCount{render_scene.buffers[image.buffer_id].data.size()};
+        tex->mWidth = static_cast<unsigned int>(imageBytesCount);
         tex->pcData = (aiTexel *) new char[imageBytesCount];
         memcpy(tex->pcData, &render_scene.buffers[image.buffer_id].data[0], imageBytesCount);
     } else {
+        tex->mHeight = image.height;
+        tex->mWidth = image.width;
         string formatHint{"rgba8888"};
         strncpy(tex->achFormatHint, formatHint.c_str(), 8);
         const size_t imageTexelsCount{tex->mWidth * tex->mHeight};
