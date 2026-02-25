@@ -306,6 +306,25 @@ bool SaveAsUSDZWithTextures(const std::string &filename, const std::string &usdC
     return CreateUSDZArchiveWithTextures(filename, usdContent, textureDataMap, warn, err);
 }
 
+static void WriteLE16(std::vector<uint8_t> &out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+static void WriteLE32(std::vector<uint8_t> &out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+}
+
+struct USDZFileEntry {
+    std::string name;
+    uint32_t localHeaderOffset;
+    uint32_t crc32;
+    uint32_t size;
+};
+
 bool SaveAsUSDZToMemory(const std::string &usdContent,
                         const std::map<std::string, std::vector<uint8_t>> &textureDataMap,
                         std::vector<uint8_t> &outData,
@@ -315,96 +334,102 @@ bool SaveAsUSDZToMemory(const std::string &usdContent,
         return false;
     }
 
-    mz_zip_archive zip_archive;
-    memset(&zip_archive, 0, sizeof(zip_archive));
-
-    if (!mz_zip_writer_init_heap(&zip_archive, 0, 0)) {
-        if (err) (*err) += "Failed to initialize in-memory ZIP archive\n";
-        return false;
-    }
-
-    // Reuse the same alignment and file addition logic
-    auto AddFileToHeap = [&](const std::string& entryName, const void* data, size_t size) -> bool {
-        const mz_uint64 headerStart = zip_archive.m_archive_size;
-        const mz_uint64 dataOffsetWithoutExtra = headerStart + 30 + entryName.length();
-        const mz_uint64 remainder = dataOffsetWithoutExtra % 64;
-        const mz_uint64 totalPaddingNeeded = (remainder == 0) ? 0 : (64 - remainder);
-        const mz_uint64 actualPaddingNeeded = (totalPaddingNeeded < 4 && totalPaddingNeeded > 0) ?
-                                             totalPaddingNeeded + 64 : totalPaddingNeeded;
-
-        std::vector<uint8_t> extraData;
-        const char* extraFieldData = nullptr;
-        mz_uint extraFieldLength = 0;
-
-        if (actualPaddingNeeded > 0) {
-            extraData.resize(actualPaddingNeeded, 0);
-            const uint16_t extraFieldID = 0x1986;
-            const uint16_t paddingDataSize = static_cast<uint16_t>(actualPaddingNeeded - 4);
-            extraData[0] = static_cast<uint8_t>(extraFieldID & 0xFF);
-            extraData[1] = static_cast<uint8_t>((extraFieldID >> 8) & 0xFF);
-            extraData[2] = static_cast<uint8_t>(paddingDataSize & 0xFF);
-            extraData[3] = static_cast<uint8_t>((paddingDataSize >> 8) & 0xFF);
-        } else {
-            extraData.resize(4, 0);
-            const uint16_t extraFieldID = 0x1986;
-            extraData[0] = static_cast<uint8_t>(extraFieldID & 0xFF);
-            extraData[1] = static_cast<uint8_t>((extraFieldID >> 8) & 0xFF);
-            extraData[2] = 0;
-            extraData[3] = 0;
-        }
-        extraFieldData = reinterpret_cast<const char*>(extraData.data());
-        extraFieldLength = static_cast<mz_uint>(extraData.size());
-
-        struct MemCtx { const void* d; size_t sz; };
-        MemCtx ctx{data, size};
-        auto readCb = [](void *pOpaque, mz_uint64 file_ofs, void *pBuf, size_t n) -> size_t {
-            auto* c = static_cast<MemCtx*>(pOpaque);
-            if (file_ofs >= c->sz) return 0;
-            size_t avail = c->sz - static_cast<size_t>(file_ofs);
-            size_t toRead = (n > avail) ? avail : n;
-            memcpy(pBuf, static_cast<const uint8_t*>(c->d) + file_ofs, toRead);
-            return toRead;
-        };
-
-        bool success = mz_zip_writer_add_read_buf_callback(&zip_archive, entryName.c_str(),
-            readCb, &ctx, size, nullptr, nullptr, 0,
-            MZ_ZIP_FLAG_WRITE_HEADER_SET_SIZE,
-            extraFieldData, extraFieldLength, nullptr, 0);
-
-        if (success && zip_archive.m_pWrite) {
-            mz_uint8 versionBytes[2] = {10, 0};
-            zip_archive.m_pWrite(zip_archive.m_pIO_opaque, headerStart + 4, versionBytes, 2);
-            mz_uint8 flagsBytes[2] = {0, 0};
-            zip_archive.m_pWrite(zip_archive.m_pIO_opaque, headerStart + 6, flagsBytes, 2);
-        }
-        return success;
+    struct FileInfo {
+        std::string name;
+        const uint8_t* data;
+        size_t size;
     };
 
-    std::string usdFilename = "model.usda";
-    if (!AddFileToHeap(usdFilename, usdContent.data(), usdContent.size())) {
-        if (err) (*err) += "Failed to add USD file to in-memory archive\n";
-        mz_zip_writer_end(&zip_archive);
-        return false;
-    }
-
+    std::vector<FileInfo> files;
+    files.push_back({"model.usda", reinterpret_cast<const uint8_t*>(usdContent.data()), usdContent.size()});
     for (const auto &entry : textureDataMap) {
-        if (entry.second.empty()) continue;
-        if (!AddFileToHeap(entry.first, entry.second.data(), entry.second.size())) {
-            if (warn) (*warn) += "Failed to add texture: " + entry.first + "\n";
+        if (!entry.second.empty()) {
+            files.push_back({entry.first, entry.second.data(), entry.second.size()});
         }
     }
 
-    void* heapBuf = nullptr;
-    size_t heapSize = 0;
-    if (!mz_zip_writer_finalize_heap_archive(&zip_archive, &heapBuf, &heapSize)) {
-        if (err) (*err) += "Failed to finalize in-memory ZIP archive\n";
-        mz_zip_writer_end(&zip_archive);
-        return false;
+    outData.clear();
+    std::vector<USDZFileEntry> entries;
+
+    for (const auto &file : files) {
+        USDZFileEntry entry;
+        entry.name = file.name;
+        entry.localHeaderOffset = static_cast<uint32_t>(outData.size());
+        entry.size = static_cast<uint32_t>(file.size);
+        entry.crc32 = static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, file.data, file.size));
+
+        size_t dataOffsetWithoutExtra = outData.size() + 30 + file.name.length();
+        size_t remainder = dataOffsetWithoutExtra % 64;
+        size_t paddingNeeded = (remainder == 0) ? 0 : (64 - remainder);
+        if (paddingNeeded > 0 && paddingNeeded < 4) {
+            paddingNeeded += 64;
+        }
+
+        if (paddingNeeded == 0) {
+            paddingNeeded = 64;
+        }
+
+        uint16_t extraLen = static_cast<uint16_t>(paddingNeeded);
+
+        WriteLE32(outData, 0x04034b50);
+        WriteLE16(outData, 10);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE32(outData, entry.crc32);
+        WriteLE32(outData, entry.size);
+        WriteLE32(outData, entry.size);
+        WriteLE16(outData, static_cast<uint16_t>(file.name.length()));
+        WriteLE16(outData, extraLen);
+
+        outData.insert(outData.end(), file.name.begin(), file.name.end());
+
+        {
+            uint16_t paddingDataSize = static_cast<uint16_t>(paddingNeeded - 4);
+            outData.push_back(0x86); outData.push_back(0x19);
+            outData.push_back(static_cast<uint8_t>(paddingDataSize & 0xFF));
+            outData.push_back(static_cast<uint8_t>((paddingDataSize >> 8) & 0xFF));
+            outData.insert(outData.end(), paddingDataSize, 0);
+        }
+
+        outData.insert(outData.end(), file.data, file.data + file.size);
+
+        entries.push_back(entry);
     }
 
-    outData.assign(static_cast<uint8_t*>(heapBuf), static_cast<uint8_t*>(heapBuf) + heapSize);
-    free(heapBuf);
-    mz_zip_writer_end(&zip_archive);
+    uint32_t centralDirOffset = static_cast<uint32_t>(outData.size());
+    for (const auto &entry : entries) {
+        WriteLE32(outData, 0x02014b50);
+        WriteLE16(outData, 10);
+        WriteLE16(outData, 10);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE32(outData, entry.crc32);
+        WriteLE32(outData, entry.size);
+        WriteLE32(outData, entry.size);
+        WriteLE16(outData, static_cast<uint16_t>(entry.name.length()));
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE16(outData, 0);
+        WriteLE32(outData, 0);
+        WriteLE32(outData, entry.localHeaderOffset);
+        outData.insert(outData.end(), entry.name.begin(), entry.name.end());
+    }
+    uint32_t centralDirSize = static_cast<uint32_t>(outData.size()) - centralDirOffset;
+
+    WriteLE32(outData, 0x06054b50);
+    WriteLE16(outData, 0);
+    WriteLE16(outData, 0);
+    WriteLE16(outData, static_cast<uint16_t>(entries.size()));
+    WriteLE16(outData, static_cast<uint16_t>(entries.size()));
+    WriteLE32(outData, centralDirSize);
+    WriteLE32(outData, centralDirOffset);
+    WriteLE16(outData, 0);
+
     return true;
 }
 

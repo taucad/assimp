@@ -162,72 +162,51 @@ void USDImporterImplTinyusdz::InternReadFile(
     
     // EARLY EXIT CHECK: If loading failed, stop here
     if (!ret) {
-        ss.str("");
-        ss << "InternReadFile(): ERROR: load failed! ret: " << ret;
-        TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
+        fprintf(stderr, "[USD] LOAD FAILED! ret=%d warn='%s' err='%s'\n", ret, warn.c_str(), err.c_str());
         return;
     }
+    fprintf(stderr, "[USD] Load OK. is_usdz=%d fileSize=%zu\n", is_usdz, fileSize);
+
     tinyusdz::tydra::RenderScene render_scene;
     tinyusdz::tydra::RenderSceneConverter converter;
     tinyusdz::tydra::RenderSceneConverterEnv env(stage);
     std::string usd_basedir = tinyusdz::io::GetBaseDir(pFile);
-    env.set_search_paths({ usd_basedir }); // {} needed to convert to vector of char
+    env.set_search_paths({ usd_basedir });
 
-    // NOTE: Pointer address of usdz_asset must be valid until the call of RenderSceneConverter::ConvertToRenderScene.
     tinyusdz::USDZAsset usdz_asset;
     if (is_usdz) {
-        // Always use memory-based loading for consistency
         bool is_read_USDZ_asset = tinyusdz::ReadUSDZAssetInfoFromMemory(in_mem_data.data(), in_mem_data.size(), false, &usdz_asset, &warn, &err);
-        if (!is_read_USDZ_asset) {
-            if (!warn.empty()) {
-                ss.str("");
-                ss << "InternReadFile(): ReadUSDZAssetInfoFromMemory: WARNING reported: " << warn;
-                TINYUSDZLOGW(TAG, "%s", ss.str().c_str());
-            }
-            if (!err.empty()) {
-                ss.str("");
-                ss << "InternReadFile(): ReadUSDZAssetInfoFromMemory: ERROR reported: " << err;
-                TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
-            }
-            ss.str("");
-            ss << "InternReadFile(): ReadUSDZAssetInfoFromMemory: ERROR!";
-            TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
-        } else {
-            ss.str("");
-            ss << "InternReadFile(): ReadUSDZAssetInfoFromMemory: OK";
-            TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
-        }
+        fprintf(stderr, "[USD] ReadUSDZAssetInfo: %s warn='%s' err='%s'\n",
+            is_read_USDZ_asset ? "OK" : "FAIL", warn.c_str(), err.c_str());
 
         tinyusdz::AssetResolutionResolver arr;
         if (!tinyusdz::SetupUSDZAssetResolution(arr, &usdz_asset)) {
-            ss.str("");
-            ss << "InternReadFile(): SetupUSDZAssetResolution: ERROR: load failed! ret: " << ret;
-            TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
+            fprintf(stderr, "[USD] SetupUSDZAssetResolution: FAIL\n");
         } else {
-            ss.str("");
-            ss << "InternReadFile(): SetupUSDZAssetResolution: OK";
-            TINYUSDZLOGD(TAG, "%s", ss.str().c_str());
+            fprintf(stderr, "[USD] SetupUSDZAssetResolution: OK\n");
             env.asset_resolver = arr;
         }
     }
 
     ret = converter.ConvertToRenderScene(env, &render_scene);
+    fprintf(stderr, "[USD] ConvertToRenderScene: %s error='%s'\n", ret ? "OK" : "FAIL", converter.GetError().c_str());
     if (!ret) {
-        ss.str("");
-        ss << "InternReadFile(): ConvertToRenderScene() failed! Error: " << converter.GetError();
-        TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
         return;
     }
 
-    // Validate render scene has required content
+    fprintf(stderr, "[USD] render_scene: nodes=%zu meshes=%zu materials=%zu\n",
+        render_scene.nodes.size(), render_scene.meshes.size(), render_scene.materials.size());
+
     if (render_scene.nodes.empty()) {
-        ss.str("");
-        ss << "InternReadFile(): ERROR: No nodes in render_scene! Cannot create root node.";
-        TINYUSDZLOGE(TAG, "%s", ss.str().c_str());
+        fprintf(stderr, "[USD] ERROR: No nodes in render_scene!\n");
         return;
     }
 
-    // sanityCheckNodesRecursive(pScene->mRootNode);
+    fprintf(stderr, "[USD] render_scene.nodes[0]: nodeType=%d id=%d children=%zu display_name='%s'\n",
+        (int)render_scene.nodes[0].nodeType, render_scene.nodes[0].id,
+        render_scene.nodes[0].children.size(),
+        render_scene.nodes[0].display_name.c_str());
+
     animations(render_scene, pScene, stage);
     meshes(render_scene, pScene, nameWExt);
     materials(render_scene, pScene, nameWExt);
@@ -236,14 +215,21 @@ void USDImporterImplTinyusdz::InternReadFile(
     buffers(render_scene, pScene, nameWExt);
     cameras(render_scene, pScene, stage);
     lights(render_scene, pScene, stage);
-    
-    // Create root node from first scene node
+
+    fprintf(stderr, "[USD] After population: mNumMeshes=%u mNumMaterials=%u\n",
+        pScene->mNumMeshes, pScene->mNumMaterials);
+
     pScene->mRootNode = nodesRecursive(nullptr, render_scene.nodes[0], render_scene.skeletons);
     if (pScene->mRootNode == nullptr) {
-        TINYUSDZLOGE(TAG, "InternReadFile(): Failed to create root node!");
+        fprintf(stderr, "[USD] FAILED to create root node!\n");
         return;
     }
-    
+
+    fprintf(stderr, "[USD] Root node created: '%s' children=%u meshes=%u\n",
+        pScene->mRootNode->mName.C_Str(),
+        pScene->mRootNode->mNumChildren,
+        pScene->mRootNode->mNumMeshes);
+
     setupBlendShapes(render_scene, pScene, nameWExt);
 }
 void USDImporterImplTinyusdz::animations(

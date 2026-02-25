@@ -42,6 +42,60 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_3MF_IMPORTER
 
 #include "D3MFImporter.h"
+
+#ifdef ASSIMP_USE_LIB3MF
+
+#include "Lib3MFBridge.h"
+#include <assimp/ZipArchiveIOSystem.h>
+#include <assimp/importerdesc.h>
+#include <assimp/scene.h>
+#include <assimp/IOSystem.hpp>
+
+namespace Assimp {
+
+using namespace D3MF;
+
+static constexpr aiImporterDesc desc = {
+    "3mf Importer",
+    "",
+    "",
+    "http://3mf.io/",
+    aiImporterFlags_SupportBinaryFlavour | aiImporterFlags_SupportCompressedFlavour,
+    0,
+    0,
+    0,
+    0,
+    "3mf"
+};
+
+bool D3MFImporter::CanRead(const std::string &filename, IOSystem *pIOHandler, bool ) const {
+    if (!ZipArchiveIOSystem::isZipArchive(pIOHandler, filename)) {
+        return false;
+    }
+    static constexpr char ModelRef[] = "3D/3dmodel.model";
+    ZipArchiveIOSystem archive(pIOHandler, filename);
+    if (!archive.Exists(ModelRef)) {
+        return false;
+    }
+    return true;
+}
+
+void D3MFImporter::SetupProperties(const Importer*) {
+    // empty
+}
+
+const aiImporterDesc *D3MFImporter::GetInfo() const {
+    return &desc;
+}
+
+void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, IOSystem *pIOHandler) {
+    Lib3MFBridge::ImportScene(pScene, filename, pIOHandler);
+}
+
+} // Namespace Assimp
+
+#else // !ASSIMP_USE_LIB3MF -- original importer using manual XML parsing
+
 #include "3MFXmlTags.h"
 #include "D3MFOpcPackage.h"
 #include "XmlSerializer.h"
@@ -122,5 +176,7 @@ void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, 
 }
 
 } // Namespace Assimp
+
+#endif // !ASSIMP_USE_LIB3MF
 
 #endif // ASSIMP_BUILD_NO_3MF_IMPORTER

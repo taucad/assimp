@@ -144,6 +144,7 @@ private:
 
     // Mesh conversion helpers
     bool IsPointPrimitive(const aiMesh* mesh);
+    bool IsLinePrimitive(const aiMesh* mesh);
     void ConvertMesh(const aiMesh* mesh, tinyusdz::GeomMesh& usdMesh);
     bool NeedsSkeletalTreatment(const aiMesh* mesh);
     tinyusdz::Prim CreateSkelRootForMesh(const aiMesh* mesh, const std::string& meshName, tinyusdz::Prim&& meshPrim, const std::vector<std::string>& blendShapeNames = {}, const std::string& parentNodeName = "");

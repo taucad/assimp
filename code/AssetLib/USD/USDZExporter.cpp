@@ -522,6 +522,12 @@ void USDZExporter::ExportMeshes() {
         meshName = mNameRegistry.GenerateUnique(meshName);
         
         mMeshIdMap[mesh] = meshName;
+
+        if (IsLinePrimitive(mesh)) {
+            ASSIMP_LOG_DEBUG("USDZExporter: Skipping line-only mesh '" + meshName +
+                "' (USD GeomMesh requires polygons with >= 3 vertices per face)");
+            continue;
+        }
         
         // Convert to appropriate primitive type
         tinyusdz::Prim meshPrim(tinyusdz::GeomMesh{});
@@ -1414,6 +1420,19 @@ bool USDZExporter::IsPointPrimitive(const aiMesh* mesh) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Check if mesh is line primitive (all faces have exactly 2 indices)
+bool USDZExporter::IsLinePrimitive(const aiMesh* mesh) {
+    if (!mesh || !mesh->mFaces || mesh->mNumFaces == 0) return false;
+
+    for (uint32_t i = 0; i < mesh->mNumFaces; ++i) {
+        if (mesh->mFaces[i].mNumIndices != 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Check if mesh needs skeletal treatment (has bones or blend shapes)
 bool USDZExporter::NeedsSkeletalTreatment(const aiMesh* mesh) {
     return mesh && (mesh->mNumBones > 0 || mesh->mNumAnimMeshes > 0);
@@ -1729,10 +1748,13 @@ void USDZExporter::MeshConverterPipeline::ExecuteFaceConversion() {
     std::vector<int> faceVertexIndices;
     
     faceVertexCounts.reserve(mMesh->mNumFaces);
-    faceVertexIndices.reserve(mMesh->mNumFaces * 3); // Assume mostly triangles
+    faceVertexIndices.reserve(mMesh->mNumFaces * 3);
     
     for (uint32_t i = 0; i < mMesh->mNumFaces; ++i) {
         const aiFace& face = mMesh->mFaces[i];
+        if (face.mNumIndices < 3) {
+            continue;
+        }
         faceVertexCounts.push_back(static_cast<int>(face.mNumIndices));
         
         for (uint32_t j = 0; j < face.mNumIndices; ++j) {
