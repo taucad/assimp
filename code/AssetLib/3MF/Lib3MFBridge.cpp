@@ -632,13 +632,14 @@ void importFromLib3MF(aiScene *pScene, const std::vector<Lib3MF_uint8> &inputBuf
 
 // ===== PUBLIC API =====
 
-void Lib3MFBridge::ExportScene(const aiScene *pScene, const std::string &pFile, IOSystem *pIOSystem) {
+void Lib3MFBridge::ExportScene(const aiScene *pScene, const std::string &pFile, IOSystem *pIOSystem,
+                               const ExportProperties *pProperties) {
     if (!pScene) {
         throw DeadlyExportError("lib3mf export: null scene");
     }
 
     std::vector<Lib3MF_uint8> buffer;
-    exportToLib3MF(pScene, buffer);
+    exportToLib3MF(pScene, buffer, pProperties);
 
     std::unique_ptr<IOStream> outfile(pIOSystem->Open(pFile, "wb"));
     if (!outfile) {

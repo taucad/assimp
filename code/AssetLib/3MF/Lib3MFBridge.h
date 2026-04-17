@@ -54,12 +54,14 @@ struct aiMaterial;
 namespace Assimp {
 
 class IOSystem;
+class ExportProperties;
 
 namespace D3MF {
 
 class Lib3MFBridge {
 public:
-    static void ExportScene(const aiScene *pScene, const std::string &pFile, IOSystem *pIOSystem);
+    static void ExportScene(const aiScene *pScene, const std::string &pFile, IOSystem *pIOSystem,
+                            const ExportProperties *pProperties = nullptr);
     static void ImportScene(aiScene *pScene, const std::string &pFile, IOSystem *pIOSystem);
 };
 

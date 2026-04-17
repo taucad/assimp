@@ -50,11 +50,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/Exporter.hpp>
 
 namespace Assimp {
-void ExportScene3MF(const char *pFile, IOSystem *pIOSystem, const aiScene *pScene, const ExportProperties * /*pProperties*/) {
+void ExportScene3MF(const char *pFile, IOSystem *pIOSystem, const aiScene *pScene, const ExportProperties *pProperties) {
     if (!pIOSystem) {
         throw DeadlyExportError("Could not export 3MF archive: " + std::string(pFile));
     }
-    D3MF::Lib3MFBridge::ExportScene(pScene, pFile, pIOSystem);
+    D3MF::Lib3MFBridge::ExportScene(pScene, pFile, pIOSystem, pProperties);
 }
 } // namespace Assimp
 
