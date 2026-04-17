@@ -38,6 +38,8 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ---------------------------------------------------------------------------
 */
+#ifdef ASSIMP_ENABLE_WEBIFC
+
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
@@ -2562,3 +2564,5 @@ TEST_F(utIFCImportExport, unnamedEntityHandling) {
             << "Building name should not be empty quotes";
     }
 }
+
+#endif // ASSIMP_ENABLE_WEBIFC

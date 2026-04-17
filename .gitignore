@@ -125,6 +125,6 @@ generated/*
 # meshlab repo, automatically cloned via CMake (to gain 2 source files for VRML file format conversion)
 contrib/meshlab/autoclone
 # tinyusdz repo, automatically cloned via CMake
-contrib/tinyusdz/autoclone
+# contrib/tinyusdz/autoclone
 # web-ifc repo, automatically cloned via CMake
 contrib/web-ifc/autoclone

@@ -41,6 +41,25 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_EXPORT
 #ifndef ASSIMP_BUILD_NO_3MF_EXPORTER
 
+#ifdef ASSIMP_USE_LIB3MF
+
+#include "Lib3MFBridge.h"
+#include <assimp/Exceptional.h>
+#include <assimp/scene.h>
+#include <assimp/IOSystem.hpp>
+#include <assimp/Exporter.hpp>
+
+namespace Assimp {
+void ExportScene3MF(const char *pFile, IOSystem *pIOSystem, const aiScene *pScene, const ExportProperties *pProperties) {
+    if (!pIOSystem) {
+        throw DeadlyExportError("Could not export 3MF archive: " + std::string(pFile));
+    }
+    D3MF::Lib3MFBridge::ExportScene(pScene, pFile, pIOSystem, pProperties);
+}
+} // namespace Assimp
+
+#else // !ASSIMP_USE_LIB3MF -- original exporter using kuba-zip
+
 #include "D3MFExporter.h"
 
 #include <assimp/Exceptional.h>
@@ -398,6 +417,8 @@ void D3MFExporter::addFileInZip(const std::string& entry, const std::string& con
 
 } // Namespace D3MF
 } // Namespace Assimp
+
+#endif // !ASSIMP_USE_LIB3MF
 
 #endif // ASSIMP_BUILD_NO_3MF_EXPORTER
 #endif // ASSIMP_BUILD_NO_EXPORT

@@ -65,6 +65,10 @@ OPTION(ASSIMP_BUILD_USD_VERBOSE_LOGS "Enable verbose USD import debug logging" o
 # (Need to make this opt-in because 3rd party code triggers lots of CI code quality warnings)
 OPTION(ASSIMP_BUILD_VRML_IMPORTER "Enable VRML (.wrl/.x3dv) file import" off)
 
+# lib3mf-based 3MF import/export: uses the 3MF Consortium reference implementation for
+# comprehensive spec coverage (replaces the basic built-in 3MF exporter)
+OPTION(ASSIMP_BUILD_3MF_LIB3MF "Use lib3mf for 3MF import/export (replaces built-in 3MF)" off)
+
 #--------------------------------------------------------------------------------#
 #                  Internal impl for optional model formats
 #--------------------------------------------------------------------------------#
