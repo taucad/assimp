@@ -1018,13 +1018,15 @@ IF (ASSIMP_BUILD_USD_IMPORTER)
     # Note: ALWAYS specify a git commit hash (or tag) instead of a branch name; using a branch
     #       name can lead to non-deterministic (unpredictable) results since the code is potentially
     #       in flux
-    # "fix/pprinter-and-uvtexture-correctness" branch on taucad fork, 21 Feb 2026
-    set(TINYUSDZ_GIT_TAG "48e327dd34600aba4e85f05ccb85e1317cecbd86")
+    # "main" branch on taucad fork, 17 Apr 2026 - merged with upstream lighttransport/release
+    # (11a2d361) and includes:
+    #   - 48e327dd: Fix UsdUVTexture serialization (wrapS/wrapT labels, boolalpha, inputs:st type)
+    #   - f385e5fe: Skip degenerate faces in mesh conversion (ARM32 NEON stubs reverted in 23d5718b)
+    #   - a852eb09: Merge upstream lighttransport/tinyusdz release (11a2d361, NRVO fix)
+    #   - 23d5718b: Remove obsolete ARM32 NEON stub workaround (upstream stb already covers it)
+    set(TINYUSDZ_GIT_TAG "23d5718bcb37e96d27e84df80df1abef4ad88af2")
     message("****")
     message("\n\n**** Cloning tinyusdz repo, git tag ${TINYUSDZ_GIT_TAG}\n\n")
-
-    # Patch required to build arm32 on android
-    set(TINYUSDZ_PATCH_CMD git apply ${Tinyusdz_BASE_ABSPATH}/patches/tinyusdz.patch)
 
     # Note: CMake's "FetchContent" (which executes at configure time) is much better for this use case
     #       than "ExternalProject" (which executes at build time); we just want to clone a repo and
@@ -1040,7 +1042,6 @@ IF (ASSIMP_BUILD_USD_IMPORTER)
             EXCLUDE_FROM_ALL TRUE
             GIT_REPOSITORY "https://github.com/taucad/tinyusdz"
             GIT_TAG        ${TINYUSDZ_GIT_TAG}
-            PATCH_COMMAND  ${TINYUSDZ_PATCH_CMD}
     )
     FetchContent_MakeAvailable(tinyusdz_repo)
     message("**** Finished cloning tinyusdz repo")
