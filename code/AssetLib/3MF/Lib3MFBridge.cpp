@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOStream.hpp>
 #include <assimp/IOSystem.hpp>
+#include <assimp/Exporter.hpp>
 
 #include <lib3mf_types.hpp>
 #include <lib3mf_abi.hpp>
@@ -170,6 +171,16 @@ aiColor4D lib3MFColorToAi(const Lib3MF::sColor &c) {
 
 // ===== EXPORT IMPLEMENTATION =====
 
+Lib3MF::eModelUnit stringToModelUnit(const std::string &unitStr) {
+    if (unitStr == "micron")      return Lib3MF::eModelUnit::MicroMeter;
+    if (unitStr == "millimeter")  return Lib3MF::eModelUnit::MilliMeter;
+    if (unitStr == "centimeter")  return Lib3MF::eModelUnit::CentiMeter;
+    if (unitStr == "inch")        return Lib3MF::eModelUnit::Inch;
+    if (unitStr == "foot")        return Lib3MF::eModelUnit::Foot;
+    if (unitStr == "meter")       return Lib3MF::eModelUnit::Meter;
+    return Lib3MF::eModelUnit::MilliMeter;
+}
+
 void collectMeshNodes(const aiScene *scene, const aiNode *node,
                       const aiMatrix4x4 &parentTransform,
                       std::vector<std::pair<unsigned int, aiMatrix4x4>> &meshEntries) {
@@ -182,9 +193,36 @@ void collectMeshNodes(const aiScene *scene, const aiNode *node,
     }
 }
 
-void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuffer) {
+void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuffer,
+                    const ExportProperties *pProperties) {
     Lib3MFHandle model;
     checkResult(lib3mf_createmodel(model.ptr()), nullptr, "Failed to create lib3mf model");
+
+    if (pProperties) {
+        std::string unitStr = pProperties->GetPropertyString("3MF_EXPORT_UNIT", "millimeter");
+        checkResult(
+            lib3mf_model_setunit(model.as<Lib3MF_Model>(), stringToModelUnit(unitStr)),
+            model.get(), "Failed to set 3MF model unit"
+        );
+
+        std::string app = pProperties->GetPropertyString("3MF_EXPORT_APPLICATION", "");
+        if (!app.empty()) {
+            Lib3MFHandle metadataGroup;
+            checkResult(
+                lib3mf_model_getmetadatagroup(model.as<Lib3MF_Model>(), metadataGroup.ptr()),
+                model.get(), "Failed to get metadata group"
+            );
+            Lib3MFHandle metadata;
+            checkResult(
+                lib3mf_metadatagroup_addmetadata(
+                    metadataGroup.as<Lib3MF_MetaDataGroup>(),
+                    "", "Application", app.c_str(), "xs:string", true,
+                    metadata.ptr()
+                ),
+                metadataGroup.get(), "Failed to add Application metadata"
+            );
+        }
+    }
 
     Lib3MFHandle baseMaterialGroup;
     std::vector<Lib3MF_uint32> materialPropertyIDs;
