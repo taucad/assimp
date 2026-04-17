@@ -1024,7 +1024,8 @@ IF (ASSIMP_BUILD_USD_IMPORTER)
     #   - f385e5fe: Skip degenerate faces in mesh conversion (ARM32 NEON stubs reverted in 23d5718b)
     #   - a852eb09: Merge upstream lighttransport/tinyusdz release (11a2d361, NRVO fix)
     #   - 23d5718b: Remove obsolete ARM32 NEON stub workaround (upstream stb already covers it)
-    set(TINYUSDZ_GIT_TAG "23d5718bb87598420d3baaf44d63befbbba4be49")
+    #   - 67a2d664: Complete std::boolalpha coverage for Animatable<bool> + broaden pprint tests
+    set(TINYUSDZ_GIT_TAG "67a2d664acc0c7d3d263887b3d65f332287d63e2")
     message("****")
     message("\n\n**** Cloning tinyusdz repo, git tag ${TINYUSDZ_GIT_TAG}\n\n")
 
