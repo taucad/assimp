@@ -1018,13 +1018,13 @@ IF (ASSIMP_BUILD_USD_IMPORTER)
     # Note: ALWAYS specify a git commit hash (or tag) instead of a branch name; using a branch
     #       name can lead to non-deterministic (unpredictable) results since the code is potentially
     #       in flux
-    # "main" branch on taucad fork, 17 Apr 2026 - merged with upstream lighttransport/release
+    # "release" branch on taucad fork, 17 Apr 2026 - merged with upstream lighttransport/release
     # (11a2d361) and includes:
     #   - 48e327dd: Fix UsdUVTexture serialization (wrapS/wrapT labels, boolalpha, inputs:st type)
     #   - f385e5fe: Skip degenerate faces in mesh conversion (ARM32 NEON stubs reverted in 23d5718b)
     #   - a852eb09: Merge upstream lighttransport/tinyusdz release (11a2d361, NRVO fix)
     #   - 23d5718b: Remove obsolete ARM32 NEON stub workaround (upstream stb already covers it)
-    set(TINYUSDZ_GIT_TAG "23d5718bcb37e96d27e84df80df1abef4ad88af2")
+    set(TINYUSDZ_GIT_TAG "23d5718bb87598420d3baaf44d63befbbba4be49")
     message("****")
     message("\n\n**** Cloning tinyusdz repo, git tag ${TINYUSDZ_GIT_TAG}\n\n")
 
