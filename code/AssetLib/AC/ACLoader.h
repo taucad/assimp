@@ -263,6 +263,9 @@ private:
 
     // name counters
     unsigned int mLightsCounter, mGroupsCounter, mPolysCounter, mWorldsCounter;
+
+    // captured Importer for resolving the unit/axis contract overrides
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

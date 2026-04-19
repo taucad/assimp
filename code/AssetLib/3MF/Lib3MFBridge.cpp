@@ -43,7 +43,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "Lib3MFBridge.h"
 
+#include "Common/UnitAxisContract.h"
+
 #include <assimp/Exceptional.h>
+#include <assimp/commonMetaData.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/mesh.h>
 #include <assimp/material.h>
@@ -55,12 +59,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <lib3mf_types.hpp>
 #include <lib3mf_abi.hpp>
 
-#include <vector>
-#include <map>
-#include <string>
-#include <memory>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace Assimp {
 namespace D3MF {
@@ -181,6 +189,32 @@ Lib3MF::eModelUnit stringToModelUnit(const std::string &unitStr) {
     return Lib3MF::eModelUnit::MilliMeter;
 }
 
+// Conversion from each lib3mf model unit to meters. Used to drive vertex rescaling
+// in both directions (source-meters → target-units on export, model-unit → meters on
+// import metadata write).
+double modelUnitToMeters(Lib3MF::eModelUnit unit) {
+    switch (unit) {
+        case Lib3MF::eModelUnit::MicroMeter:  return 1e-6;
+        case Lib3MF::eModelUnit::MilliMeter:  return 1e-3;
+        case Lib3MF::eModelUnit::CentiMeter:  return 1e-2;
+        case Lib3MF::eModelUnit::Inch:        return 0.0254;
+        case Lib3MF::eModelUnit::Foot:        return 0.3048;
+        case Lib3MF::eModelUnit::Meter:       return 1.0;
+    }
+    return 1e-3;
+}
+
+// Axis/unit resolver helpers (validateUpAxisInt, buildAxisRotationMatrix,
+// readSceneUnitScaleToMeters, readSceneUpAxis) live in
+// code/Common/UnitAxisContract.h so every importer/exporter that adopts the
+// contract uses the same implementation. We `using`-import the symbols here
+// to keep the existing call sites unchanged after the refactor.
+using ::Assimp::validateUpAxisInt;
+using ::Assimp::buildAxisRotationMatrix;
+using ::Assimp::readSceneUnitScaleToMeters;
+using ::Assimp::readSceneUpAxis;
+using ::Assimp::writeContractMetadata;
+
 void collectMeshNodes(const aiScene *scene, const aiNode *node,
                       const aiMatrix4x4 &parentTransform,
                       std::vector<std::pair<unsigned int, aiMatrix4x4>> &meshEntries) {
@@ -193,18 +227,133 @@ void collectMeshNodes(const aiScene *scene, const aiNode *node,
     }
 }
 
+// Quantises a vertex position into a 64-bit hash key with `epsilon`-sized buckets.
+// Two positions land in the same bucket iff their componentwise distance is below
+// the epsilon — the welder collapses them to a single output vertex.
+struct QuantisedKey {
+    int64_t x, y, z;
+    bool operator==(const QuantisedKey &o) const noexcept {
+        return x == o.x && y == o.y && z == o.z;
+    }
+};
+
+struct QuantisedKeyHash {
+    size_t operator()(const QuantisedKey &k) const noexcept {
+        // 64-bit splitmix-style avalanche then xor — sufficient for vertex dedup.
+        auto mix = [](uint64_t v) {
+            v ^= v >> 30; v *= 0xbf58476d1ce4e5b9ULL;
+            v ^= v >> 27; v *= 0x94d049bb133111ebULL;
+            v ^= v >> 31;
+            return v;
+        };
+        uint64_t h = mix(static_cast<uint64_t>(k.x));
+        h ^= mix(static_cast<uint64_t>(k.y)) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= mix(static_cast<uint64_t>(k.z)) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return static_cast<size_t>(h);
+    }
+};
+
+// Position-only welder: collapses duplicate vertex positions and rewrites
+// triangle indices so non-manifold "seams" introduced by per-face normals or
+// per-face UVs disappear before the geometry crosses into lib3mf. Only positions
+// are compared — normals/UVs are NOT propagated to lib3mf, so seam attributes are
+// irrelevant. Triangles that become degenerate (two indices collapse to one)
+// after welding are dropped — they were never going to be printable.
+void weldByPosition(std::vector<Lib3MF::sPosition> &vertices,
+                    std::vector<Lib3MF::sTriangle> &triangles,
+                    double epsilon) {
+    if (vertices.empty() || triangles.empty()) {
+        return;
+    }
+
+    const double inv = 1.0 / epsilon;
+    std::unordered_map<QuantisedKey, uint32_t, QuantisedKeyHash> dedup;
+    dedup.reserve(vertices.size());
+
+    std::vector<Lib3MF::sPosition> outVertices;
+    outVertices.reserve(vertices.size());
+    std::vector<uint32_t> remap(vertices.size());
+
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        QuantisedKey key{
+            static_cast<int64_t>(std::llround(vertices[i].m_Coordinates[0] * inv)),
+            static_cast<int64_t>(std::llround(vertices[i].m_Coordinates[1] * inv)),
+            static_cast<int64_t>(std::llround(vertices[i].m_Coordinates[2] * inv)),
+        };
+        auto [it, inserted] = dedup.try_emplace(key, static_cast<uint32_t>(outVertices.size()));
+        if (inserted) {
+            outVertices.push_back(vertices[i]);
+        }
+        remap[i] = it->second;
+    }
+
+    std::vector<Lib3MF::sTriangle> outTriangles;
+    outTriangles.reserve(triangles.size());
+    for (const auto &tri : triangles) {
+        Lib3MF::sTriangle remapped;
+        remapped.m_Indices[0] = remap[tri.m_Indices[0]];
+        remapped.m_Indices[1] = remap[tri.m_Indices[1]];
+        remapped.m_Indices[2] = remap[tri.m_Indices[2]];
+        if (remapped.m_Indices[0] == remapped.m_Indices[1] ||
+            remapped.m_Indices[1] == remapped.m_Indices[2] ||
+            remapped.m_Indices[0] == remapped.m_Indices[2]) {
+            continue;
+        }
+        outTriangles.push_back(remapped);
+    }
+
+    vertices.swap(outVertices);
+    triangles.swap(outTriangles);
+}
+
 void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuffer,
                     const ExportProperties *pProperties) {
     Lib3MFHandle model;
     checkResult(lib3mf_createmodel(model.ptr()), nullptr, "Failed to create lib3mf model");
 
+    // ---- TARGET UNIT (3MF file) ----
+    // Resolver: ExportProperty `3MF_EXPORT_UNIT` (string) → spec default `millimeter`.
+    std::string targetUnitStr = "millimeter";
     if (pProperties) {
-        std::string unitStr = pProperties->GetPropertyString("3MF_EXPORT_UNIT", "millimeter");
-        checkResult(
-            lib3mf_model_setunit(model.as<Lib3MF_Model>(), stringToModelUnit(unitStr)),
-            model.get(), "Failed to set 3MF model unit"
-        );
+        targetUnitStr = pProperties->GetPropertyString("3MF_EXPORT_UNIT", "millimeter");
+    }
+    Lib3MF::eModelUnit targetUnit = stringToModelUnit(targetUnitStr);
+    const double targetUnitToMeters = modelUnitToMeters(targetUnit);
+    checkResult(
+        lib3mf_model_setunit(model.as<Lib3MF_Model>(), targetUnit),
+        model.get(), "Failed to set 3MF model unit"
+    );
 
+    // ---- TARGET UP-AXIS (3MF coordinate system) ----
+    // Resolver: ExportProperty `3MF_EXPORT_UPAXIS` (int32, 0=X, 1=Y, 2=Z) → 3MF
+    // Core Spec §3.3 default of +Z. Out-of-range values throw DeadlyExportError.
+    int32_t targetUpAxis = 2;
+    if (pProperties) {
+        targetUpAxis = pProperties->GetPropertyInteger("3MF_EXPORT_UPAXIS", 2);
+        targetUpAxis = validateUpAxisInt(targetUpAxis, "3MF_EXPORT_UPAXIS");
+    }
+
+    // ---- SOURCE UNIT-SCALE ----
+    // Resolver: scene `AI_METADATA_UNIT_SCALE_TO_METERS` → identity (no rescale).
+    // Identity here means the resulting 3MF declares the target unit but does not
+    // rescale vertices — caller-source-units are written literally. This is the
+    // conservative "visible-tiny" default (per research-doc R8h) for unmigrated
+    // importers — never silently 100×-corrupt user geometry.
+    const double sourceUnitToMeters = readSceneUnitScaleToMeters(pScene);
+    const double vertexScale = (sourceUnitToMeters > 0.0)
+        ? (sourceUnitToMeters / targetUnitToMeters)
+        : 1.0;
+
+    // ---- SOURCE UP-AXIS ----
+    // Resolver: scene `AI_METADATA_UP_AXIS` → -1 (skip rotation entirely).
+    const int32_t sourceUpAxis = readSceneUpAxis(pScene);
+    aiMatrix4x4 axisRotation; // identity by default
+    if (sourceUpAxis >= 0) {
+        validateUpAxisInt(sourceUpAxis, AI_METADATA_UP_AXIS " (scene metadata)");
+        axisRotation = buildAxisRotationMatrix(sourceUpAxis, targetUpAxis);
+    }
+
+    if (pProperties) {
         std::string app = pProperties->GetPropertyString("3MF_EXPORT_APPLICATION", "");
         if (!app.empty()) {
             Lib3MFHandle metadataGroup;
@@ -269,7 +418,7 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
 
     for (const auto &entry : meshEntries) {
         unsigned int meshIdx = entry.first;
-        const aiMatrix4x4 &transform = entry.second;
+        const aiMatrix4x4 &nodeTransform = entry.second;
         const aiMesh *mesh = pScene->mMeshes[meshIdx];
 
         Lib3MFHandle meshObject;
@@ -282,23 +431,46 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             lib3mf_object_setname(meshObject.as<Lib3MF_Object>(), mesh->mName.C_Str());
         }
 
+        // Bake (axis rotation) × (unit scale) × (per-node hierarchy transform) into
+        // every vertex so the build item can carry an identity transform. The
+        // `aiProcess_PreTransformVertices` pp flag (R9') normally collapses the
+        // hierarchy ahead of the bridge, but we still apply `nodeTransform` here so
+        // direct `Lib3MFBridge::ExportScene` callers (bypassing the top-level
+        // Exporter) get correct output too.
+        aiMatrix4x4 unitScaleMatrix;
+        unitScaleMatrix.a1 = static_cast<float>(vertexScale);
+        unitScaleMatrix.b2 = static_cast<float>(vertexScale);
+        unitScaleMatrix.c3 = static_cast<float>(vertexScale);
+
+        const aiMatrix4x4 vertexTransform = axisRotation * unitScaleMatrix * nodeTransform;
+
         std::vector<Lib3MF::sPosition> vertices(mesh->mNumVertices);
         for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-            vertices[v].m_Coordinates[0] = mesh->mVertices[v].x;
-            vertices[v].m_Coordinates[1] = mesh->mVertices[v].y;
-            vertices[v].m_Coordinates[2] = mesh->mVertices[v].z;
+            aiVector3D p = vertexTransform * mesh->mVertices[v];
+            vertices[v].m_Coordinates[0] = p.x;
+            vertices[v].m_Coordinates[1] = p.y;
+            vertices[v].m_Coordinates[2] = p.z;
         }
 
-        std::vector<Lib3MF::sTriangle> triangles(mesh->mNumFaces);
+        std::vector<Lib3MF::sTriangle> triangles;
+        triangles.reserve(mesh->mNumFaces);
         for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
             const aiFace &face = mesh->mFaces[f];
             if (face.mNumIndices != 3) {
                 continue;
             }
-            triangles[f].m_Indices[0] = face.mIndices[0];
-            triangles[f].m_Indices[1] = face.mIndices[1];
-            triangles[f].m_Indices[2] = face.mIndices[2];
+            Lib3MF::sTriangle tri;
+            tri.m_Indices[0] = face.mIndices[0];
+            tri.m_Indices[1] = face.mIndices[1];
+            tri.m_Indices[2] = face.mIndices[2];
+            triangles.push_back(tri);
         }
+
+        // Position-only weld closes the per-face-normal seams that produced the
+        // "non-manifold edge" diagnostics in slicers. Epsilon is sized at one
+        // micrometre in scene units (post-rescale) so that tessellation noise
+        // disappears but legitimately distinct CAD vertices survive.
+        weldByPosition(vertices, triangles, 1e-6);
 
         checkResult(
             lib3mf_meshobject_setgeometry(
@@ -332,13 +504,15 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             );
         }
 
+        // Build-item transform is identity — every transform contribution has
+        // already been baked into the vertex stream above.
         Lib3MFHandle buildItem;
-        Lib3MF::sTransform lib3mfTransform = aiMatrixToLib3MFTransform(transform);
+        Lib3MF::sTransform identityTransform = aiMatrixToLib3MFTransform(aiMatrix4x4());
         checkResult(
             lib3mf_model_addbuilditem(
                 model.as<Lib3MF_Model>(),
                 meshObject.as<Lib3MF_Object>(),
-                &lib3mfTransform,
+                &identityTransform,
                 buildItem.ptr()
             ),
             model.get(), "Failed to add build item"
@@ -664,6 +838,17 @@ void importFromLib3MF(aiScene *pScene, const std::vector<Lib3MF_uint8> &inputBuf
             pScene->mRootNode->mChildren[i] = child;
         }
     }
+
+    // ---- CONTRACT METADATA (R10') ----
+    // Read the actual file unit from lib3mf and project it into the cross-importer
+    // contract so downstream exporters can rescale spec-correctly. 3MF's coordinate
+    // system is normatively +Z up (3MF Core Spec §3.3) — set unconditionally.
+    // The shared `writeContractMetadata` helper handles allocation, key collision,
+    // and SOURCE_FORMAT registration uniformly across every adopting importer.
+    Lib3MF::eModelUnit modelUnit = Lib3MF::eModelUnit::MilliMeter;
+    lib3mf_model_getunit(model.as<Lib3MF_Model>(), &modelUnit);
+    const double unitScaleToMeters = modelUnitToMeters(modelUnit);
+    writeContractMetadata(pScene, unitScaleToMeters, static_cast<int32_t>(2), "3MF");
 }
 
 } // anonymous namespace

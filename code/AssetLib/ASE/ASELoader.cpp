@@ -49,8 +49,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // internal headers
 #include "ASELoader.h"
 #include "Common/TargetAnimation.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/SkeletonMeshBuilder.h>
 #include <assimp/StringComparison.h>
+#include <assimp/commonMetaData.h>
+#include <assimp/metadata.h>
 
 #include <assimp/importerdesc.h>
 #include <assimp/scene.h>
@@ -102,6 +105,7 @@ const aiImporterDesc *ASEImporter::GetInfo() const {
 // ------------------------------------------------------------------------------------------------
 // Setup configuration options
 void ASEImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
     configRecomputeNormals = (pImp->GetPropertyInteger(
                                       AI_CONFIG_IMPORT_ASE_RECONSTRUCT_NORMALS, 1) ?
                                       true :
@@ -243,6 +247,19 @@ void ASEImporter::InternReadFile(const std::string &pFile,
             SkeletonMeshBuilder skeleton(pScene);
         }
     }
+
+    // Record the unit/up-axis contract.
+    //
+    // ASE files have no scene-level distance unit declaration. The
+    // de-facto convention used by 3D Studio Max ASE exporters is one
+    // unit per metre.
+    //
+    // 3D Studio Max itself is Z-up, but the ASE importer applies an
+    // axis-conversion rotation in BuildNodes() above (which moves +Z to
+    // +Y), so the canonical post-import scene is Y-up.
+    const ContractDefaults defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "ASE", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "ASE");
 }
 // ------------------------------------------------------------------------------------------------
 void ASEImporter::GenerateDefaultMaterial() {

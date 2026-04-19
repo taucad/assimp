@@ -80,6 +80,10 @@ public:
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler,
             bool checkSig) const override;
 
+    /// @brief Capture the Importer reference so we can read
+    /// `AI_CONFIG_IMPORT_XGL_*` overrides during `InternReadFile`.
+    void SetupProperties(const Importer *pImp) override;
+
 protected:
     void clear();
 
@@ -198,6 +202,7 @@ private:
 private:
     XmlParser *mXmlParser;
     aiScene *m_scene;
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

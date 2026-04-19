@@ -49,7 +49,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "X3DImporter.hpp"
 #include "X3DImporter_Macro.hpp"
 
+#include "Common/UnitAxisContract.h"
+
 #include <assimp/DefaultIOSystem.h>
+#include <assimp/commonMetaData.h>
+#include <assimp/fast_atof.h>
 
 // Header files, stdlib.
 #include <iterator>
@@ -202,6 +206,7 @@ X3DImporter::~X3DImporter() {
 
 void X3DImporter::Clear() {
     mNodeElementCur = nullptr;
+    mSourceUnitToMeters = 0.0;
     // Delete all elements
     if (!NodeElement_List.empty()) {
         for (std::list<X3DNodeElementBase *>::iterator it = NodeElement_List.begin(); it != NodeElement_List.end(); ++it) {
@@ -252,6 +257,10 @@ void X3DImporter::ParseFile(XmlParser &theParser) {
             skipUnsupportedNode("X3D", currentNode);
         }
     }
+}
+
+void X3DImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 bool X3DImporter::CanRead(const std::string &pFile, IOSystem * /*pIOHandler*/, bool checkSig) const {
@@ -340,6 +349,18 @@ void X3DImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
                 pScene->mLights[i] = *it++;
         }
     }
+
+    // X3D / X3DV / VRML default coordinate system per ISO/IEC 19775-1:
+    //   - length unit: metre (1.0 m per source unit) unless overridden by
+    //     `<unit category="length" conversionFactor="N"/>` in `<head>`.
+    //   - up axis: +Y (Y-up, right-handed).
+    // VRML97 (.wrl) and X3DV share the same coordinate system as X3D —
+    // VrmlConverter rewrites the source into X3D XML before parsing, so the
+    // same defaults apply to all three formats covered by this importer.
+    const double sourceUnit = mSourceUnitToMeters > 0.0 ? mSourceUnitToMeters : 1.0;
+    const ContractDefaults x3dDefaults{ sourceUnit, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "X3D", x3dDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "X3D");
 }
 
 const aiImporterDesc *X3DImporter::GetInfo() const {
@@ -361,6 +382,27 @@ void X3DImporter::readHead(XmlNode &node) {
             if (XmlParser::getStdStrAttribute(currentNode, "name", entry.name)) {
                 XmlParser::getStdStrAttribute(currentNode, "content", entry.value);
                 metaArray.emplace_back(entry);
+            }
+        } else if (currentName == "unit") {
+            // X3D 3.3+ <UNIT> statement: per-category unit override.
+            // Spec: https://www.web3d.org/documents/specifications/19775-1/V3.3/Part01/components/core.html#UNIT
+            // Example: <unit category="length" name="centimeter" conversionFactor="0.01"/>
+            // conversionFactor = base-units per source-unit, where base unit
+            // for length is the metre. We only consume the "length" category.
+            std::string category;
+            if (!XmlParser::getStdStrAttribute(currentNode, "category", category)) {
+                continue;
+            }
+            if (category != "length") {
+                continue;
+            }
+            std::string conversionFactor;
+            if (!XmlParser::getStdStrAttribute(currentNode, "conversionFactor", conversionFactor)) {
+                continue;
+            }
+            const double parsed = ::Assimp::fast_atof(conversionFactor.c_str());
+            if (parsed > 0.0) {
+                mSourceUnitToMeters = parsed;
             }
         }
         // TODO: check if other node types in head should be supported

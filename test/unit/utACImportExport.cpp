@@ -41,6 +41,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -151,4 +154,59 @@ TEST(utACImportExport, importDobuleSidedFaces) {
     ASSERT_EQ(scene->mNumMeshes, 1u);
     ASSERT_EQ(scene->mMeshes[0]->mNumFaces, 2u);
     ASSERT_EQ(scene->mMeshes[0]->mNumVertices, 8u);
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+constexpr const char *kFixture = ASSIMP_TEST_MODELS_DIR "/AC/Wuson.ac";
+
+} // namespace
+
+TEST(utACImportExport, contractDefaultsAreMetersAndYUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_DOUBLE_EQ(1.0, readUnitScale(scene));
+    EXPECT_EQ(1, readUpAxis(scene));
+}
+
+TEST(utACImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_AC_UNIT_SCALE_TO_METERS, 0.001f);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_NEAR(0.001, readUnitScale(scene), 1e-6);
+}
+
+TEST(utACImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_AC_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_EQ(2, readUpAxis(scene));
+}
+
+TEST(utACImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_AC_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    EXPECT_EQ(nullptr, scene);
+    const std::string errorString = importer.GetErrorString();
+    EXPECT_NE(std::string::npos, errorString.find("IMPORT_AC_UP_AXIS"));
 }

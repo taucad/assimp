@@ -72,6 +72,9 @@ public:
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler,
             bool checkSig) const override;
 
+    /// Captures the importer for `AI_CONFIG_IMPORT_NFF_*` overrides.
+    void SetupProperties(const Importer *pImp) override;
+
 protected:
     // -------------------------------------------------------------------
     /** Return importer meta information.
@@ -183,6 +186,8 @@ private:
     */
     void LoadNFF2MaterialTable(std::vector<ShadingInfo> &output,
             const std::string &path, IOSystem *pIOHandler);
+
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

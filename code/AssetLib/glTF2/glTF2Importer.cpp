@@ -60,6 +60,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 
@@ -1942,9 +1943,17 @@ void glTF2Importer::ImportCommonMetadata(glTF2::Asset &a) {
     const bool hasVersion = !a.asset.version.empty();
     const bool hasGenerator = !a.asset.generator.empty();
     const bool hasCopyright = !a.asset.copyright.empty();
-    const bool hasSceneMetadata = a.scene->customExtensions;
+    const bool hasSceneMetadata = a.scene && a.scene->customExtensions;
+
+    // Always allocate the metadata block — the glTF 2.0 spec mandates meters and
+    // +Y up (glTF 2.0 §3.1, §3.5) so the cross-importer contract values are
+    // statically known. Writing them unconditionally lets downstream exporters
+    // (e.g. 3MF) rescale and re-axis correctly without per-format lookup tables.
+    mScene->mMetaData = new aiMetadata;
+    mScene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    mScene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
     if (hasVersion || hasGenerator || hasCopyright || hasSceneMetadata) {
-        mScene->mMetaData = new aiMetadata;
         if (hasVersion) {
             mScene->mMetaData->Add(AI_METADATA_SOURCE_FORMAT_VERSION, aiString(a.asset.version));
         }

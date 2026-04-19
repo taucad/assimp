@@ -211,6 +211,8 @@ SET( Common_SRCS
   Common/AssertHandler.cpp
   Common/Exceptional.cpp
   Common/Base64.cpp
+  Common/UnitAxisContract.h
+  Common/UnitAxisContract.cpp
 )
 SOURCE_GROUP(Common FILES ${Common_SRCS})
 

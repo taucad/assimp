@@ -44,10 +44,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ObjFileImporter.h"
 #include "ObjFileData.h"
 #include "ObjFileParser.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/DefaultIOSystem.h>
 #include <assimp/IOStreamBuffer.h>
 #include <assimp/ai_assert.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
@@ -98,6 +101,12 @@ bool ObjFileImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bo
 // ------------------------------------------------------------------------------------------------
 const aiImporterDesc *ObjFileImporter::GetInfo() const {
     return &desc;
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Capture the importer for resolving contract overrides.
+void ObjFileImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -158,6 +167,14 @@ void ObjFileImporter::InternReadFile(const std::string &file, aiScene *pScene, I
     if (pIOHandler->StackSize() > 0) {
         pIOHandler->PopDirectory();
     }
+
+    // OBJ does not declare a scene-level distance unit or up-axis. The
+    // de-facto convention used by Wavefront/Maya OBJ producers is one
+    // unit per metre and Y-up; record those defaults on the scene unless
+    // the caller overrides via AI_CONFIG_IMPORT_OBJ_*.
+    const ContractDefaults objDefaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "OBJ", objDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "OBJ");
 }
 
 // ------------------------------------------------------------------------------------------------

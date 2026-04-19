@@ -40,6 +40,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Importer.hpp>
@@ -386,4 +389,59 @@ TEST_F(utLWOImportExport, importLWOBsphere_with_mat_gloss_50pc) {
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/LWO/LWOB/sphere_with_mat_gloss_50pc.lwo", aiProcess_ValidateDataStructure);
 
     EXPECT_NE(nullptr, scene);
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+constexpr const char *kLwoFixture = ASSIMP_TEST_MODELS_DIR "/LWO/LWO2/boxuv.lwo";
+
+} // namespace
+
+TEST_F(utLWOImportExport, contractDefaultsAreMetersAndYUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kLwoFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_DOUBLE_EQ(1.0, readUnitScale(scene));
+    EXPECT_EQ(1, readUpAxis(scene));
+}
+
+TEST_F(utLWOImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_LWO_UNIT_SCALE_TO_METERS, 0.0254f);
+    const aiScene *scene = importer.ReadFile(kLwoFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_NEAR(0.0254, readUnitScale(scene), 1e-6);
+}
+
+TEST_F(utLWOImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_LWO_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kLwoFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_EQ(2, readUpAxis(scene));
+}
+
+TEST_F(utLWOImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_LWO_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kLwoFixture, 0);
+    EXPECT_EQ(nullptr, scene);
+    const std::string errorString = importer.GetErrorString();
+    EXPECT_NE(std::string::npos, errorString.find("IMPORT_LWO_UP_AXIS"));
 }

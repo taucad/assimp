@@ -41,6 +41,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Importer.hpp>
@@ -69,4 +72,59 @@ TEST(utMD5Importer, importBob) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_NONBSD_DIR "/MD5/Bob.md5mesh", aiProcess_ValidateDataStructure);
     ASSERT_NE(nullptr, scene);
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+constexpr const char *kFixture = ASSIMP_TEST_MODELS_DIR "/MD5/SimpleCube.md5mesh";
+
+} // namespace
+
+TEST(utMD5Importer, contractDefaultsToYUpPostRotation) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_DOUBLE_EQ(1.0, readUnitScale(scene));
+    EXPECT_EQ(1, readUpAxis(scene));
+}
+
+TEST(utMD5Importer, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_MD5_UNIT_SCALE_TO_METERS, 0.0254f);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_NEAR(0.0254, readUnitScale(scene), 1e-6);
+}
+
+TEST(utMD5Importer, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_MD5_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_EQ(2, readUpAxis(scene));
+}
+
+TEST(utMD5Importer, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_MD5_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    EXPECT_EQ(nullptr, scene);
+    const std::string errorString = importer.GetErrorString();
+    EXPECT_NE(std::string::npos, errorString.find("IMPORT_MD5_UP_AXIS"));
 }

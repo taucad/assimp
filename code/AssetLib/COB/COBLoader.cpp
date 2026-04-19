@@ -48,16 +48,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "COBLoader.h"
 #include "COBScene.h"
 #include "PostProcessing/ConvertToLHProcess.h"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/LineSplitter.h>
 #include <assimp/ParsingUtils.h>
 #include <assimp/StreamReader.h>
 #include <assimp/TinyFormatter.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOSystem.hpp>
+#include <assimp/Importer.hpp>
 
 #include <memory>
 
@@ -104,8 +108,8 @@ const aiImporterDesc *COBImporter::GetInfo() const {
 
 // ------------------------------------------------------------------------------------------------
 // Setup configuration properties for the loader
-void COBImporter::SetupProperties(const Importer * /*pImp*/) {
-    // nothing to be done for the moment
+void COBImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -207,6 +211,25 @@ void COBImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
     //flip normals after import
     FlipWindingOrderProcess flip;
     flip.Execute(pScene);
+
+    // COB stores per-Node `unit_scale` as the scaling required to bring
+    // local coordinates into the metric system (cf. COBScene.h:125-126).
+    // Historically the loader parsed it but never propagated it onto the
+    // scene, so downstream consumers had no way to recover the source
+    // unit. We surface the first top-level node's unit_scale as the
+    // scene-level UnitScaleToMeters (defaulting to 1.0 when no Unit
+    // chunk was present). COB has no scene-level up-axis declaration —
+    // trueSpace convention is Y-up, which we declare unless overridden.
+    double sourceUnit = 1.0;
+    for (const std::shared_ptr<COB::Node> &n : scene.nodes) {
+        if (n->parent_id == 0 && n->unit_scale > 0.0f) {
+            sourceUnit = static_cast<double>(n->unit_scale);
+            break;
+        }
+    }
+    const ContractDefaults cobDefaults{ sourceUnit, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "COB", cobDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "COB");
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -46,12 +46,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_DXF_IMPORTER
 
 #include "DXFLoader.h"
+#include "Common/UnitAxisContract.h"
 #include "DXFHelper.h"
 #include "PostProcessing/ConvertToLHProcess.h"
 
 #include <assimp/ParsingUtils.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/IOSystem.hpp>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/importerdesc.h>
 
@@ -365,6 +368,12 @@ const aiImporterDesc* DXFImporter::GetInfo () const {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Capture configuration overrides for the unit/up-axis contract.
+void DXFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Imports the given file into the given scene structure.
 void DXFImporter::InternReadFile( const std::string& filename, aiScene* pScene, IOSystem* pIOHandler) {
     std::shared_ptr<IOStream> file = std::shared_ptr<IOStream>( pIOHandler->Open( filename) );
@@ -444,6 +453,20 @@ void DXFImporter::InternReadFile( const std::string& filename, aiScene* pScene, 
         0.f,0.f,1.f,0.f,
         0.f,-1.f,0.f,0.f,
         0.f,0.f,0.f,1.f) * pScene->mRootNode->mTransformation;
+
+    // Record the unit/up-axis contract.
+    //
+    // DXF / AutoCAD has no scene-level distance unit declaration that
+    // this importer parses (the optional INSUNITS HEADER variable is
+    // currently skipped). The de-facto convention used by AutoCAD's
+    // INSUNITS=4 default and most DXF exporters is millimetres.
+    //
+    // AutoCAD itself is normatively Z-up, but the importer applies the
+    // AutoCAD->Assimp conversion rotation above (which moves +Z to +Y),
+    // so the canonical post-import scene is Y-up (UpAxis=1).
+    const ContractDefaults defaults{ 0.001, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "DXF", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "DXF");
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -3693,7 +3693,10 @@ void FBXConverter::ConvertGlobalSettings() {
 
     const bool hasGenerator = !doc.Creator().empty();
 
-    mSceneOut->mMetaData = aiMetadata::Alloc(16 + (hasGenerator ? 1 : 0));
+    // Two extra slots reserved for the new contract keys
+    // (AI_METADATA_UNIT_SCALE_TO_METERS, AI_METADATA_UP_AXIS) which live
+    // alongside the legacy FBX-style "UnitScaleFactor"/"UpAxis" entries.
+    mSceneOut->mMetaData = aiMetadata::Alloc(18 + (hasGenerator ? 1 : 0));
     mSceneOut->mMetaData->Set(0, "UpAxis", doc.GlobalSettings().UpAxis());
     mSceneOut->mMetaData->Set(1, "UpAxisSign", doc.GlobalSettings().UpAxisSign());
     mSceneOut->mMetaData->Set(2, "FrontAxis", doc.GlobalSettings().FrontAxis());
@@ -3711,8 +3714,16 @@ void FBXConverter::ConvertGlobalSettings() {
     mSceneOut->mMetaData->Set(13, "TimeSpanStop", doc.GlobalSettings().TimeSpanStop());
     mSceneOut->mMetaData->Set(14, "CustomFrameRate", doc.GlobalSettings().CustomFrameRate());
     mSceneOut->mMetaData->Set(15, AI_METADATA_SOURCE_FORMAT_VERSION, aiString(ai_to_string(doc.FBXVersion())));
+    // Cross-format contract keys. FBX stores distance as centimetres-per-unit
+    // in UnitScaleFactor, so the meters-per-unit contract value is
+    // 0.01 * UnitScaleFactor. UpAxis follows the same 0=X / 1=Y / 2=Z
+    // convention as the contract.
+    const double metersPerUnit = 0.01 * static_cast<double>(doc.GlobalSettings().UnitScaleFactor());
+    const int32_t upAxis = static_cast<int32_t>(doc.GlobalSettings().UpAxis());
+    mSceneOut->mMetaData->Set(16, AI_METADATA_UNIT_SCALE_TO_METERS, metersPerUnit);
+    mSceneOut->mMetaData->Set(17, AI_METADATA_UP_AXIS, upAxis);
     if (hasGenerator) {
-        mSceneOut->mMetaData->Set(16, AI_METADATA_SOURCE_GENERATOR, aiString(doc.Creator()));
+        mSceneOut->mMetaData->Set(18, AI_METADATA_SOURCE_GENERATOR, aiString(doc.Creator()));
     }
 }
 

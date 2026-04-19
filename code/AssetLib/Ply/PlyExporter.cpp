@@ -41,6 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if !defined(ASSIMP_BUILD_NO_EXPORT) && !defined(ASSIMP_BUILD_NO_PLY_EXPORTER)
 
 #include "PlyExporter.h"
+#include "Common/UnitAxisContract.h"
 #include <memory>
 #include <cmath>
 #include <assimp/Exceptional.h>
@@ -58,9 +59,30 @@ template <typename T> const char* type_of(T&) { return "unknown"; }
 template<> const char* type_of(float&) { return "float"; }
 template<> const char* type_of(double&) { return "double"; }
 
+namespace {
+// PLY is unitless and axis-less by spec. The companion PLY importer
+// normalises absent declarations to (1.0 m, Y-up); the exporter targets the
+// same frame so same-format round-trips are bitwise identity. The bake is
+// gated on `AI_METADATA_UNIT_SCALE_TO_METERS` (the contract opt-in signal),
+// preserving byte-identical output for legacy/unmigrated callers.
+constexpr double kPlyTargetUnitToMeters = 1.0;
+constexpr int32_t kPlyTargetUpAxis = 1; // Y-up
+
+// `bakeContractTransformIntoMeshes` mutates `pScene->mMeshes[*]` in place,
+// matching the upstream glTF2/STL exporters. The exporter API hands us a
+// `const aiScene*` for legacy reasons; cast away const at the bake boundary
+// only.
+void bakePlyContract(const aiScene *pScene) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kPlyTargetUnitToMeters, kPlyTargetUpAxis);
+}
+} // namespace
+
 // ------------------------------------------------------------------------------------------------
 // Worker function for exporting a scene to PLY. Prototyped and registered in Exporter.cpp
 void ExportScenePly(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* /*pProperties*/) {
+    bakePlyContract(pScene);
+
     // invoke the exporter
     PlyExporter exporter(pFile, pScene);
 
@@ -78,6 +100,8 @@ void ExportScenePly(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene
 }
 
 void ExportScenePlyBinary(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* /*pProperties*/) {
+    bakePlyContract(pScene);
+
     // invoke the exporter
     PlyExporter exporter(pFile, pScene, true);
 

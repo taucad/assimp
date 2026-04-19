@@ -169,6 +169,21 @@ void USDImporterImplTinyusdz::InternReadFile(
     }
     fprintf(stderr, "[USD] Load OK. is_usdz=%d fileSize=%zu\n", is_usdz, fileSize);
 
+    // Capture the stage-level unit/up-axis metadata so the parent importer
+    // can reconcile any caller overrides and write the contract metadata
+    // onto the aiScene. tinyusdz returns the USD default (1.0 metre, Y-up)
+    // when the layer omits the values.
+    sourceMetersPerUnit = stage.metas().metersPerUnit.get_value();
+    switch (stage.metas().upAxis.get_value()) {
+        case tinyusdz::Axis::X: sourceUpAxis = 0; break;
+        case tinyusdz::Axis::Z: sourceUpAxis = 2; break;
+        case tinyusdz::Axis::Y:
+        case tinyusdz::Axis::Invalid:
+        default:
+            sourceUpAxis = 1;
+            break;
+    }
+
     tinyusdz::tydra::RenderScene render_scene;
     tinyusdz::tydra::RenderSceneConverter converter;
     tinyusdz::tydra::RenderSceneConverterEnv env(stage);

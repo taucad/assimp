@@ -46,10 +46,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "XFileImporter.h"
 #include "XFileParser.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/ConvertToLHProcess.h"
 
 #include <assimp/TinyFormatter.h>
 #include <assimp/IOSystem.hpp>
+#include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/importerdesc.h>
@@ -88,6 +90,12 @@ const aiImporterDesc *XFileImporter::GetInfo() const {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Capture the active importer so InternReadFile can read contract overrides.
+void XFileImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Imports the given file into the given scene structure.
 void XFileImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
     // read file into memory
@@ -117,6 +125,21 @@ void XFileImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     if (!pScene->mRootNode) {
         throw DeadlyImportError("XFile is ill-formatted - no content imported.");
     }
+
+    // Record the unit/up-axis contract.
+    //
+    // .x (Direct3D / DirectX) files have no scene-level distance unit
+    // declaration; the de-facto convention used by the Direct3D SDK
+    // sample assets is one unit per metre.
+    //
+    // The format is natively left-handed Y-up, but
+    // CreateDataRepresentationFromImport above applies
+    // MakeLeftHandedProcess + FlipWindingOrderProcess to convert to
+    // Assimp's right-handed convention. The up-axis remains Y after
+    // these handedness conversions.
+    const ContractDefaults defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "X", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "X");
 }
 
 // ------------------------------------------------------------------------------------------------

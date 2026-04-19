@@ -2725,4 +2725,213 @@ TEST_F(utUSDZExport, validateAnimationFidelityRoundTrip) {
     EXPECT_EQ(originalScene->mNumMaterials, reimported->mNumMaterials);
 }
 
+// ===========================================================================
+// Unit/axis contract tests — Tier 2 USD exporter.
+//
+// USD canonically authors metres + Y-up. The exporter must bake the
+// `AI_METADATA_UNIT_SCALE_TO_METERS` / `AI_METADATA_UP_AXIS` contract into
+// mesh vertices (and normals) before emitting the stage so that any source
+// frame round-trips into the canonical USD frame on disk. Same-frame inputs
+// (m + Y-up) and inputs that omit the contract metadata must short-circuit
+// to identity.
+//
+// We assert against the textual `points = [...]` table in the emitted .usda
+// payload — re-importing through the USD chain is too lossy for this kind
+// of axis-bake check, mirroring the X3D exporter's strategy.
+// ===========================================================================
+
+namespace {
+
+aiScene *makeUsdBoxScene(const aiVector3D &halfExtents) {
+    const float x = halfExtents.x, y = halfExtents.y, z = halfExtents.z;
+    const std::array<aiVector3D, 8> v = {
+        aiVector3D(-x, -y, -z), aiVector3D(+x, -y, -z), aiVector3D(+x, +y, -z), aiVector3D(-x, +y, -z),
+        aiVector3D(-x, -y, +z), aiVector3D(+x, -y, +z), aiVector3D(+x, +y, +z), aiVector3D(-x, +y, +z)
+    };
+    const std::array<std::array<unsigned int, 3>, 12> t = { {
+        { 0, 2, 1 }, { 0, 3, 2 },
+        { 4, 5, 6 }, { 4, 6, 7 },
+        { 0, 1, 5 }, { 0, 5, 4 },
+        { 3, 7, 6 }, { 3, 6, 2 },
+        { 0, 4, 7 }, { 0, 7, 3 },
+        { 1, 2, 6 }, { 1, 6, 5 }
+    } };
+
+    auto *scene = new aiScene();
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    auto *mesh = new aiMesh();
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+    mesh->mMaterialIndex = 0;
+    mesh->mName = aiString("AuthoredBox");
+    mesh->mNumVertices = static_cast<unsigned int>(v.size());
+    mesh->mVertices = new aiVector3D[v.size()];
+    for (size_t i = 0; i < v.size(); ++i) {
+        mesh->mVertices[i] = v[i];
+    }
+    mesh->mNumFaces = static_cast<unsigned int>(t.size());
+    mesh->mFaces = new aiFace[t.size()];
+    for (size_t i = 0; i < t.size(); ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3];
+        mesh->mFaces[i].mIndices[0] = t[i][0];
+        mesh->mFaces[i].mIndices[1] = t[i][1];
+        mesh->mFaces[i].mIndices[2] = t[i][2];
+    }
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    scene->mMeshes[0] = mesh;
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mName = aiString("Root");
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1];
+    scene->mRootNode->mMeshes[0] = 0;
+    return scene;
+}
+
+// Scan every `points = [(x, y, z), ...]` table in the USDA payload and
+// aggregate the axis-aligned extent. The USD exporter's tinyusdz wrapper
+// emits one such table per mesh prim, formatted with `(...)` triplets and
+// comma separators. Round-tripping through the USD importer for axis
+// validation is too lossy (UsdGeomMesh re-decomposition + tinyusdz internal
+// triangulation can re-order vertices), so we go straight to the on-disk
+// text — same approach as the X3D exporter contract tests.
+aiVector3D scanUsdaExtent(const std::string &path) {
+    std::ifstream in(path);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    aiVector3D mn(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                  std::numeric_limits<float>::max());
+    aiVector3D mx(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                  std::numeric_limits<float>::lowest());
+
+    bool found = false;
+    const std::string blockAnchor = "points = [";
+    size_t blockCursor = 0;
+    while (true) {
+        size_t blockPos = content.find(blockAnchor, blockCursor);
+        if (blockPos == std::string::npos) break;
+        size_t blockEnd = content.find(']', blockPos);
+        if (blockEnd == std::string::npos) break;
+        std::string block = content.substr(blockPos, blockEnd - blockPos);
+
+        // Each triplet is `(x, y, z)`; iterate parenthesised groups.
+        size_t triCursor = 0;
+        while (true) {
+            size_t open = block.find('(', triCursor);
+            if (open == std::string::npos) break;
+            size_t close = block.find(')', open);
+            if (close == std::string::npos) break;
+            std::string triplet = block.substr(open + 1, close - open - 1);
+            // Replace commas with spaces so istringstream can read the floats.
+            std::replace(triplet.begin(), triplet.end(), ',', ' ');
+            std::istringstream iss(triplet);
+            float x, y, z;
+            if (iss >> x >> y >> z) {
+                mn.x = std::min(mn.x, x);
+                mn.y = std::min(mn.y, y);
+                mn.z = std::min(mn.z, z);
+                mx.x = std::max(mx.x, x);
+                mx.y = std::max(mx.y, y);
+                mx.z = std::max(mx.z, z);
+                found = true;
+            }
+            triCursor = close + 1;
+        }
+        blockCursor = blockEnd + 1;
+    }
+
+    if (!found) return aiVector3D(0, 0, 0);
+    return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+} // namespace
+
+TEST_F(utUSDZExport, exportUSDABakesUnitScaleWhenSourceUnitDiffersFromMeters) {
+    // Source authored in centimetres (0.01 m per unit) with a 100 cm half-extent
+    // box. After baking to USD's canonical metres frame we expect the on-disk
+    // extent to be 2.0 m × 2.0 m × 2.0 m.
+    aiScene *scene = makeUsdBoxScene(aiVector3D(100.0f, 100.0f, 100.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 0.01); // cm
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    ASSERT_TRUE(createDirectoryRecursive("usd/contract/unit_cm.usda"));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "usda", "usd/contract/unit_cm.usda"));
+    delete scene;
+
+    aiVector3D extent = scanUsdaExtent("usd/contract/unit_cm.usda");
+    EXPECT_NEAR(2.0f, extent.x, 1e-3f);
+    EXPECT_NEAR(2.0f, extent.y, 1e-3f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-3f);
+    std::remove("usd/contract/unit_cm.usda");
+}
+
+TEST_F(utUSDZExport, exportUSDABakesAxisRotationWhenSourceIsZUp) {
+    // Tall box on +Z (Z-up source) — after Z->Y bake the on-disk vertex
+    // table must report the tall axis on +Y (USD canonical Y-up).
+    aiScene *scene = makeUsdBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0); // metres
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    ASSERT_TRUE(createDirectoryRecursive("usd/contract/axis_zup.usda"));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "usda", "usd/contract/axis_zup.usda"));
+    delete scene;
+
+    aiVector3D extent = scanUsdaExtent("usd/contract/axis_zup.usda");
+    EXPECT_NEAR(2.0f, extent.x, 1e-3f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-3f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-3f);
+    std::remove("usd/contract/axis_zup.usda");
+}
+
+TEST_F(utUSDZExport, exportUSDAIsIdentityWhenSourceAlreadyMetersYUp) {
+    // Source already lines up with USD canonical (m + Y-up); the bake helper
+    // must short-circuit and the on-disk extents must match the authored
+    // values bit-for-bit (within float tolerance).
+    aiScene *scene = makeUsdBoxScene(aiVector3D(2.5f, 7.5f, 2.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    ASSERT_TRUE(createDirectoryRecursive("usd/contract/identity.usda"));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "usda", "usd/contract/identity.usda"));
+    delete scene;
+
+    aiVector3D extent = scanUsdaExtent("usd/contract/identity.usda");
+    EXPECT_NEAR(5.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(15.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(5.0f, extent.z, 1e-4f);
+    std::remove("usd/contract/identity.usda");
+}
+
+TEST_F(utUSDZExport, exportUSDAIsIdentityWhenContractMetadataAbsent) {
+    // No `mMetaData` means the resolver short-circuits with no transform —
+    // the geometry is treated as already in the canonical frame and emitted
+    // verbatim.
+    aiScene *scene = makeUsdBoxScene(aiVector3D(3.0f, 3.0f, 3.0f));
+    ASSERT_EQ(nullptr, scene->mMetaData);
+
+    ASSERT_TRUE(createDirectoryRecursive("usd/contract/no_meta.usda"));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "usda", "usd/contract/no_meta.usda"));
+    delete scene;
+
+    aiVector3D extent = scanUsdaExtent("usd/contract/no_meta.usda");
+    EXPECT_NEAR(6.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(6.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(6.0f, extent.z, 1e-4f);
+    std::remove("usd/contract/no_meta.usda");
+}
+
 #endif // ASSIMP_BUILD_NO_USD_EXPORTER

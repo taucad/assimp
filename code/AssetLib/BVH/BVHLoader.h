@@ -157,6 +157,9 @@ protected:
     unsigned int mAnimNumFrames;
 
     bool noSkeletonMesh;
+
+    /** Importer instance used to look up unit-axis contract overrides. */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

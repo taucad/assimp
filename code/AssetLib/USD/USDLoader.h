@@ -53,6 +53,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "USDLoaderImplTinyusdz.h"
 
 namespace Assimp {
+class Importer;
 class USDImporter : public BaseImporter {
 public:
     USDImporter();
@@ -61,6 +62,8 @@ public:
     /// \brief  Returns whether the class can handle the format of the given file.
     /// \remark See BaseImporter::CanRead() for details.
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool checkSig) const override;
+
+    void SetupProperties(const Importer *pImp) override;
 
 protected:
     //! \brief  Appends the supported extension.
@@ -72,6 +75,7 @@ protected:
             IOSystem *pIOHandler) override;
 private:
     USDImporterImplTinyusdz impl;
+    const Importer *mImporter = nullptr;
 };
 
 } // namespace Assimp

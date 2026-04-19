@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "FBXExportProperty.h"
 #include "FBXCommon.h"
 #include "FBXUtil.h"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/version.h> // aiGetVersion
 #include <assimp/IOSystem.hpp>
@@ -54,7 +55,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/Logger.hpp>
 #include <assimp/StreamWriter.h> // StreamWriterLE
 #include <assimp/Exceptional.h> // DeadlyExportError
+#include <assimp/commonMetaData.h>
 #include <assimp/material.h> // aiTextureType
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/mesh.h>
 
@@ -99,6 +102,84 @@ namespace FBX {
         ";------------------------------------------------------------------";
 }
 
+    // FBX stores vertex data in centimetres relative to its `UnitScaleFactor`
+    // (cf. FBXImporter.cpp:172-180 — `SetFileScale(size_relative_to_cm * 0.01f)`),
+    // so the canonical FBX target frame is centimetres + Y-up. Bake the
+    // contract into mesh vertices/normals so the on-disk file always lands at
+    // 1cm-per-unit + Y-up regardless of the source frame, then rewrite both
+    // the contract metadata and the legacy `UnitScaleFactor` / `UpAxis` keys
+    // so `WriteGlobalSettings` emits values consistent with the baked geometry.
+    namespace {
+        constexpr double kFbxTargetUnitToMeters = 1e-2; // centimetres
+        constexpr int32_t kFbxTargetUpAxis = 1; // Y-up
+
+        void rewriteSceneMetaForBakedFbxFrame(aiScene *scene) {
+            if (scene == nullptr) {
+                return;
+            }
+            if (scene->mMetaData == nullptr) {
+                scene->mMetaData = new aiMetadata();
+            }
+            // Contract keys reflect the new frame: 1 unit = 1 cm = 0.01 m, Y-up.
+            if (scene->mMetaData->HasKey(AI_METADATA_UNIT_SCALE_TO_METERS)) {
+                scene->mMetaData->Set(AI_METADATA_UNIT_SCALE_TO_METERS, kFbxTargetUnitToMeters);
+            } else {
+                scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, kFbxTargetUnitToMeters);
+            }
+            const int32_t targetAxis = kFbxTargetUpAxis;
+            if (scene->mMetaData->HasKey(AI_METADATA_UP_AXIS)) {
+                scene->mMetaData->Set(AI_METADATA_UP_AXIS, targetAxis);
+            } else {
+                scene->mMetaData->Add(AI_METADATA_UP_AXIS, targetAxis);
+            }
+            // Legacy FBX keys: vertices are now in cm, so UnitScaleFactor==1.
+            // `WriteGlobalSettings` reads these via `WritePropDouble` and falls
+            // back to its hard-coded default of 1.0 only if the key is absent;
+            // overwriting them here keeps the on-disk value consistent with the
+            // baked vertex data (otherwise a meters-source scene would still
+            // emit `UnitScaleFactor=100` and double-count on re-import).
+            const float kLegacyUnitFactor = 1.0f;
+            const int kLegacyAxisOne = 1;
+            const int kLegacyAxisZero = 0;
+            const auto setOrAddFloat = [&](const char *key, float value) {
+                if (scene->mMetaData->HasKey(key)) {
+                    scene->mMetaData->Set(key, value);
+                } else {
+                    scene->mMetaData->Add(key, value);
+                }
+            };
+            const auto setOrAddInt = [&](const char *key, int value) {
+                if (scene->mMetaData->HasKey(key)) {
+                    scene->mMetaData->Set(key, value);
+                } else {
+                    scene->mMetaData->Add(key, value);
+                }
+            };
+            setOrAddFloat("UnitScaleFactor", kLegacyUnitFactor);
+            setOrAddFloat("OriginalUnitScaleFactor", kLegacyUnitFactor);
+            setOrAddInt("UpAxis", kLegacyAxisOne);
+            setOrAddInt("UpAxisSign", kLegacyAxisOne);
+            setOrAddInt("OriginalUpAxis", kLegacyAxisOne);
+            setOrAddInt("OriginalUpAxisSign", kLegacyAxisOne);
+            // FrontAxis stays Z (=2), CoordAxis stays X (=0). Sign rewrites
+            // are not needed for these — they were already canonical.
+            (void)kLegacyAxisZero;
+        }
+
+        void bakeFbxContract(const aiScene *pScene) {
+            // Cast away const to mutate vertex/normal buffers in place. The
+            // upstream glTF2 + STL exporters follow the same pattern; the
+            // `aiScene*` arg is logically const to the *file* I/O contract,
+            // not to in-memory vertex data.
+            aiScene *scene = const_cast<aiScene *>(pScene);
+            const BakeOutcome outcome = bakeContractTransformIntoMeshes(
+                scene, kFbxTargetUnitToMeters, kFbxTargetUpAxis);
+            if (outcome == BakeOutcome::Applied) {
+                rewriteSceneMetaForBakedFbxFrame(scene);
+            }
+        }
+    } // anonymous namespace
+
     // ---------------------------------------------------------------------
     // Worker function for exporting a scene to binary FBX.
     // Prototyped and registered in Exporter.cpp
@@ -108,6 +189,8 @@ namespace FBX {
         const aiScene* pScene,
         const ExportProperties* pProperties
     ){
+        bakeFbxContract(pScene);
+
         // initialize the exporter
         FBXExporter exporter(pScene, pProperties);
 
@@ -125,6 +208,8 @@ namespace FBX {
         const ExportProperties* pProperties
 
     ){
+        bakeFbxContract(pScene);
+
         // initialize the exporter
         FBXExporter exporter(pScene, pProperties);
 

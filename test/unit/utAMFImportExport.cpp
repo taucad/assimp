@@ -42,8 +42,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
+#include <assimp/scene.h>
 #include <assimp/Importer.hpp>
+
+#include <cstdint>
+#include <string>
 
 using namespace Assimp;
 
@@ -139,4 +146,67 @@ TEST_F(utAMFImportExport, importAMFWithMatFromFileTest) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test_with_mat.amf", aiProcess_ValidateDataStructure);
     EXPECT_NE(nullptr, scene);
+}
+
+TEST_F(utAMFImportExport, contractDefaultsAreMillimeterAndZUpWhenUnitAttributeAbsent) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test1.amf", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(0.001, meters, 1e-9) << "AMF spec default unit is millimeter when `<amf unit>` is absent";
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(2, upAxis) << "AMF defaults to Z-up to match additive-manufacturing convention";
+
+    aiString sourceFormat;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_SOURCE_FORMAT, sourceFormat));
+    EXPECT_STREQ("Additive manufacturing file format(AMF) Importer", sourceFormat.C_Str());
+}
+
+TEST_F(utAMFImportExport, contractReadsInchUnitFromAmfAttribute) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test_with_mat.amf", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(0.0254, meters, 1e-9)
+        << "test_with_mat.amf declares unit=\"inch\"; importer must project that into the contract";
+}
+
+TEST_F(utAMFImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_AMF_UNIT_SCALE_TO_METERS, 1.0f);
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test_with_mat.amf", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(1.0, meters, 1e-9) << "AI_CONFIG_IMPORT_AMF_UNIT_SCALE_TO_METERS must win over the file-declared inch";
+}
+
+TEST_F(utAMFImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_AMF_UP_AXIS, 1);
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test1.amf", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(1, upAxis);
+}
+
+TEST_F(utAMFImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_AMF_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/AMF/test1.amf", 0);
+    EXPECT_EQ(nullptr, scene);
+    EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("IMPORT_AMF_UP_AXIS"));
 }

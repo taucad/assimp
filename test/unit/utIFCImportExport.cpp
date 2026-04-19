@@ -43,6 +43,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/Importer.hpp>
 #include <assimp/Exporter.hpp>
@@ -2563,6 +2566,59 @@ TEST_F(utIFCImportExport, unnamedEntityHandling) {
         EXPECT_NE(foundBuildingName, "''") 
             << "Building name should not be empty quotes";
     }
+}
+
+namespace {
+
+constexpr const char *kIfcFixture = ASSIMP_TEST_MODELS_DIR "/IFC/AC14-FZK-Haus-IFC2X3.ifc";
+
+double readUnitScale(const aiScene *scene) {
+    double value = -1.0;
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int readUpAxis(const aiScene *scene) {
+    int value = -1;
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+} // namespace
+
+TEST(utIFCImportExport, contractWritesUnitScaleToMetersAndUpAxis) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->mMetaData, nullptr);
+    EXPECT_NEAR(readUnitScale(scene), 1.0, 1e-9);
+    EXPECT_EQ(readUpAxis(scene), 2);
+}
+
+TEST(utIFCImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_IFC_UNIT_SCALE_TO_METERS, 0.001f);
+    const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_NEAR(readUnitScale(scene), 0.001, 1e-6);
+    EXPECT_EQ(readUpAxis(scene), 2);
+}
+
+TEST(utIFCImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_IFC_UP_AXIS, 1);
+    const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_EQ(readUpAxis(scene), 1);
+}
+
+TEST(utIFCImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_IFC_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
+    EXPECT_EQ(scene, nullptr);
+    const std::string err = importer.GetErrorString();
+    EXPECT_NE(err.find("IMPORT_IFC_UP_AXIS"), std::string::npos) << err;
 }
 
 #endif // ASSIMP_ENABLE_WEBIFC

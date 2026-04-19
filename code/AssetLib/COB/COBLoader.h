@@ -145,6 +145,7 @@ private:
     void ReadGrou_Binary(COB::Scene &out, StreamReaderLE &reader, const COB::ChunkInfo &nfo);
     void ReadUnit_Binary(COB::Scene &out, StreamReaderLE &reader, const COB::ChunkInfo &nfo);
 
+    const Importer *mImporter = nullptr;
 }; // !class COBImporter
 
 } // end of namespace Assimp

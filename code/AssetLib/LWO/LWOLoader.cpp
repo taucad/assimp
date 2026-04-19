@@ -47,6 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // internal headers
 #include "LWOLoader.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/ConvertToLHProcess.h"
 #include "PostProcessing/ProcessHelper.h"
 #include "Geometry/GeometryUtils.h"
@@ -54,7 +55,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/ByteSwapper.h>
 #include <assimp/SGSpatialSort.h>
 #include <assimp/StringComparison.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/IOSystem.hpp>
 
 #include <iomanip>
@@ -115,6 +118,7 @@ bool LWOImporter::CanRead(const std::string &file, IOSystem *pIOHandler, bool /*
 // ------------------------------------------------------------------------------------------------
 // Setup configuration properties
 void LWOImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
     configSpeedFlag = (0 != pImp->GetPropertyInteger(AI_CONFIG_FAVOUR_SPEED, 0) ? true : false);
     configLayerIndex = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_LWO_ONE_LAYER_ONLY, UINT_MAX);
     configLayerName = pImp->GetPropertyString(AI_CONFIG_IMPORT_LWO_ONE_LAYER_ONLY, "");
@@ -668,6 +672,19 @@ void LWOImporter::GenerateNodeGraph(std::map<uint16_t, aiNode *> &apcNodes) {
 
     FlipWindingOrderProcess flipper;
     flipper.Execute(mScene);
+
+    // Record the unit/up-axis contract.
+    //
+    // LightWave / Modo has no scene-level distance unit declaration in
+    // the LWO data; the LightWave application defaults to SI meters.
+    //
+    // LightWave is natively left-handed Y-up, but the importer applies
+    // MakeLeftHandedProcess + FlipWindingOrderProcess above to convert
+    // to Assimp's right-handed convention. The up-axis remains Y after
+    // these handedness conversions.
+    const ContractDefaults defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "LWO", defaults);
+    writeContractMetadata(mScene, resolved.unit, resolved.upAxis, "LWO");
 }
 
 // ------------------------------------------------------------------------------------------------

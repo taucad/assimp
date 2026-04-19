@@ -41,6 +41,9 @@ Copyright (c) 2006-2025, assimp team
 #include "UnitTestPCH.h"
 
 #include "AbstractImportExportBase.h"
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Exporter.hpp>
@@ -220,3 +223,66 @@ TEST_F(utUSDImport, lightImportTest) {
 
 // Note: Add multi-animation test once supported by USD
 // See https://github.com/lighttransport/tinyusdz/issues/122 for details.
+
+namespace {
+
+constexpr const char *kUsdZupFixture = ASSIMP_TEST_MODELS_DIR "/USD/usda/camera-lighting.usda";
+constexpr const char *kUsdYupFixture = ASSIMP_TEST_MODELS_DIR "/USD/usda/AnimatedMorphCube_blendshapes.usda";
+
+double readUnitScale(const aiScene *scene) {
+    double value = -1.0;
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int readUpAxis(const aiScene *scene) {
+    int value = -1;
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+} // namespace
+
+TEST_F(utUSDImport, contractReadsZUpAndMetersFromAuthoredStage) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kUsdZupFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->mMetaData, nullptr);
+    EXPECT_NEAR(readUnitScale(scene), 1.0, 1e-9);
+    EXPECT_EQ(readUpAxis(scene), 2);
+}
+
+TEST_F(utUSDImport, contractReadsYUpFromAuthoredStage) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kUsdYupFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->mMetaData, nullptr);
+    EXPECT_NEAR(readUnitScale(scene), 1.0, 1e-9);
+    EXPECT_EQ(readUpAxis(scene), 1);
+}
+
+TEST_F(utUSDImport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_USD_UNIT_SCALE_TO_METERS, 0.001f);
+    const aiScene *scene = importer.ReadFile(kUsdYupFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_NEAR(readUnitScale(scene), 0.001, 1e-6);
+    EXPECT_EQ(readUpAxis(scene), 1);
+}
+
+TEST_F(utUSDImport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_USD_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kUsdYupFixture, 0);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_EQ(readUpAxis(scene), 2);
+}
+
+TEST_F(utUSDImport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_USD_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kUsdYupFixture, 0);
+    EXPECT_EQ(scene, nullptr);
+    const std::string err = importer.GetErrorString();
+    EXPECT_NE(err.find("IMPORT_USD_UP_AXIS"), std::string::npos) << err;
+}

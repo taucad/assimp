@@ -42,6 +42,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -172,4 +175,59 @@ TEST_F(utASEImportExport, importUVTransform_ScaleUV2x_Rotate45) {
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/ASE/TestUVTransform/UVTransform_ScaleUV2x_Rotate45.ASE", aiProcess_ValidateDataStructure);
 
     ASSERT_NE(nullptr, scene);
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+constexpr const char *kAseFixture = ASSIMP_TEST_MODELS_DIR "/ASE/ThreeCubesGreen.ASE";
+
+} // namespace
+
+TEST_F(utASEImportExport, contractDefaultsAreMetersAndYUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kAseFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_DOUBLE_EQ(1.0, readUnitScale(scene));
+    EXPECT_EQ(1, readUpAxis(scene));
+}
+
+TEST_F(utASEImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_ASE_UNIT_SCALE_TO_METERS, 0.0254f);
+    const aiScene *scene = importer.ReadFile(kAseFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_NEAR(0.0254, readUnitScale(scene), 1e-6);
+}
+
+TEST_F(utASEImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_ASE_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kAseFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_EQ(2, readUpAxis(scene));
+}
+
+TEST_F(utASEImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_ASE_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kAseFixture, 0);
+    EXPECT_EQ(nullptr, scene);
+    const std::string errorString = importer.GetErrorString();
+    EXPECT_NE(std::string::npos, errorString.find("IMPORT_ASE_UP_AXIS"));
 }

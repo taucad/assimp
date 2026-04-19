@@ -41,6 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if !defined(ASSIMP_BUILD_NO_EXPORT) && !defined(ASSIMP_BUILD_NO_STL_EXPORTER)
 
 #include "STLExporter.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/version.h>
 #include <assimp/IOSystem.hpp>
 #include <assimp/scene.h>
@@ -53,11 +54,35 @@ using namespace Assimp;
 
 namespace Assimp {
 
+namespace {
+// STL is technically unitless, but the de-facto 3D-printing toolchain
+// (Bambu, Cura, PrusaSlicer, MeshLab, etc.) treats STL as millimetres + Z-up.
+// Bake the contract transform (vertices + normals) so files authored in any
+// other frame land on the slicer bed at correct scale/orientation. Importers
+// that haven't adopted the contract still write byte-identical output because
+// `bakeContractTransformIntoMeshes` short-circuits when
+// `AI_METADATA_UNIT_SCALE_TO_METERS` is absent (the opt-in gate).
+constexpr double kStlTargetUnitToMeters = 1e-3; // millimetres
+constexpr int32_t kStlTargetUpAxis = 2; // Z-up
+
+// `bakeContractTransformIntoMeshes` mutates `pScene->mMeshes[*]` in place.
+// The exporter API hands us a `const aiScene*` for legacy reasons but the
+// upstream glTF2 exporter follows the same in-place pattern (see the
+// vertex-mutation loop in glTF2Exporter.cpp ExportMeshes); cast away const
+// at the bake boundary only.
+void bakeStlContract(const aiScene *pScene) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kStlTargetUnitToMeters, kStlTargetUpAxis);
+}
+} // namespace
+
 // ------------------------------------------------------------------------------------------------
 // Worker function for exporting a scene to Stereolithograpy. Prototyped and registered in Exporter.cpp
 void ExportSceneSTL(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties )
 {
     bool exportPointClouds = pProperties->GetPropertyBool(AI_CONFIG_EXPORT_POINT_CLOUDS);
+
+    bakeStlContract(pScene);
 
     // invoke the exporter
     STLExporter exporter(pFile, pScene, exportPointClouds );
@@ -78,6 +103,8 @@ void ExportSceneSTL(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene
 void ExportSceneSTLBinary(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties )
 {
     bool exportPointClouds = pProperties->GetPropertyBool(AI_CONFIG_EXPORT_POINT_CLOUDS);
+
+    bakeStlContract(pScene);
 
     // invoke the exporter
     STLExporter exporter(pFile, pScene, exportPointClouds, true);

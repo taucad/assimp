@@ -88,7 +88,14 @@ protected:
      * See BaseImporter::InternReadFile() for details */
     void InternReadFile( const std::string& pFile, aiScene* pScene, IOSystem* pIOHandler) override;
 
+    // -------------------------------------------------------------------
+    /** Capture configuration overrides for the unit/up-axis contract. */
+    void SetupProperties(const Importer *pImp) override;
+
 private:
+    /** Importer instance, captured in SetupProperties for contract resolution. */
+    const Importer *mImporter = nullptr;
+
     // -----------------------------------------------------
     void SkipSection(DXF::LineReader& reader);
 

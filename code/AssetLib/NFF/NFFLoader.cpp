@@ -45,11 +45,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // internal headers
 #include "NFFLoader.h"
+#include "Common/UnitAxisContract.h"
+
 #include <assimp/ParsingUtils.h>
 #include <assimp/RemoveComments.h>
 #include <assimp/StandardShapes.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/qnan.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
@@ -75,6 +79,11 @@ static constexpr aiImporterDesc desc = {
 // Returns whether the class can handle the format of the given file.
 bool NFFImporter::CanRead(const std::string & pFile, IOSystem * /*pIOHandler*/, bool /*checkSig*/) const {
     return SimpleExtensionCheck(pFile, "nff", "enff");
+}
+
+// ------------------------------------------------------------------------------------------------
+void NFFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1151,6 +1160,15 @@ void NFFImporter::InternReadFile(const std::string &file, aiScene *pScene, IOSys
         pcMat->AddProperty(&i, 1, AI_MATKEY_SHADING_MODEL);
     }
     pScene->mRootNode = root;
+
+    // NFF (Eric Haines, "The Standard Procedural Database") and Sense8 NFF2
+    // are unitless and axis-less by spec — coordinates are raw floats with
+    // no declared scale and no world up-axis declaration. Default to 1.0 m
+    // and Y-up (matching the OFF / PLY baseline). Override via
+    // `AI_CONFIG_IMPORT_NFF_*` for content with known producer conventions.
+    const ContractDefaults nffDefaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "NFF", nffDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "NFF");
 }
 
 } // namespace Assimp

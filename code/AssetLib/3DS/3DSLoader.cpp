@@ -48,8 +48,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_3DS_IMPORTER
 
 #include "3DSLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/StringComparison.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOSystem.hpp>
@@ -118,8 +121,8 @@ const aiImporterDesc *Discreet3DSImporter::GetInfo() const {
 
 // ------------------------------------------------------------------------------------------------
 // Setup configuration properties
-void Discreet3DSImporter::SetupProperties(const Importer * /*pImp*/) {
-    // nothing to be done for the moment
+void Discreet3DSImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -190,6 +193,22 @@ void Discreet3DSImporter::InternReadFile(const std::string &pFile,
 
     // Now apply the master scaling factor to the scene
     ApplyMasterScale(pScene);
+
+    // Record the unit/up-axis contract.
+    //
+    // 3DS files have no native distance unit declaration; the MASTERSCALE
+    // chunk is a relative scaling factor (already baked into the root
+    // node by ApplyMasterScale above) and not an absolute meters-per-unit
+    // ratio. The de-facto convention used by 3D Studio Max and downstream
+    // consumers is one unit per metre, which is what we record by
+    // default.
+    //
+    // 3DS is normatively Z-up (legacy 3D Studio convention) and the
+    // importer applies no axis flip, so the canonical scene up-axis is
+    // Z (UpAxis=2) regardless of post-processing flags.
+    const ContractDefaults defaults{ 1.0, 2 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "3DS", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "3DS");
 
     // Our internal scene representation and the root
     // node will be automatically deleted, so the whole hierarchy will follow

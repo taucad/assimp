@@ -7,6 +7,7 @@
 #ifndef ASSIMP_BUILD_NO_X3D_EXPORTER
 
 #include "X3DExporter.hpp"
+#include "Common/UnitAxisContract.h"
 
 // Header files, Assimp.
 #include <assimp/Exceptional.h>
@@ -18,7 +19,18 @@ using namespace std;
 
 namespace Assimp {
 
+namespace {
+// X3D (and the VRML / X3DV variants this exporter shares with) uses metres
+// + Y-up (cf. X3DImporter.cpp:358-363). Bake any other source frame to that
+// canonical orientation at the boundary; identity short-circuits when the
+// source already matches.
+constexpr double kX3DTargetUnitToMeters = 1.0;
+constexpr int32_t kX3DTargetUpAxis = 1;
+} // namespace
+
 void ExportSceneX3D(const char *pFile, IOSystem *pIOSystem, const aiScene *pScene, const ExportProperties *pProperties) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kX3DTargetUnitToMeters, kX3DTargetUpAxis);
     X3DExporter exporter(pFile, pIOSystem, pScene, pProperties);
 }
 

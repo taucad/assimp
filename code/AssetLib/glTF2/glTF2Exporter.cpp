@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "AssetLib/glTF2/glTF2Exporter.h"
 #include "AssetLib/glTF2/glTF2AssetWriter.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/SplitLargeMeshes.h"
 
 #include <assimp/ByteSwapper.h>
@@ -59,14 +60,26 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Header files, standard library.
 #include <cinttypes>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <iostream>
 
 using namespace rapidjson;
 
 using namespace Assimp;
 using namespace glTF2;
+
+namespace {
+
+// Resolver helpers (validateUpAxisInt, buildAxisRotationMatrix,
+// readSceneUnitScaleToMeters, readSceneUpAxis, applyLinearTransform,
+// isApproxIdentity) live in code/Common/UnitAxisContract.h so this exporter
+// shares one implementation with the 3MF bridge and every other format
+// that adopts the metadata contract.
+
+} // namespace
 
 namespace Assimp {
 
@@ -1198,10 +1211,112 @@ void glTF2Exporter::ExportMeshes() {
     }
     //----------------------------------------
 
+    // ---- R12 — RESOLVE UNIT/AXIS TRANSFORM TO SPEC COORDS ----
+    // glTF 2.0 spec §3.5.4: distances are meters, +Y is up. Read the contract
+    // metadata written by the partner importer (R10/R11) and bake the inverse
+    // transform into vertex positions/normals/tangents below so the GLB on disk
+    // is always spec-pure (no root-node rotation, no scene-level scale).
+    //
+    // Resolver semantics mirror AssetLib/3MF/Lib3MFBridge.cpp::exportToLib3MF:
+    //   * unit:  scene `AI_METADATA_UNIT_SCALE_TO_METERS` (double, m/unit) →
+    //            identity (1.0, no rescale) when absent. Targeting glTF spec
+    //            (1.0 m/unit) means vertexScale = sourceUnitToMeters.
+    //   * axis:  scene `AI_METADATA_UP_AXIS` (int32, 0=X 1=Y 2=Z) → -1 (skip
+    //            rotation) when absent. Targeting glTF spec (Y-up=1) means
+    //            axisRotation = buildAxisRotationMatrix(sourceUpAxis, 1).
+    //
+    // The contract opt-in signal is `AI_METADATA_UNIT_SCALE_TO_METERS`. Only
+    // contract-aware importers (3MF R10', glTF2 R11) write it. The companion
+    // `AI_METADATA_UP_AXIS` key is INSUFFICIENT as an opt-in signal because
+    // it pre-dates the contract and is written by legacy importers (notably
+    // FBXImporter) whose post-import scenes have already been normalised to
+    // Y-up internally — trusting `UpAxis` alone there would re-rotate
+    // already-Y-up data (double rotation). The gate below ensures unmigrated
+    // importers continue to produce identity output (preserves byte-for-byte
+    // v0.0.14 behavior for every format that hasn't yet adopted the contract).
+    constexpr double targetUnitToMeters = 1.0;
+    constexpr int32_t targetUpAxis = 1;
+    const bool contractOptIn = mScene->mMetaData != nullptr &&
+        mScene->mMetaData->HasKey(AI_METADATA_UNIT_SCALE_TO_METERS);
+    double vertexScale = 1.0;
+    aiMatrix4x4 axisRotation; // identity by default
+    if (contractOptIn) {
+        const double sourceUnitToMeters = readSceneUnitScaleToMeters(mScene);
+        if (sourceUnitToMeters > 0.0) {
+            vertexScale = sourceUnitToMeters / targetUnitToMeters;
+        }
+        const int32_t sourceUpAxis = readSceneUpAxis(mScene);
+        if (sourceUpAxis >= 0) {
+            validateUpAxisInt(sourceUpAxis, AI_METADATA_UP_AXIS " (scene metadata)");
+            axisRotation = buildAxisRotationMatrix(sourceUpAxis, targetUpAxis);
+        }
+    }
+    const bool needsScale = std::fabs(vertexScale - 1.0) > 1e-12;
+    const bool needsRotation = !isApproxIdentity(axisRotation);
+    const bool needsTransform = needsScale || needsRotation;
+
     for (unsigned int idx_mesh = 0; idx_mesh < mScene->mNumMeshes; ++idx_mesh) {
         const aiMesh *aim = mScene->mMeshes[idx_mesh];
         if (aim->mNumFaces == 0) {
             continue;
+        }
+
+        // ---- R12 — BAKE TRANSFORM INTO MESH DATA IN-PLACE ----
+        // We mutate `aim->mVertices` / `mNormals` / `mTangents` directly. This
+        // matches the existing exporter pattern (see the `NormalizeSafe()` loop
+        // below for normals and tangents). Positions get scale + rotation;
+        // normals and tangents get rotation only (the linear transform is a
+        // pure rotation, length-preserving). Blendshape targets are diff-encoded
+        // against the base mesh, so we apply the identical transform to each
+        // morph-target's vertex/normal arrays before the diff is computed.
+        if (needsTransform) {
+            const float scaleF = static_cast<float>(vertexScale);
+            for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
+                aiVector3D v = aim->mVertices[i];
+                if (needsScale) {
+                    v.x *= scaleF;
+                    v.y *= scaleF;
+                    v.z *= scaleF;
+                }
+                if (needsRotation) {
+                    applyLinearTransform(axisRotation, v);
+                }
+                aim->mVertices[i] = v;
+            }
+            if (needsRotation && aim->mNormals != nullptr) {
+                for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
+                    applyLinearTransform(axisRotation, aim->mNormals[i]);
+                }
+            }
+            if (needsRotation && aim->mTangents != nullptr) {
+                for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
+                    applyLinearTransform(axisRotation, aim->mTangents[i]);
+                }
+            }
+            if (aim->mNumAnimMeshes > 0) {
+                for (unsigned int am = 0; am < aim->mNumAnimMeshes; ++am) {
+                    aiAnimMesh *pAnimMesh = aim->mAnimMeshes[am];
+                    if (pAnimMesh->mVertices != nullptr) {
+                        for (unsigned int i = 0; i < pAnimMesh->mNumVertices; ++i) {
+                            aiVector3D v = pAnimMesh->mVertices[i];
+                            if (needsScale) {
+                                v.x *= scaleF;
+                                v.y *= scaleF;
+                                v.z *= scaleF;
+                            }
+                            if (needsRotation) {
+                                applyLinearTransform(axisRotation, v);
+                            }
+                            pAnimMesh->mVertices[i] = v;
+                        }
+                    }
+                    if (needsRotation && pAnimMesh->mNormals != nullptr) {
+                        for (unsigned int i = 0; i < pAnimMesh->mNumVertices; ++i) {
+                            applyLinearTransform(axisRotation, pAnimMesh->mNormals[i]);
+                        }
+                    }
+                }
+            }
         }
 
         std::string name = aim->mName.C_Str();

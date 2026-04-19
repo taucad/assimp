@@ -52,14 +52,133 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <rapidjson/schema.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <limits>
 #include <map>
 #include <queue>
+#include <vector>
 
 #include <assimp/material.h>
 #include <assimp/GltfMaterial.h>
 
 using namespace Assimp;
+
+namespace {
+
+// Author a scene that owns its mesh, material, root node, and (optionally) metadata.
+// The returned scene is owned by the caller — `delete` it after the export call.
+aiScene *makeGltfSingleMeshScene(const std::vector<aiVector3D> &vertices,
+                                 const std::vector<std::array<unsigned int, 3>> &triangles,
+                                 const std::vector<aiVector3D> *normals = nullptr) {
+    auto *scene = new aiScene();
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+
+    auto *mesh = new aiMesh();
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+    mesh->mMaterialIndex = 0;
+    mesh->mName = aiString("AuthoredMesh");
+
+    mesh->mNumVertices = static_cast<unsigned int>(vertices.size());
+    mesh->mVertices = new aiVector3D[vertices.size()];
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        mesh->mVertices[i] = vertices[i];
+    }
+    if (normals != nullptr && normals->size() == vertices.size()) {
+        mesh->mNormals = new aiVector3D[vertices.size()];
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            mesh->mNormals[i] = (*normals)[i];
+        }
+    }
+
+    mesh->mNumFaces = static_cast<unsigned int>(triangles.size());
+    mesh->mFaces = new aiFace[triangles.size()];
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3];
+        mesh->mFaces[i].mIndices[0] = triangles[i][0];
+        mesh->mFaces[i].mIndices[1] = triangles[i][1];
+        mesh->mFaces[i].mIndices[2] = triangles[i][2];
+    }
+
+    scene->mMeshes[0] = mesh;
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mName = aiString("Root");
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1];
+    scene->mRootNode->mMeshes[0] = 0;
+
+    return scene;
+}
+
+// Axis-aligned box centred at origin (8 unique vertices, 12 triangles).
+aiScene *makeGltfBoxScene(const aiVector3D &halfExtents) {
+    const float x = halfExtents.x, y = halfExtents.y, z = halfExtents.z;
+    std::vector<aiVector3D> v = {
+        { -x, -y, -z }, { +x, -y, -z }, { +x, +y, -z }, { -x, +y, -z },
+        { -x, -y, +z }, { +x, -y, +z }, { +x, +y, +z }, { -x, +y, +z }
+    };
+    std::vector<std::array<unsigned int, 3>> t = {
+        { 0, 2, 1 }, { 0, 3, 2 }, // -Z
+        { 4, 5, 6 }, { 4, 6, 7 }, // +Z
+        { 0, 1, 5 }, { 0, 5, 4 }, // -Y
+        { 3, 7, 6 }, { 3, 6, 2 }, // +Y
+        { 0, 4, 7 }, { 0, 7, 3 }, // -X
+        { 1, 2, 6 }, { 1, 6, 5 }  // +X
+    };
+    return makeGltfSingleMeshScene(v, t);
+}
+
+// Single triangle with explicit per-vertex normals — the simplest scene for
+// asserting that the exporter applies axis rotation to normal vectors.
+aiScene *makeGltfTriangleSceneWithNormals(const aiVector3D &normal) {
+    std::vector<aiVector3D> v = {
+        { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }
+    };
+    std::vector<aiVector3D> n = { normal, normal, normal };
+    std::vector<std::array<unsigned int, 3>> t = { { 0, 1, 2 } };
+    return makeGltfSingleMeshScene(v, t, &n);
+}
+
+aiVector3D meshMinGltf(const aiMesh *mesh) {
+    aiVector3D m(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                 std::numeric_limits<float>::max());
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        m.x = std::min(m.x, mesh->mVertices[i].x);
+        m.y = std::min(m.y, mesh->mVertices[i].y);
+        m.z = std::min(m.z, mesh->mVertices[i].z);
+    }
+    return m;
+}
+
+aiVector3D meshMaxGltf(const aiMesh *mesh) {
+    aiVector3D m(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                 std::numeric_limits<float>::lowest());
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        m.x = std::max(m.x, mesh->mVertices[i].x);
+        m.y = std::max(m.y, mesh->mVertices[i].y);
+        m.z = std::max(m.z, mesh->mVertices[i].z);
+    }
+    return m;
+}
+
+aiVector3D meshExtentGltf(const aiMesh *mesh) {
+    aiVector3D mx = meshMaxGltf(mesh);
+    aiVector3D mn = meshMinGltf(mesh);
+    return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+} // namespace
 
 class utglTF2ImportExport : public AbstractImportExportBase {
 public:
@@ -155,6 +274,226 @@ TEST_F(utglTF2ImportExport, importglTF2FromFileTest) {
 TEST_F(utglTF2ImportExport, importBinaryglTF2FromFileTest) {
     EXPECT_TRUE(binaryImporterTest());
 }
+
+TEST_F(utglTF2ImportExport, importGLBPopulatesUnitScaleToMetersAndUpAxisInSceneMetadata) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-Binary/BoxTextured.glb", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(1.0, meters, 1e-12);
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(1, upAxis);
+}
+
+#ifndef ASSIMP_BUILD_NO_EXPORT
+
+// ===== R12 — glTF2 EXPORTER HONORS UnitScaleToMeters / UpAxis CONTRACT =====
+
+TEST_F(utglTF2ImportExport, exportGLBHonorsUnitScaleToMetersByScalingVerticesToMeters) {
+    // 2-unit cube authored as millimetres (UnitScaleToMeters = 1e-3).
+    // Spec target = meters → expected output extent = 2 * 1e-3 = 0.002 m on every axis.
+    aiScene *scene = makeGltfBoxScene(aiVector3D(1.0f, 1.0f, 1.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-3); // mm
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1)); // already Y, no rotation
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_unit_mm.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_unit_mm.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentGltf(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(0.002f, extent.x, 1e-6f);
+    EXPECT_NEAR(0.002f, extent.y, 1e-6f);
+    EXPECT_NEAR(0.002f, extent.z, 1e-6f);
+    std::remove("ut_glb_unit_mm.glb");
+}
+
+TEST_F(utglTF2ImportExport, exportGLBHonorsUpAxisByRotatingZUpToYUp) {
+    // Tall box on +Z axis (Z-up source): half-extents 1×1×5 → extent 2×2×10.
+    // Spec target = Y-up. After Z→Y rotation, the formerly-vertical extent must lie on +Y.
+    aiScene *scene = makeGltfBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0); // meters → no scale
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2)); // Z-up source
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_axis_zup.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_axis_zup.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentGltf(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-5f);
+    std::remove("ut_glb_axis_zup.glb");
+}
+
+TEST_F(utglTF2ImportExport, exportGLBIsIdentityWhenSourceAlreadyMetersYUp) {
+    // Control case: scene is already in spec coords (meters + Y-up).
+    // Vertices must round-trip with no perceptible drift (single-precision noise only).
+    aiScene *scene = makeGltfBoxScene(aiVector3D(2.5f, 7.5f, 2.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_identity.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_identity.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentGltf(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(5.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(15.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(5.0f, extent.z, 1e-5f);
+    std::remove("ut_glb_identity.glb");
+}
+
+TEST_F(utglTF2ImportExport, exportGLBAppliesAxisRotationToNormals) {
+    // Z-up source with a single +Z normal. After Z→Y rotation the normal must be +Y
+    // and remain unit-length.
+    aiScene *scene = makeGltfTriangleSceneWithNormals(aiVector3D(0.0f, 0.0f, 1.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_normal_rot.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_normal_rot.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    const aiMesh *m = roundtrip->mMeshes[0];
+    ASSERT_NE(nullptr, m->mNormals);
+    ASSERT_GE(m->mNumVertices, 1u);
+    const aiVector3D &n = m->mNormals[0];
+    EXPECT_NEAR(0.0f, n.x, 1e-5f);
+    EXPECT_NEAR(1.0f, n.y, 1e-5f);
+    EXPECT_NEAR(0.0f, n.z, 1e-5f);
+    const float length = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    EXPECT_NEAR(1.0f, length, 1e-5f);
+    std::remove("ut_glb_normal_rot.glb");
+}
+
+TEST_F(utglTF2ImportExport, exportGLBHandlesMissingMetadataAsIdentity) {
+    // No mMetaData at all — exporter must not crash and must apply identity.
+    aiScene *scene = makeGltfBoxScene(aiVector3D(3.0f, 3.0f, 3.0f));
+    ASSERT_EQ(nullptr, scene->mMetaData);
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_no_meta.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_no_meta.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentGltf(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(6.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.z, 1e-5f);
+    std::remove("ut_glb_no_meta.glb");
+}
+
+TEST_F(utglTF2ImportExport, exportGLBSkipsTransformWhenOnlyLegacyUpAxisIsPresent) {
+    // Regression guard for the legacy-FBX double-rotation bug.
+    //
+    // FBXImporter has historically written `UpAxis` (the same int32_t key now
+    // shared with the new contract) WITHOUT the post-import data being in source
+    // coords — its own converter normalises to Y-up before the metadata is read.
+    // If the glTF2 exporter naively trusts `UpAxis` alone, it re-rotates already-
+    // Y-up data and produces a double rotation on every FBX → glTF pipeline.
+    //
+    // The contract opt-in signal is therefore `UnitScaleToMeters` — only
+    // contract-aware importers (3MF R10', glTF2 R11) write it. When it is
+    // ABSENT, the exporter must produce identity output regardless of `UpAxis`.
+    aiScene *scene = makeGltfBoxScene(aiVector3D(2.0f, 2.0f, 2.0f));
+    scene->mMetaData = new aiMetadata();
+    // Intentionally only UpAxis — no UnitScaleToMeters. Mimics legacy FBX.
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_legacy_upaxis.glb"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_glb_legacy_upaxis.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentGltf(roundtrip->mMeshes[0]);
+    // Symmetric box, so a rotation alone wouldn't change the extents — but if
+    // identity is broken the importer / exporter pair will still typically drift
+    // by floating-point noise; we additionally assert no axis was permuted by
+    // checking the per-axis extent equality against the source dimensions.
+    EXPECT_NEAR(4.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(4.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(4.0f, extent.z, 1e-5f);
+    // And also verify a representative vertex is unchanged (no rotation applied).
+    // Source box vertex 0 is (-2, -2, -2); under any-axis permutation the Y
+    // component would land in a different slot, but with the gate active it
+    // must stay at -2.
+    ASSERT_GE(roundtrip->mMeshes[0]->mNumVertices, 1u);
+    const aiVector3D &v0 = roundtrip->mMeshes[0]->mVertices[0];
+    EXPECT_NEAR(-2.0f, v0.x, 1e-5f);
+    EXPECT_NEAR(-2.0f, v0.y, 1e-5f);
+    EXPECT_NEAR(-2.0f, v0.z, 1e-5f);
+    std::remove("ut_glb_legacy_upaxis.glb");
+}
+
+TEST_F(utglTF2ImportExport, roundtripGLTF2To3MFToGLTF2PreservesPhysicalSize) {
+    // Full integration: GLB → 3MF → GLB. Each exporter normalises to its target spec
+    // coords using the contract metadata written by the partner importer. The final
+    // mesh AABB extent must match the original within float precision.
+    Assimp::Importer importer;
+    const aiScene *original = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-Binary/BoxTextured.glb", 0);
+    ASSERT_NE(nullptr, original);
+    ASSERT_GE(original->mNumMeshes, 1u);
+    aiVector3D originalExtent = meshExtentGltf(original->mMeshes[0]);
+
+    Assimp::Exporter exporter1;
+    ASSERT_EQ(AI_SUCCESS, exporter1.Export(original, "3mf", "ut_glb_roundtrip_intermediate.3mf"));
+
+    Assimp::Importer importer2;
+    const aiScene *intermediate = importer2.ReadFile("ut_glb_roundtrip_intermediate.3mf", 0);
+    ASSERT_NE(nullptr, intermediate);
+    ASSERT_GE(intermediate->mNumMeshes, 1u);
+
+    Assimp::Exporter exporter2;
+    ASSERT_EQ(AI_SUCCESS, exporter2.Export(intermediate, "glb2", "ut_glb_roundtrip_final.glb"));
+
+    Assimp::Importer importer3;
+    const aiScene *final = importer3.ReadFile("ut_glb_roundtrip_final.glb", 0);
+    ASSERT_NE(nullptr, final);
+    ASSERT_GE(final->mNumMeshes, 1u);
+    aiVector3D finalExtent = meshExtentGltf(final->mMeshes[0]);
+
+    EXPECT_NEAR(originalExtent.x, finalExtent.x, 1e-5f);
+    EXPECT_NEAR(originalExtent.y, finalExtent.y, 1e-5f);
+    EXPECT_NEAR(originalExtent.z, finalExtent.z, 1e-5f);
+
+    std::remove("ut_glb_roundtrip_intermediate.3mf");
+    std::remove("ut_glb_roundtrip_final.glb");
+}
+
+#endif // ASSIMP_BUILD_NO_EXPORT
 
 TEST_F(utglTF2ImportExport, importglTF2_KHR_materials_pbrSpecularGlossiness) {
     EXPECT_TRUE(importerMatTest(ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF-pbrSpecularGlossiness/BoxTextured.gltf", true, true));

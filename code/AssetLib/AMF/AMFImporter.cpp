@@ -43,9 +43,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Header files, Assimp.
 #include "AMFImporter.hpp"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/DefaultIOSystem.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
+#include <assimp/metadata.h>
+#include <assimp/scene.h>
 #include <assimp/StringUtils.h>
 
 // Header files, stdlib.
@@ -489,11 +493,44 @@ const aiImporterDesc *AMFImporter::GetInfo() const {
     return &Description;
 }
 
+void AMFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
+}
+
+namespace {
+
+// Project the AMF unit attribute to meters per source unit. Per AMF Standard
+// 1.2 §3.1, the legal values are inch, millimeter, meter, feet, micron — when
+// the attribute is absent, the spec default is millimeter.
+double amfUnitStringToMeters(const std::string &unit) {
+    if (unit.empty()) return 0.001;
+    if (unit == "inch") return 0.0254;
+    if (unit == "millimeter" || unit == "millimeters") return 0.001;
+    if (unit == "meter") return 1.0;
+    if (unit == "feet") return 0.3048;
+    if (unit == "micron") return 1e-6;
+    return 0.001;
+}
+
+} // anonymous namespace
+
 void AMFImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
     Clear(); // delete old graph.
     ParseFile(pFile, pIOHandler);
     Postprocess_BuildScene(pScene);
-    // scene graph is ready, exit.
+
+    // ---- CONTRACT METADATA ----
+    // The AMF spec encodes the producer's working unit on `<amf unit="...">`.
+    // Historically the importer parsed mUnit but never applied it to vertices,
+    // leaving downstream consumers blind to scale. Project it into the
+    // contract so exporters can rescale at the edge instead of duplicating
+    // the unit lookup table everywhere. AMF does not normatively pin a
+    // coordinate system; +Z up matches the dominant 3D-printing convention
+    // shared with STL and 3MF.
+    const double sourceUnit = amfUnitStringToMeters(mUnit);
+    const ContractDefaults amfDefaults{sourceUnit, 2};
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "AMF", amfDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "AMF");
 }
 
 } // namespace Assimp

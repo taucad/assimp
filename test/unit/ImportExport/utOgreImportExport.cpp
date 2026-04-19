@@ -42,7 +42,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
+#include <assimp/scene.h>
 #include <assimp/Importer.hpp>
 
 using namespace Assimp;
@@ -58,4 +62,59 @@ public:
 
 TEST_F(utOgreImportExport, importerTest) {
     EXPECT_TRUE(importerTest());
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+constexpr const char *kFixture = ASSIMP_TEST_MODELS_DIR "/Ogre/TheThing/Mesh.mesh.xml";
+
+} // namespace
+
+TEST_F(utOgreImportExport, contractDefaultsAreMetersAndYUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_DOUBLE_EQ(1.0, readUnitScale(scene));
+    EXPECT_EQ(1, readUpAxis(scene));
+}
+
+TEST_F(utOgreImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_OGRE_UNIT_SCALE_TO_METERS, 0.01f);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_NEAR(0.01, readUnitScale(scene), 1e-6);
+}
+
+TEST_F(utOgreImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_OGRE_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_EQ(2, readUpAxis(scene));
+}
+
+TEST_F(utOgreImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_OGRE_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(kFixture, 0);
+    EXPECT_EQ(nullptr, scene);
+    const std::string errorString = importer.GetErrorString();
+    EXPECT_NE(std::string::npos, errorString.find("IMPORT_OGRE_UP_AXIS"));
 }

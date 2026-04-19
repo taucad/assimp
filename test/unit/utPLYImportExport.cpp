@@ -41,12 +41,99 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "UnitTestPCH.h"
 
 #include "AbstractImportExportBase.h"
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/material.h>
+#include <assimp/mesh.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <limits>
+
 using namespace ::Assimp;
+
+namespace {
+
+// Mirrors the STL/3MF exporter test fixtures: axis-aligned box with radial
+// normals so we can assert both extent (rescale) and normal direction (rotation)
+// after the exporter has baked the contract transform.
+aiScene *makePlyBoxScene(const aiVector3D &halfExtents) {
+    const float x = halfExtents.x, y = halfExtents.y, z = halfExtents.z;
+    const std::array<aiVector3D, 8> v = {
+        aiVector3D(-x, -y, -z), aiVector3D(+x, -y, -z), aiVector3D(+x, +y, -z), aiVector3D(-x, +y, -z),
+        aiVector3D(-x, -y, +z), aiVector3D(+x, -y, +z), aiVector3D(+x, +y, +z), aiVector3D(-x, +y, +z)
+    };
+    const std::array<std::array<unsigned int, 3>, 12> t = { {
+        { 0, 2, 1 }, { 0, 3, 2 },
+        { 4, 5, 6 }, { 4, 6, 7 },
+        { 0, 1, 5 }, { 0, 5, 4 },
+        { 3, 7, 6 }, { 3, 6, 2 },
+        { 0, 4, 7 }, { 0, 7, 3 },
+        { 1, 2, 6 }, { 1, 6, 5 }
+    } };
+
+    auto *scene = new aiScene();
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    auto *mesh = new aiMesh();
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+    mesh->mMaterialIndex = 0;
+    mesh->mName = aiString("AuthoredBox");
+    mesh->mNumVertices = static_cast<unsigned int>(v.size());
+    mesh->mVertices = new aiVector3D[v.size()];
+    mesh->mNormals = new aiVector3D[v.size()];
+    for (size_t i = 0; i < v.size(); ++i) {
+        mesh->mVertices[i] = v[i];
+        aiVector3D n = v[i];
+        n.Normalize();
+        mesh->mNormals[i] = n;
+    }
+    mesh->mNumFaces = static_cast<unsigned int>(t.size());
+    mesh->mFaces = new aiFace[t.size()];
+    for (size_t i = 0; i < t.size(); ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3];
+        mesh->mFaces[i].mIndices[0] = t[i][0];
+        mesh->mFaces[i].mIndices[1] = t[i][1];
+        mesh->mFaces[i].mIndices[2] = t[i][2];
+    }
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    scene->mMeshes[0] = mesh;
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mName = aiString("Root");
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1];
+    scene->mRootNode->mMeshes[0] = 0;
+    return scene;
+}
+
+aiVector3D meshExtentPly(const aiMesh *mesh) {
+    aiVector3D mn(std::numeric_limits<float>::infinity());
+    aiVector3D mx(-std::numeric_limits<float>::infinity());
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        const aiVector3D &v = mesh->mVertices[i];
+        mn.x = std::min(mn.x, v.x);
+        mn.y = std::min(mn.y, v.y);
+        mn.z = std::min(mn.z, v.z);
+        mx.x = std::max(mx.x, v.x);
+        mx.y = std::max(mx.y, v.y);
+        mx.z = std::max(mx.z, v.z);
+    }
+    return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+} // namespace
 
 class utPLYImportExport : public AbstractImportExportBase {
 public:
@@ -88,6 +175,60 @@ TEST_F(utPLYImportExport, exportTest_Success) {
 }
 
 #endif // ASSIMP_BUILD_NO_EXPORT
+
+// -----------------------------------------------------------------------------
+// Unit/axis contract: PLY is unitless and axis-less by spec; defaults are
+// 1.0 (m) + Y-up (the neutral baseline matching glTF semantics).
+// -----------------------------------------------------------------------------
+
+TEST_F(utPLYImportExport, contractDefaultsAreMetersAndYUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/PLY/cube.ply", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double unit = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, unit))
+        << "PLY importer must declare AI_METADATA_UNIT_SCALE_TO_METERS";
+    EXPECT_DOUBLE_EQ(1.0, unit);
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis))
+        << "PLY importer must declare AI_METADATA_UP_AXIS";
+    EXPECT_EQ(1, upAxis);
+}
+
+TEST_F(utPLYImportExport, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_PLY_UNIT_SCALE_TO_METERS, 0.001f);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/PLY/cube.ply", 0);
+    ASSERT_NE(nullptr, scene);
+    double unit = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, unit));
+    EXPECT_NEAR(0.001, unit, 1e-9);
+}
+
+TEST_F(utPLYImportExport, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_PLY_UP_AXIS, 2);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/PLY/cube.ply", 0);
+    ASSERT_NE(nullptr, scene);
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(2, upAxis);
+}
+
+TEST_F(utPLYImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_PLY_UP_AXIS, 9);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/PLY/cube.ply", 0);
+    EXPECT_EQ(nullptr, scene);
+    EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("UP_AXIS"));
+}
 
 // Test issue 1623, crash when loading two PLY files in a row
 TEST_F(utPLYImportExport, importerMultipleTest) {
@@ -282,3 +423,119 @@ TEST_F(utPLYImportExport, parseInvalidDoubleCustomProperty) {
     const aiScene *scene = importer.ReadFileFromMemory(data, sizeof(data), 0);
     EXPECT_EQ(nullptr, scene);
 }
+
+#ifndef ASSIMP_BUILD_NO_EXPORT
+
+// -----------------------------------------------------------------------------
+// Unit/axis contract: PLY exporter target = 1.0 m + Y-up. PLY is unitless and
+// axis-less by spec, but the importer normalises to (1.0 m, Y-up); aligning
+// the exporter target with the importer default makes same-format round-trips
+// bitwise identity. Behaviour gated on `AI_METADATA_UNIT_SCALE_TO_METERS` so
+// legacy callers stay byte-identical.
+// -----------------------------------------------------------------------------
+
+TEST_F(utPLYImportExport, exportPLYBakesUnitScaleWhenSourceUnitDiffersFromMeters) {
+    aiScene *scene = makePlyBoxScene(aiVector3D(0.5f, 0.5f, 0.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-3); // mm
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "ply", "ut_ply_unit_mm.ply"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_ply_unit_mm.ply", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentPly(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(1e-3f, extent.x, 1e-6f);
+    EXPECT_NEAR(1e-3f, extent.y, 1e-6f);
+    EXPECT_NEAR(1e-3f, extent.z, 1e-6f);
+    std::remove("ut_ply_unit_mm.ply");
+}
+
+TEST_F(utPLYImportExport, exportPLYBakesAxisRotationWhenSourceIsZUp) {
+    // Tall box on +Z (source). After Z->Y bake the tall axis must move to +Y.
+    aiScene *scene = makePlyBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "ply", "ut_ply_axis_zup.ply"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_ply_axis_zup.ply", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentPly(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-4f);
+    std::remove("ut_ply_axis_zup.ply");
+}
+
+TEST_F(utPLYImportExport, exportPLYIsIdentityWhenSourceAlreadyMetersYUp) {
+    aiScene *scene = makePlyBoxScene(aiVector3D(2.5f, 7.5f, 2.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "ply", "ut_ply_identity.ply"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_ply_identity.ply", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentPly(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(5.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(15.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(5.0f, extent.z, 1e-5f);
+    std::remove("ut_ply_identity.ply");
+}
+
+TEST_F(utPLYImportExport, exportPLYIsIdentityWhenContractMetadataAbsent) {
+    aiScene *scene = makePlyBoxScene(aiVector3D(3.0f, 3.0f, 3.0f));
+    ASSERT_EQ(nullptr, scene->mMetaData);
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "ply", "ut_ply_no_meta.ply"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_ply_no_meta.ply", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentPly(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(6.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.z, 1e-5f);
+    std::remove("ut_ply_no_meta.ply");
+}
+
+TEST_F(utPLYImportExport, exportPLYBinaryHonorsContractTransform) {
+    aiScene *scene = makePlyBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "plyb", "ut_ply_axis_zup_bin.ply"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_ply_axis_zup_bin.ply", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentPly(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-4f);
+    std::remove("ut_ply_axis_zup_bin.ply");
+}
+
+#endif // ASSIMP_BUILD_NO_EXPORT

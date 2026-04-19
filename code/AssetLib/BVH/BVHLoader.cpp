@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_BVH_IMPORTER
 
 #include "BVHLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/SkeletonMeshBuilder.h>
 #include <assimp/TinyFormatter.h>
 #include <assimp/fast_atof.h>
@@ -96,6 +97,7 @@ bool BVHLoader::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /*c
 
 // ------------------------------------------------------------------------------------------------
 void BVHLoader::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
     noSkeletonMesh = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_NO_SKELETON_MESHES, 0) != 0;
 }
 
@@ -136,6 +138,18 @@ void BVHLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IOSyst
 
     // construct an animation from all the motion data we read
     CreateAnimation(pScene);
+
+    // Record the unit/up-axis contract.
+    //
+    // BVH (Biovision Hierarchical Data) files have no scene-level
+    // distance unit declaration; the de-facto convention used by motion
+    // capture tooling is one unit per metre.
+    //
+    // BVH is natively right-handed Y-up; the importer applies no axis
+    // conversion, so the canonical scene up-axis is Y.
+    const ContractDefaults defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "BVH", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "BVH");
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -46,14 +46,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // internal headers
 #include "ACLoader.h"
 #include "Common/Importer.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/BaseImporter.h>
 #include <assimp/ParsingUtils.h>
 #include <assimp/Subdivision.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/config.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
 #include <assimp/light.h>
 #include <assimp/material.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOSystem.hpp>
@@ -770,6 +773,7 @@ aiNode *AC3DImporter::ConvertObjectSection(Object &object,
 void AC3DImporter::SetupProperties(const Importer *pImp) {
     configSplitBFCull = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_AC_SEPARATE_BFCULL, 1) ? true : false;
     configEvalSubdivision = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_AC_EVAL_SUBDIVISION, 1) ? true : false;
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -889,6 +893,15 @@ void AC3DImporter::InternReadFile(const std::string &pFile,
         pScene->mLights = new aiLight *[lights.size()];
         ::memcpy(pScene->mLights, &lights[0], lights.size() * sizeof(void *));
     }
+
+    // AC3D's file format documentation does not declare a unit or
+    // up-axis at the file level. The de-facto convention used by the
+    // AC3D editor and downstream tools (FlightGear, TORCS) is meters
+    // and Y-up, so we record those defaults on the scene unless the
+    // caller overrides via AI_CONFIG_IMPORT_AC_*.
+    const ContractDefaults acDefaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "AC", acDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "AC3D");
 }
 
 } // namespace Assimp

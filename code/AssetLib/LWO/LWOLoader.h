@@ -404,6 +404,9 @@ protected:
 
     /** True if we have a named layer */
     bool hasNamedLayer;
+
+    /** Importer instance, captured in SetupProperties for contract resolution. */
+    const Importer *mImporter = nullptr;
 };
 
 // ------------------------------------------------------------------------------------------------

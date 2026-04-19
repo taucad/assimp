@@ -185,6 +185,7 @@ private:
 
     ODDLParser::Context *m_ctx;
     MetricInfo m_metrics[ MetricInfo::Max ];
+    const Importer *mImporter = nullptr;
     aiNode *m_currentNode;
     VertexContainer m_currentVertices;
     aiMesh *m_currentMesh;  // not owned, target is owned by m_meshCache

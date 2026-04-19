@@ -44,10 +44,19 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assimp/commonMetaData.h>
 #include <assimp/material.h>
+#include <assimp/mesh.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/types.h>
+#include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <limits>
 
 using namespace Assimp;
 
@@ -460,4 +469,247 @@ TEST_F(utFBXImporterExporter, importSkeletonTest) {
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/FBX/animation_with_skeleton.fbx", aiProcess_ValidateDataStructure);
     ASSERT_NE(nullptr, scene);
     ASSERT_TRUE(scene->mRootNode);
+}
+
+namespace {
+
+double readUnitScale(const aiScene *scene) {
+    double value = 0.0;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, value));
+    return value;
+}
+
+int32_t readUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, value));
+    return value;
+}
+
+double readLegacyUnitScaleFactor(const aiScene *scene) {
+    float value = 0.0f;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get("UnitScaleFactor", value));
+    return static_cast<double>(value);
+}
+
+int32_t readLegacyUpAxis(const aiScene *scene) {
+    int32_t value = -1;
+    EXPECT_NE(nullptr, scene);
+    EXPECT_NE(nullptr, scene->mMetaData);
+    EXPECT_TRUE(scene->mMetaData->Get("UpAxis", value));
+    return value;
+}
+
+} // namespace
+
+TEST_F(utFBXImporterExporter, contractWritesUnitScaleToMetersAndUpAxisAlongsideLegacyKeys) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/FBX/box.fbx", 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+
+    // Both legacy keys and contract keys must coexist on the scene.
+    const double legacyUnitScale = readLegacyUnitScaleFactor(scene);
+    const int32_t legacyUpAxis = readLegacyUpAxis(scene);
+
+    // Contract: distance is centimetres-per-unit / 100 -> metres-per-unit.
+    EXPECT_NEAR(legacyUnitScale * 0.01, readUnitScale(scene), 1e-9);
+    EXPECT_EQ(legacyUpAxis, readUpAxis(scene));
+}
+
+namespace {
+
+// Author an in-memory single-mesh box. Caller owns the returned scene.
+aiScene *makeFbxBoxScene(const aiVector3D &halfExtents) {
+    const float x = halfExtents.x, y = halfExtents.y, z = halfExtents.z;
+    const std::array<aiVector3D, 8> v = {
+        aiVector3D(-x, -y, -z), aiVector3D(+x, -y, -z), aiVector3D(+x, +y, -z), aiVector3D(-x, +y, -z),
+        aiVector3D(-x, -y, +z), aiVector3D(+x, -y, +z), aiVector3D(+x, +y, +z), aiVector3D(-x, +y, +z)
+    };
+    const std::array<std::array<unsigned int, 3>, 12> t = { {
+        { 0, 2, 1 }, { 0, 3, 2 },
+        { 4, 5, 6 }, { 4, 6, 7 },
+        { 0, 1, 5 }, { 0, 5, 4 },
+        { 3, 7, 6 }, { 3, 6, 2 },
+        { 0, 4, 7 }, { 0, 7, 3 },
+        { 1, 2, 6 }, { 1, 6, 5 }
+    } };
+
+    auto *scene = new aiScene();
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    auto *mesh = new aiMesh();
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+    mesh->mMaterialIndex = 0;
+    mesh->mName = aiString("AuthoredBox");
+    mesh->mNumVertices = static_cast<unsigned int>(v.size());
+    mesh->mVertices = new aiVector3D[v.size()];
+    mesh->mNormals = new aiVector3D[v.size()];
+    for (size_t i = 0; i < v.size(); ++i) {
+        mesh->mVertices[i] = v[i];
+        aiVector3D n = v[i];
+        n.Normalize();
+        mesh->mNormals[i] = n;
+    }
+    mesh->mNumFaces = static_cast<unsigned int>(t.size());
+    mesh->mFaces = new aiFace[t.size()];
+    for (size_t i = 0; i < t.size(); ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3];
+        mesh->mFaces[i].mIndices[0] = t[i][0];
+        mesh->mFaces[i].mIndices[1] = t[i][1];
+        mesh->mFaces[i].mIndices[2] = t[i][2];
+    }
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    scene->mMeshes[0] = mesh;
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mName = aiString("Root");
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1];
+    scene->mRootNode->mMeshes[0] = 0;
+    return scene;
+}
+
+aiVector3D meshExtentFbx(const aiMesh *mesh) {
+    aiVector3D mn(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                  std::numeric_limits<float>::max());
+    aiVector3D mx(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                  std::numeric_limits<float>::lowest());
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        mn.x = std::min(mn.x, mesh->mVertices[i].x);
+        mn.y = std::min(mn.y, mesh->mVertices[i].y);
+        mn.z = std::min(mn.z, mesh->mVertices[i].z);
+        mx.x = std::max(mx.x, mesh->mVertices[i].x);
+        mx.y = std::max(mx.y, mesh->mVertices[i].y);
+        mx.z = std::max(mx.z, mesh->mVertices[i].z);
+    }
+    return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+} // namespace
+
+TEST_F(utFBXImporterExporter, exportFBXBakesUnitScaleWhenSourceUnitDiffersFromCm) {
+    // 0.5m half-extent box in metres -> on-disk FBX must store 100x larger
+    // vertex data (cm) so re-import lands at the same physical size and the
+    // legacy `UnitScaleFactor` reports cm-per-unit (=1.0).
+    aiScene *scene = makeFbxBoxScene(aiVector3D(0.5f, 0.5f, 0.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0); // metres
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1)); // already Y-up
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "fbx", "ut_fbx_unit_m.fbx"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_fbx_unit_m.fbx", 0);
+    ASSERT_NE(nullptr, roundtrip) << importer2.GetErrorString();
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentFbx(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(100.0f, extent.x, 1e-3f);
+    EXPECT_NEAR(100.0f, extent.y, 1e-3f);
+    EXPECT_NEAR(100.0f, extent.z, 1e-3f);
+    // UnitScaleFactor in re-imported file is 1.0 (cm) -> contract reports 0.01 m/unit.
+    EXPECT_NEAR(0.01, readUnitScale(roundtrip), 1e-9);
+    std::remove("ut_fbx_unit_m.fbx");
+}
+
+TEST_F(utFBXImporterExporter, exportFBXBakesAxisRotationWhenSourceIsZUp) {
+    // Tall box on +Z (Z-up source), extents 2 x 2 x 10 cm. After Z->Y bake the
+    // tall axis must move from +Z to +Y on re-import.
+    aiScene *scene = makeFbxBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-2); // already cm
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2)); // Z-up source
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "fbx", "ut_fbx_axis_zup.fbx"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_fbx_axis_zup.fbx", 0);
+    ASSERT_NE(nullptr, roundtrip) << importer2.GetErrorString();
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentFbx(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-4f);
+    std::remove("ut_fbx_axis_zup.fbx");
+}
+
+TEST_F(utFBXImporterExporter, exportFBXIsIdentityWhenSourceAlreadyCmYUp) {
+    // Source frame matches FBX target -> identity short-circuit. Vertex data
+    // and re-imported extents must match the authored values to within float
+    // epsilon.
+    aiScene *scene = makeFbxBoxScene(aiVector3D(2.5f, 7.5f, 2.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-2);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "fbx", "ut_fbx_identity.fbx"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_fbx_identity.fbx", 0);
+    ASSERT_NE(nullptr, roundtrip) << importer2.GetErrorString();
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentFbx(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(5.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(15.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(5.0f, extent.z, 1e-4f);
+    std::remove("ut_fbx_identity.fbx");
+}
+
+TEST_F(utFBXImporterExporter, exportFBXIsIdentityWhenContractMetadataAbsent) {
+    // No contract metadata -> exporter must produce the same byte layout as
+    // pre-contract callers (no rescale, no rotation). Round-trip extents
+    // must reproduce the source 1:1.
+    aiScene *scene = makeFbxBoxScene(aiVector3D(3.0f, 3.0f, 3.0f));
+    ASSERT_EQ(nullptr, scene->mMetaData);
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "fbx", "ut_fbx_no_meta.fbx"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_fbx_no_meta.fbx", 0);
+    ASSERT_NE(nullptr, roundtrip) << importer2.GetErrorString();
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentFbx(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(6.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(6.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(6.0f, extent.z, 1e-4f);
+    std::remove("ut_fbx_no_meta.fbx");
+}
+
+TEST_F(utFBXImporterExporter, exportFBXAsciiHonorsContractTransform) {
+    // Same axis bake as the binary test, but exercising the ASCII (`fbxa`)
+    // writer to guarantee both write paths share the bake.
+    aiScene *scene = makeFbxBoxScene(aiVector3D(1.0f, 1.0f, 5.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-2);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "fbxa", "ut_fbx_axis_zup.fbx"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_fbx_axis_zup.fbx", 0);
+    ASSERT_NE(nullptr, roundtrip) << importer2.GetErrorString();
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentFbx(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.z, 1e-4f);
+    std::remove("ut_fbx_axis_zup.fbx");
 }

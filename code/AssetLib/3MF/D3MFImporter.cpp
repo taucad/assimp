@@ -46,8 +46,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifdef ASSIMP_USE_LIB3MF
 
 #include "Lib3MFBridge.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/ZipArchiveIOSystem.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/IOSystem.hpp>
 
@@ -80,8 +83,8 @@ bool D3MFImporter::CanRead(const std::string &filename, IOSystem *pIOHandler, bo
     return true;
 }
 
-void D3MFImporter::SetupProperties(const Importer*) {
-    // empty
+void D3MFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 const aiImporterDesc *D3MFImporter::GetInfo() const {
@@ -90,6 +93,20 @@ const aiImporterDesc *D3MFImporter::GetInfo() const {
 
 void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, IOSystem *pIOHandler) {
     Lib3MFBridge::ImportScene(pScene, filename, pIOHandler);
+
+    // The bridge has already populated AI_METADATA_UNIT_SCALE_TO_METERS and
+    // AI_METADATA_UP_AXIS from the source file. Apply caller-side overrides
+    // (AI_CONFIG_IMPORT_3MF_*) on top so the precedence is source < config.
+    const double sourceUnit = readSceneUnitScaleToMeters(pScene);
+    const int32_t sourceAxis = readSceneUpAxis(pScene);
+    const ContractDefaults sourceFromBridge{
+        sourceUnit > 0.0 ? sourceUnit : 0.001,
+        sourceAxis >= 0 ? sourceAxis : 2
+    };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "3MF", sourceFromBridge);
+    if (resolved.unit != sourceFromBridge.unit || resolved.upAxis != sourceFromBridge.upAxis) {
+        writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "3MF");
+    }
 }
 
 } // Namespace Assimp
@@ -100,11 +117,14 @@ void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, 
 #include "D3MFOpcPackage.h"
 #include "XmlSerializer.h"
 
+#include "Common/UnitAxisContract.h"
 #include <assimp/StringComparison.h>
 #include <assimp/StringUtils.h>
 #include <assimp/XmlParser.h>
 #include <assimp/ZipArchiveIOSystem.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOSystem.hpp>
@@ -148,19 +168,39 @@ bool D3MFImporter::CanRead(const std::string &filename, IOSystem *pIOHandler, bo
     return true;
 }
 
-void D3MFImporter::SetupProperties(const Importer*) {
-    // empty
+void D3MFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 const aiImporterDesc *D3MFImporter::GetInfo() const {
     return &desc;
 }
 
+namespace {
+
+double readModelUnitFromXml(XmlParser &xmlParser) {
+    const XmlNode model = xmlParser.getRootNode().child(XmlTag::model);
+    if (model.empty()) {
+        return 0.001; // default to mm per 3MF Core Spec when <model> is malformed
+    }
+    const std::string unit = model.attribute(XmlTag::model_unit).as_string();
+    if (unit == "micron") return 1e-6;
+    if (unit == "centimeter") return 0.01;
+    if (unit == "inch") return 0.0254;
+    if (unit == "foot") return 0.3048;
+    if (unit == "meter") return 1.0;
+    return 0.001; // 3MF Core Spec §3.3 default unit is millimeter
+}
+
+} // anonymous namespace
+
 void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, IOSystem *pIOHandler) {
     D3MFOpcPackage opcPackage(pIOHandler, filename);
 
     XmlParser xmlParser;
+    double sourceUnit = 0.001; // mm per 3MF Core Spec §3.3 default
     if (xmlParser.parse(opcPackage.RootStream())) {
+        sourceUnit = readModelUnitFromXml(xmlParser);
         XmlSerializer xmlSerializer(xmlParser);
         xmlSerializer.ImportXml(pScene);
 
@@ -173,6 +213,13 @@ void D3MFImporter::InternReadFile(const std::string &filename, aiScene *pScene, 
             }
         }
     }
+
+    // 3MF Core Spec §3.3 fixes the coordinate system at +Z up; only the unit
+    // is configurable in-file. Apply caller-side overrides on top via the
+    // shared contract resolver.
+    const ContractDefaults source{sourceUnit, 2};
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "3MF", source);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "3MF");
 }
 
 } // Namespace Assimp

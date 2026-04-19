@@ -90,6 +90,7 @@ private:
     std::string m_userDefinedMaterialLibFile;
     bool m_detectTextureTypeFromFilename;
     std::map<aiTextureType, unsigned int> m_textures;
+    const Importer *mImporter = nullptr;
 };
 } // namespace Ogre
 } // namespace Assimp

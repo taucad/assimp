@@ -68,8 +68,8 @@ public:
     /// @return true for can be loaded, false for not.
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool checkSig) const override;
 
-    /// @brief  Not used
-    /// @param pImp Not used
+    /// @brief Captures the Importer back-reference so InternReadFile can
+    /// resolve `AI_CONFIG_IMPORT_3MF_*` overrides via `resolveImporterContract`.
     void SetupProperties(const Importer *pImp) override;
 
     /// @brief The importer description getter.
@@ -82,6 +82,9 @@ protected:
     /// @param pScene       The scene to load in.
     /// @param pIOHandler   The io-system
     void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) override;
+
+private:
+    const Importer *mImporter = nullptr;
 };
 
 } // Namespace Assimp

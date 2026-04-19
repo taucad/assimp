@@ -5,6 +5,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #include "IFCLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
 #include <assimp/IOSystem.hpp>
@@ -199,6 +200,7 @@ const aiImporterDesc *IFCImporter::GetInfo() const {
 
 // ------------------------------------------------------------------------------------------------
 void IFCImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
     // Simplified settings for basic IFC implementation
     // TODO: Add proper IFC configuration options when Web-IFC is fully integrated
     settings.skipSpaceRepresentations = true;
@@ -206,13 +208,57 @@ void IFCImporter::SetupProperties(const Importer *pImp) {
     settings.circleSegments = IFCConstants::DEFAULT_CIRCLE_SEGMENTS;
     settings.useCustomTriangulation = true;
     settings.skipAnnotations = true;
-    (void)pImp; // Suppress unused parameter warning
 }
+
+namespace {
+
+// Convert an IFC IfcSIUnit prefix string + name into meters-per-unit.
+// Returns 1.0 (metres) when the unit cannot be resolved so the contract
+// degrades gracefully on incomplete metadata.
+double ifcSIUnitToMeters(const std::string &prefix, const std::string &name) {
+    static const std::unordered_map<std::string, double> prefixScale = {
+        { "EXA", 1e18 }, { "PETA", 1e15 }, { "TERA", 1e12 }, { "GIGA", 1e9 },
+        { "MEGA", 1e6 }, { "KILO", 1e3 }, { "HECTO", 1e2 }, { "DECA", 1e1 },
+        { "DECI", 1e-1 }, { "CENTI", 1e-2 }, { "MILLI", 1e-3 }, { "MICRO", 1e-6 },
+        { "NANO", 1e-9 }, { "PICO", 1e-12 }, { "FEMTO", 1e-15 }, { "ATTO", 1e-18 }
+    };
+    if (name != "METRE" && name != "METER") {
+        return 1.0;
+    }
+    if (prefix.empty()) {
+        return 1.0;
+    }
+    const auto it = prefixScale.find(prefix);
+    if (it == prefixScale.end()) {
+        return 1.0;
+    }
+    return it->second;
+}
+
+} // namespace
 
 // ------------------------------------------------------------------------------------------------
 void IFCImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
     InitializeWebIFC();
     LoadModelWithWebIFC(pFile, pScene, pIOHandler);
+
+    // Record the unit/up-axis contract.
+    //
+    // IFC files declare their global length unit via IfcSIUnit on the
+    // IfcUnitAssignment owned by IfcProject. The current Web-IFC bridge
+    // does not surface that value through an Assimp-friendly API yet, so
+    // the canonical default is 1.0 metre (the IFC SI base unit) until
+    // the bridge exposes IfcSIUnit lookups; importers can override the
+    // value via AI_CONFIG_IMPORT_IFC_UNIT_SCALE_TO_METERS.
+    //
+    // IFC is normatively right-handed Z-up (BuildingSMART convention)
+    // and the Web-IFC bridge applies no axis conversion, so the
+    // canonical scene up-axis is Z.
+    const ContractDefaults defaults{ 1.0, 2 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "IFC", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "IFC");
+    // Silence the unused helper warning until IfcSIUnit lookups are wired up.
+    (void)&ifcSIUnitToMeters;
 }
 
 

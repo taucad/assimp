@@ -45,13 +45,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "XGLLoader.h"
 #include "Common/Compression.h"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/ParsingUtils.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/MemoryIOWrapper.h>
 #include <assimp/StreamReader.h>
 #include <assimp/importerdesc.h>
 #include <assimp/mesh.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 
 #include <memory>
@@ -85,6 +88,11 @@ XGLImporter::~XGLImporter() {
 bool XGLImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /*checkSig*/) const {
 	static const char *tokens[] = { "<world>", "<World>", "<WORLD>" };
 	return SearchFileHeaderForToken(pIOHandler, pFile, tokens, AI_COUNT_OF(tokens));
+}
+
+// ------------------------------------------------------------------------------------------------
+void XGLImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -164,6 +172,17 @@ void XGLImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 	}
 
 	scope.dismiss();
+
+	// XGL spec (AVEVA VizStream) does not carry a normative scene-level unit
+	// or world up-axis declaration — `<up>` and `<forward>` only appear
+	// inside per-object `<transform>` blocks (see ReadTrafo) and describe a
+	// local basis, not a world coordinate system. Default to the same
+	// 1.0 m / +Y-up baseline used for the other unitless XML formats so
+	// downstream exporters can reason uniformly. Callers with format
+	// knowledge can override via `AI_CONFIG_IMPORT_XGL_*`.
+	const ContractDefaults xglDefaults{ 1.0, 1 };
+	const ContractDefaults resolved = resolveImporterContract(mImporter, "XGL", xglDefaults);
+	writeContractMetadata(m_scene, resolved.unit, resolved.upAxis, "XGL");
 }
 
 // ------------------------------------------------------------------------------------------------

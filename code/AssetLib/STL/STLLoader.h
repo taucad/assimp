@@ -84,6 +84,15 @@ protected:
     const aiImporterDesc* GetInfo () const override;
 
     /**
+     * @brief Captures the Importer back-reference so InternReadFile can
+     * resolve `AI_CONFIG_IMPORT_STL_*` contract overrides via the shared
+     * `resolveImporterContract` helper. We defer resolution until
+     * `InternReadFile` so that any DeadlyImportError raised by an invalid
+     * override is captured by `BaseImporter::ReadFile`'s catch site.
+     */
+    void SetupProperties(const Importer *pImp) override;
+
+    /**
      * @brief   Imports the given file into the given scene structure.
     * See BaseImporter::InternReadFile() for details
     */
@@ -116,6 +125,12 @@ protected:
 
     /** Default vertex color */
     aiColor4D mClrColorDefault;
+
+    /** Importer back-reference captured by SetupProperties so the
+     * unit/axis contract resolver can read `AI_CONFIG_IMPORT_STL_*`
+     * override properties at InternReadFile time.
+     */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

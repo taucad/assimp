@@ -279,6 +279,7 @@ public:
     void ParseFile(std::istream &myIstream);
     void ParseFile(XmlParser &theParser);
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool pCheckSig) const;
+    void SetupProperties(const Importer *pImp);
     void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler);
     const aiImporterDesc *GetInfo() const;
     void Clear();
@@ -390,6 +391,11 @@ private:
     X3DNodeElementBase *mNodeElementCur;
     aiScene *mScene;
     IOSystem *mpIOHandler;
+    const Importer *mImporter = nullptr;
+    /// Source-declared length unit (meters per source unit) parsed from
+    /// `<unit category="length" conversionFactor="N">` in `<head>`.
+    /// `<= 0` means absent — falls through to format default (1.0 = meters).
+    double mSourceUnitToMeters = 0.0;
 }; // class X3DImporter
 
 } // namespace Assimp

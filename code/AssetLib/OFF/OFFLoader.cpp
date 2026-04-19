@@ -47,10 +47,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // internal headers
 #include "OFFLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/ParsingUtils.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <memory>
 #include <assimp/IOSystem.hpp>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/importerdesc.h>
@@ -80,6 +83,11 @@ bool OFFImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /
 // ------------------------------------------------------------------------------------------------
 const aiImporterDesc *OFFImporter::GetInfo() const {
     return &desc;
+}
+
+// ------------------------------------------------------------------------------------------------
+void OFFImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // skip blank space, lines and comments
@@ -322,6 +330,16 @@ void OFFImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 
     const int twosided = 1;
     pcMat->AddProperty(&twosided, 1, AI_MATKEY_TWOSIDED);
+
+    // OFF (Object File Format) is unitless and axis-less by spec — it stores
+    // raw vertex tuples with no embedded scale or coordinate-system metadata.
+    // Default to meters + Y-up to match the glTF "no transformation needed"
+    // baseline shared with PLY (the other unitless geometry-only format);
+    // callers with a known producer (e.g. mm OFF from a research scanner) can
+    // override via AI_CONFIG_IMPORT_OFF_*.
+    const ContractDefaults offDefaults{1.0, 1};
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "OFF", offDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "OFF");
 }
 
 } // namespace Assimp

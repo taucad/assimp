@@ -385,6 +385,9 @@ private:
 
     bool bLoadAnimationList = true;
     bool noSkeletonMesh = false;
+
+    /** Importer instance used to look up unit-axis contract overrides. */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

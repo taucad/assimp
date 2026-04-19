@@ -234,6 +234,9 @@ private:
 
     /** Used by FindNameForNode() to generate unique node names */
     unsigned int mNodeNameCounter;
+
+    /** Owning Importer used to resolve contract overrides */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

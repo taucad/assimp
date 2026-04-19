@@ -276,6 +276,9 @@ protected:
 
     /** true if PRJ file */
     bool bIsPrj;
+
+    /** Importer instance, captured in SetupProperties for contract resolution. */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

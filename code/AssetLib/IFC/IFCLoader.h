@@ -161,6 +161,9 @@ private:
     
     Settings settings;
 
+    /** Importer instance used to look up unit-axis contract overrides. */
+    const Importer *mImporter = nullptr;
+
     // Web-IFC related members with thread safety
     std::unique_ptr<webifc::manager::ModelManager> modelManager;
     uint32_t currentModelID;

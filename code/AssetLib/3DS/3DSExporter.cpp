@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AssetLib/3DS/3DSExporter.h"
 #include "AssetLib/3DS/3DSHelper.h"
 #include "AssetLib/3DS/3DSLoader.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/SplitLargeMeshes.h"
 
 #include <assimp/SceneCombiner.h>
@@ -148,6 +149,13 @@ void CollectMeshes(const aiNode *node, std::multimap<const aiNode *, unsigned in
         CollectMeshes(node->mChildren[i], meshes);
     }
 }
+// 3DS files have no native unit declaration; the importer canonicalises to
+// metres + Z-up (see 3DSLoader.cpp:197-211). Mirror that frame on export so
+// scenes round-trip identity, and so callers authoring in any other frame
+// land on the canonical 3DS spec.
+constexpr double k3DSTargetUnitToMeters = 1.0; // metres
+constexpr int32_t k3DSTargetUpAxis = 2; // Z-up
+
 } // namespace
 
 // ------------------------------------------------------------------------------------------------
@@ -168,6 +176,12 @@ void ExportScene3DS(const char *pFile, IOSystem *pIOSystem, const aiScene *pScen
     aiScene *scenecopy_tmp;
     SceneCombiner::CopyScene(&scenecopy_tmp, pScene);
     std::unique_ptr<aiScene> scenecopy(scenecopy_tmp);
+
+    // Bake contract on the copy (CopyScene preserves mMetaData and meshes).
+    // Same-frame scenes short-circuit to identity so no float drift is
+    // introduced when the source already matches the 3DS canonical frame.
+    bakeContractTransformIntoMeshes(scenecopy.get(), k3DSTargetUnitToMeters,
+                                    k3DSTargetUpAxis);
 
     SplitLargeMeshesProcess_Triangle tri_splitter;
     tri_splitter.SetLimit(0xffff);

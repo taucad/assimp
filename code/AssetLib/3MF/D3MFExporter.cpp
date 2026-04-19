@@ -211,11 +211,11 @@ bool D3MFExporter::export3DModel() {
 
     OpcPackageRelationship *info = new OpcPackageRelationship;
     info->id = "rel0";
-    info->target = "/3D/3DModel.model";
+    info->target = "/3D/3dmodel.model";
     info->type = XmlTag::PACKAGE_START_PART_RELATIONSHIP_TYPE;
     mRelations.push_back(info);
 
-    zipModel("3D", "3DModel.model");
+    zipModel("3D", "3dmodel.model");
     mModelOutput.flush();
 
     return true;
@@ -300,12 +300,33 @@ void D3MFExporter::writeObjects() {
     }
 
     aiNode *root = mScene->mRootNode;
+    unsigned int objectId = 2;
+
+    // After aiProcess_PreTransformVertices the scene is collapsed: all meshes
+    // hang directly off the root with zero children. Emit those first so the
+    // exported file is non-empty in the flattened-graph case.
+    if (root->mNumMeshes > 0) {
+        mModelOutput << "<" << XmlTag::object << " id=\"" << objectId << "\" type=\"model\">";
+        mModelOutput << std::endl;
+        for (unsigned int j = 0; j < root->mNumMeshes; ++j) {
+            aiMesh *currentMesh = mScene->mMeshes[root->mMeshes[j]];
+            if (nullptr == currentMesh) {
+                continue;
+            }
+            writeMesh(currentMesh);
+        }
+        mBuildItems.push_back(objectId);
+        mModelOutput << "</" << XmlTag::object << ">";
+        mModelOutput << std::endl;
+        ++objectId;
+    }
+
     for (unsigned int i = 0; i < root->mNumChildren; ++i) {
         aiNode *currentNode(root->mChildren[i]);
         if (nullptr == currentNode) {
             continue;
         }
-        mModelOutput << "<" << XmlTag::object << " id=\"" << i + 2 << "\" type=\"model\">";
+        mModelOutput << "<" << XmlTag::object << " id=\"" << objectId << "\" type=\"model\">";
         mModelOutput << std::endl;
         for (unsigned int j = 0; j < currentNode->mNumMeshes; ++j) {
             aiMesh *currentMesh = mScene->mMeshes[currentNode->mMeshes[j]];
@@ -314,10 +335,11 @@ void D3MFExporter::writeObjects() {
             }
             writeMesh(currentMesh);
         }
-        mBuildItems.push_back(i);
+        mBuildItems.push_back(objectId);
 
         mModelOutput << "</" << XmlTag::object << ">";
         mModelOutput << std::endl;
+        ++objectId;
     }
 }
 
@@ -384,7 +406,7 @@ void D3MFExporter::writeBuild() {
                  << "\n";
 
     for (size_t i = 0; i < mBuildItems.size(); ++i) {
-        mModelOutput << "<" << XmlTag::item << " objectid=\"" << i + 2 << "\"/>";
+        mModelOutput << "<" << XmlTag::item << " objectid=\"" << mBuildItems[i] << "\"/>";
         mModelOutput << "\n";
     }
     mModelOutput << "</" << XmlTag::build << ">";

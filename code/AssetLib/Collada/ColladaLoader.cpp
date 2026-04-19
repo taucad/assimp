@@ -45,14 +45,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ColladaLoader.h"
 #include "ColladaParser.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/ColladaMetaData.h>
 #include <assimp/CreateAnimMesh.h>
 #include <assimp/ParsingUtils.h>
 #include <assimp/SkeletonMeshBuilder.h>
 #include <assimp/ZipArchiveIOSystem.h>
 #include <assimp/anim.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
@@ -129,6 +132,7 @@ void ColladaLoader::SetupProperties(const Importer *pImp) {
     ignoreUpDirection = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UP_DIRECTION, 0) != 0;
     ignoreUnitSize = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UNIT_SIZE, 0) != 0;
     useColladaName = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_USE_COLLADA_NAMES, 0) != 0;
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -210,6 +214,25 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
         for (auto it = parser.mAssetMetaData.cbegin(); it != parser.mAssetMetaData.cend(); ++it, ++i) {
             pScene->mMetaData->Set(static_cast<unsigned int>(i), (*it).first, (*it).second);
         }
+    }
+
+    // COLLADA contract metadata. The unit/up-axis transforms above bake
+    // post-import normalisation into the root node, so the canonical scene
+    // is metres + Y-up unless the caller has explicitly opted out via
+    // AI_CONFIG_IMPORT_COLLADA_IGNORE_*.
+    {
+        double colladaUnit = ignoreUnitSize ? static_cast<double>(parser.mUnitSize) : 1.0;
+        int32_t colladaUpAxis = 1; // post-normalisation default = Y-up
+        if (ignoreUpDirection) {
+            switch (parser.mUpDirection) {
+                case ColladaParser::UP_X: colladaUpAxis = 0; break;
+                case ColladaParser::UP_Y: colladaUpAxis = 1; break;
+                case ColladaParser::UP_Z: colladaUpAxis = 2; break;
+            }
+        }
+        const ContractDefaults colladaDefaults{ colladaUnit, colladaUpAxis };
+        const ContractDefaults resolved = resolveImporterContract(mImporter, "COLLADA", colladaDefaults);
+        writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "Collada");
     }
 
     StoreSceneMeshes(pScene);

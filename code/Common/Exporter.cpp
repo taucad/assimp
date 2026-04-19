@@ -223,7 +223,13 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 #endif
 
 #ifndef ASSIMP_BUILD_NO_3MF_EXPORTER
-	exporters.emplace_back("3mf", "The 3MF-File-Format", "3mf", &ExportScene3MF, 0);
+	// 3MF requires triangulated meshes (Core Spec §4.1) and a flattened scene
+	// graph (no per-build-item world transforms in our pipeline — vertices are
+	// baked in `Lib3MFBridge`). Enforce both as default pp flags so callers using
+	// the top-level `Exporter::Export` get spec-compliant output without having
+	// to know the bridge's prerequisites.
+	exporters.emplace_back("3mf", "The 3MF-File-Format", "3mf", &ExportScene3MF,
+		aiProcess_Triangulate | aiProcess_PreTransformVertices);
 #endif
 
 #ifndef ASSIMP_BUILD_NO_PBRT_EXPORTER

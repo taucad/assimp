@@ -182,6 +182,9 @@ protected:
         for 3DS Max broken ASE normal export */
     bool configRecomputeNormals;
     bool noSkeletonMesh;
+
+    /** Importer instance, captured in SetupProperties for contract resolution. */
+    const Importer *mImporter = nullptr;
 };
 
 #endif // ASSIMP_BUILD_NO_3DS_IMPORTER

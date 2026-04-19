@@ -42,13 +42,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "OpenGEXImporter.h"
 #include "PostProcessing/MakeVerboseFormat.h"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/DefaultIOSystem.h>
 #include <assimp/StringComparison.h>
 #include <assimp/StringUtils.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/ai_assert.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <openddlparser/OpenDDLParser.h>
 
@@ -315,6 +318,32 @@ void OpenGEXImporter::InternReadFile(const std::string &filename, aiScene *pScen
     copyMaterials(pScene);
     resolveReferences();
     createNodeTree(pScene);
+
+    // OpenGEX 2.0 spec §6 (Metric structure) defines two scene-level
+    // metrics that govern the coordinate system the file is authored in:
+    //   - "distance" (float, default 1.0): metres per source unit. Stored
+    //     as MetricInfo::Distance / m_floatValue. m_floatValue is
+    //     zero-initialised, so a value <= 0 means the producer omitted the
+    //     Metric and the spec default applies.
+    //   - "up" (string, default "z"): "y" or "z". Stored as MetricInfo::Up
+    //     / m_stringValue. An empty string means "use spec default" (Z-up).
+    // Historical behaviour: the importer parsed both metrics into
+    // m_metrics but never propagated them into the scene, so downstream
+    // pipelines silently lost the source coordinate system.
+    const float distance = m_metrics[MetricInfo::Distance].m_floatValue;
+    const double sourceUnit = distance > 0.0f ? static_cast<double>(distance) : 1.0;
+
+    const std::string &upStr = m_metrics[MetricInfo::Up].m_stringValue;
+    int32_t sourceAxis = 2; // OpenGEX spec default
+    if (upStr == "y" || upStr == "Y") {
+        sourceAxis = 1;
+    } else if (upStr == "x" || upStr == "X") {
+        sourceAxis = 0;
+    }
+
+    const ContractDefaults source{ sourceUnit, sourceAxis };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "OGEX", source);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "OpenGEX");
 }
 
 //------------------------------------------------------------------------------------------------
@@ -327,6 +356,7 @@ void OpenGEXImporter::SetupProperties(const Importer *pImp) {
     if (nullptr == pImp) {
         return;
     }
+    mImporter = pImp;
 }
 
 //------------------------------------------------------------------------------------------------

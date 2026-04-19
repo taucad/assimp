@@ -44,6 +44,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_OBJ_EXPORTER
 
 #include "ObjExporter.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/Exceptional.h>
 #include <assimp/StringComparison.h>
 #include <assimp/version.h>
@@ -57,9 +58,29 @@ using namespace Assimp;
 
 namespace Assimp {
 
+namespace {
+// OBJ is unitless and axis-less by spec. The companion OBJ importer
+// normalises absent declarations to (1.0 m, Y-up) — the de-facto Wavefront /
+// Maya convention; the exporter targets the same frame so same-format
+// round-trips are bitwise identity. Behaviour gated on
+// `AI_METADATA_UNIT_SCALE_TO_METERS` so legacy callers stay byte-identical.
+constexpr double kObjTargetUnitToMeters = 1.0;
+constexpr int32_t kObjTargetUpAxis = 1; // Y-up
+
+// `bakeContractTransformIntoMeshes` mutates `pScene->mMeshes[*]` in place,
+// matching the upstream glTF2/STL/PLY exporters. The exporter API hands us a
+// `const aiScene*` for legacy reasons; cast away const at the bake boundary.
+void bakeObjContract(const aiScene *pScene) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kObjTargetUnitToMeters, kObjTargetUpAxis);
+}
+} // namespace
+
 // ------------------------------------------------------------------------------------------------
 // Worker function for exporting a scene to Wavefront OBJ. Prototyped and registered in Exporter.cpp
 void ExportSceneObj(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* props) {
+    bakeObjContract(pScene);
+
     // invoke the exporter
     ObjExporter exporter(pFile, pScene, false, props);
 
@@ -87,6 +108,8 @@ void ExportSceneObj(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene
 // ------------------------------------------------------------------------------------------------
 // Worker function for exporting a scene to Wavefront OBJ without the material file. Prototyped and registered in Exporter.cpp
 void ExportSceneObjNoMtl(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* props) {
+    bakeObjContract(pScene);
+
     // invoke the exporter
     ObjExporter exporter(pFile, pScene, true, props);
 

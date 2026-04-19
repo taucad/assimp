@@ -47,12 +47,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // internal headers
 #include "MD5Loader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/MathFunctions.h>
 #include <assimp/RemoveComments.h>
 #include <assimp/SkeletonMeshBuilder.h>
 #include <assimp/StringComparison.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
+#include <assimp/metadata.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/IOSystem.hpp>
@@ -110,6 +113,7 @@ const aiImporterDesc *MD5Importer::GetInfo() const {
 void MD5Importer::SetupProperties(const Importer *pImp) {
     // AI_CONFIG_IMPORT_MD5_NO_ANIM_AUTOLOAD
     mCconfigNoAutoLoad = (0 != pImp->GetPropertyInteger(AI_CONFIG_IMPORT_MD5_NO_ANIM_AUTOLOAD, 0));
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -159,6 +163,14 @@ void MD5Importer::InternReadFile(const std::string &pFile, aiScene *_pScene, IOS
     if (!mHadMD5Mesh) {
         mScene->mFlags |= AI_SCENE_FLAGS_INCOMPLETE;
     }
+
+    // MD5 is unitless and Z-up at the source; the +90 X rotation above
+    // re-expresses the scene as Y-up, so we declare UpAxis=1
+    // post-rotation. MD5 has no spec-level distance unit, so we default
+    // to 1.0 (one unit per metre) and let consumers override.
+    const ContractDefaults md5Defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "MD5", md5Defaults);
+    writeContractMetadata(mScene, resolved.unit, resolved.upAxis, "MD5");
 
     // clean the instance -- the BaseImporter instance may be reused later.
     UnloadFileFromMemory();

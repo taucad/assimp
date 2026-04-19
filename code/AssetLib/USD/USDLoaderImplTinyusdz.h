@@ -157,6 +157,14 @@ public:
             const tinyusdz::tydra::RenderScene &render_scene,
             aiScene *pScene,
             const tinyusdz::Stage &stage);
+
+    /// Source `metersPerUnit` value as authored on the USD stage; defaults to
+    /// the tinyusdz fallback (1.0 metre) when the layer omits the metadata.
+    double sourceMetersPerUnit{1.0};
+
+    /// Source up-axis encoded as 0=X, 1=Y, 2=Z. tinyusdz reports the USD
+    /// default of Y-up when the layer omits the metadata.
+    int sourceUpAxis{1};
 };
 } // namespace Assimp
 #endif // AI_USDLOADER_IMPL_TINYUSDZ_H_INCLUDED

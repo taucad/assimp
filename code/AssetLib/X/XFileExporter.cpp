@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_X_EXPORTER
 
 #include "AssetLib/X/XFileExporter.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/ConvertToLHProcess.h"
 
 #include <assimp/Bitmap.h>
@@ -66,6 +67,20 @@ using namespace Assimp;
 namespace Assimp
 {
 
+namespace {
+// XFile (DirectX .x) is canonically metres + Y-up; the X importer normalises
+// to that frame (cf. XFileImporter.cpp:138-142). Mirror it on export so the
+// canonical round-trip lands on identity and any other source frame is baked
+// at the boundary.
+constexpr double kXFileTargetUnitToMeters = 1.0;
+constexpr int32_t kXFileTargetUpAxis = 1;
+
+void bakeXFileContract(const aiScene *pScene) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kXFileTargetUnitToMeters, kXFileTargetUpAxis);
+}
+} // namespace
+
 // ------------------------------------------------------------------------------------------------
 // Worker function for exporting a scene to Collada. Prototyped and registered in Exporter.cpp
 void ExportSceneXFile(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties)
@@ -78,6 +93,8 @@ void ExportSceneXFile(const char* pFile,IOSystem* pIOSystem, const aiScene* pSce
 
     // set standard properties if not set
     if (!props.HasPropertyBool(AI_CONFIG_EXPORT_XFILE_64BIT)) props.SetPropertyBool(AI_CONFIG_EXPORT_XFILE_64BIT, false);
+
+    bakeXFileContract(pScene);
 
     // invoke the exporter
     XFileExporter iDoTheExportThing( pScene, pIOSystem, path, file, &props);

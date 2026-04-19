@@ -104,6 +104,8 @@ SET( COMMON
   unit/Common/utXmlParser.cpp
   unit/Common/utBase64.cpp
   unit/Common/utHash.cpp
+  unit/Common/utUnitAxisContract.cpp
+  unit/utContractRoundTripMatrix.cpp
   unit/Common/utBaseProcess.cpp
   unit/Common/utLogger.cpp
 )

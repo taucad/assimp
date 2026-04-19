@@ -44,7 +44,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_STL_IMPORTER
 
 #include "STLLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/ParsingUtils.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/fast_atof.h>
 #include <assimp/importerdesc.h>
 #include <assimp/scene.h>
@@ -148,6 +150,17 @@ const aiImporterDesc *STLImporter::GetInfo() const {
     return &desc;
 }
 
+// ------------------------------------------------------------------------------------------------
+// SetupProperties: capture the Importer back-reference for later resolution.
+// We do not call resolveImporterContract() here because SetupProperties() is
+// invoked outside ReadFile()'s try/catch; deferring resolution to
+// InternReadFile() ensures any DeadlyImportError raised by an invalid
+// override is converted to a nullptr return + GetErrorString() message,
+// matching the behaviour of every other importer-side validation path.
+void STLImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
+}
+
 void addFacesToMesh(aiMesh *pMesh) {
     pMesh->mFaces = new aiFace[pMesh->mNumFaces];
     for (unsigned int i = 0, p = 0; i < pMesh->mNumFaces; ++i) {
@@ -215,6 +228,14 @@ void STLImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
     mScene->mNumMaterials = 1;
     mScene->mMaterials = new aiMaterial *[1];
     mScene->mMaterials[0] = pcMat;
+
+    // Declare the post-import vertex frame on the scene. STL is unitless and
+    // axis-less by spec; the per-format defaults (mm + Z-up) match the
+    // dominant 3D-printing convention. Caller can override via
+    // AI_CONFIG_IMPORT_STL_UNIT_SCALE_TO_METERS / AI_CONFIG_IMPORT_STL_UP_AXIS.
+    const ContractDefaults stlDefaults{0.001, 2};
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "STL", stlDefaults);
+    writeContractMetadata(mScene, resolved.unit, resolved.upAxis, "STL");
 
     mBuffer = nullptr;
 }

@@ -66,6 +66,12 @@ public:
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler,
             bool checkSig) const override;
 
+    // -------------------------------------------------------------------
+    /** Captures the Importer back-reference so InternReadFile can resolve
+     * `AI_CONFIG_IMPORT_OFF_*` overrides via `resolveImporterContract`.
+     */
+    void SetupProperties(const Importer *pImp) override;
+
 protected:
     // -------------------------------------------------------------------
     /** Return importer meta information.
@@ -79,6 +85,9 @@ protected:
     */
     void InternReadFile(const std::string &pFile, aiScene *pScene,
             IOSystem *pIOHandler) override;
+
+private:
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

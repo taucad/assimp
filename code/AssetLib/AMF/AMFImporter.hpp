@@ -154,6 +154,7 @@ public:
     void ParseHelper_Node_Enter(AMFNodeElementBase *child);
     void ParseHelper_Node_Exit();
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool pCheckSig) const override;
+    void SetupProperties(const Importer *pImp) override;
     void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) override;
     const aiImporterDesc *GetInfo() const override;
     bool Find_NodeElement(const std::string &pID, const AMFNodeElementBase::EType pType, AMFNodeElementBase **pNodeElement) const;
@@ -299,6 +300,7 @@ private:
     std::string mVersion;
     std::list<SPP_Material> mMaterial_Converted; ///< List of converted materials for postprocessing step.
     std::list<SPP_Texture> mTexture_Converted; ///< List of converted textures for postprocessing step.
+    const Importer *mImporter = nullptr; ///< Captured for AI_CONFIG_IMPORT_AMF_* override resolution.
 };
 
 } // namespace Assimp

@@ -174,6 +174,9 @@ protected:
 
     /** configuration option: prevent anim autoload */
     bool mCconfigNoAutoLoad;
+
+    /** Captured Importer pointer for resolving the unit/axis contract. */
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

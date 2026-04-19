@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "USDZExporter.h"
 #include "usdz-writer.hh"
+#include "Common/UnitAxisContract.h"
 
 // BlendShapeResult definition
 struct Assimp::USDZExporter::BlendShapeResult {
@@ -5313,6 +5314,24 @@ std::string USDZExporter::GetEmbeddedTextureFilename(int textureIndex) {
 // Export functions
 // USDZ export removed - not supported by current tinyusdz version
 
+namespace {
+// USD canonically authors metres + Y-up (cf. USDZExporter.cpp stageMeta:
+// `metersPerUnit = 1.0` / `upAxis = Y`). Bake the contract into mesh
+// vertices/normals so the on-disk stage matches that frame regardless of
+// the source frame; identity short-circuits when the source already lines
+// up with the canonical USD frame.
+constexpr double kUsdTargetUnitToMeters = 1.0;
+constexpr int32_t kUsdTargetUpAxis = 1;
+
+void bakeUsdContract(const aiScene *pScene) {
+    // Cast away const to mutate vertex/normal buffers in place. Same pattern
+    // as the glTF2 / STL / FBX exporters — `aiScene*` is const w.r.t. file I/O,
+    // not w.r.t. in-memory geometry that callers expect to be canonicalised.
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kUsdTargetUnitToMeters, kUsdTargetUpAxis);
+}
+} // namespace
+
 void Assimp::ExportSceneUSDA(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* pProperties) {
     if (!pScene) {
         ASSIMP_LOG_ERROR("USDA export failed: Scene is null");
@@ -5324,6 +5343,8 @@ void Assimp::ExportSceneUSDA(const char* pFile, IOSystem* pIOSystem, const aiSce
         throw DeadlyExportError("USDA export failed: Output file path is null");
     }
     
+    bakeUsdContract(pScene);
+
     try {
         USDZExporter exporter(pFile, pIOSystem, pScene, pProperties, false);
     } catch (const DeadlyExportError& e) {
@@ -5345,6 +5366,8 @@ void Assimp::ExportSceneUSDZ(const char* pFile, IOSystem* pIOSystem, const aiSce
         throw DeadlyExportError("USDZ export failed: Output file path is null");
     }
     
+    bakeUsdContract(pScene);
+
     try {
         USDZExporter exporter(pFile, pIOSystem, pScene, pProperties, true);
     } catch (const DeadlyExportError& e) {

@@ -41,10 +41,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
+
+#include <cstdint>
+#include <string>
 
 class utOFFImportExport : public AbstractImportExportBase {
 protected:
@@ -57,4 +63,58 @@ protected:
 
 TEST_F(utOFFImportExport, importOFFFromFileTest) {
     EXPECT_TRUE(importerTest());
+}
+
+TEST_F(utOFFImportExport, contractDefaultsAreMetersAndYUp) {
+    ::Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/OFF/Cube.off", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(1.0, meters, 1e-9) << "OFF default unit must be meters (matches PLY/glTF baseline)";
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(1, upAxis) << "OFF default up-axis must be Y (matches glTF/PLY)";
+
+    aiString sourceFormat;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_SOURCE_FORMAT, sourceFormat));
+    EXPECT_STREQ("OFF Importer", sourceFormat.C_Str());
+}
+
+TEST_F(utOFFImportExport, contractUnitScaleOverrideRespected) {
+    ::Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_OFF_UNIT_SCALE_TO_METERS, 0.001f);
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/OFF/Cube.off", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double meters = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, meters));
+    EXPECT_NEAR(0.001, meters, 1e-9);
+}
+
+TEST_F(utOFFImportExport, contractUpAxisOverrideRespected) {
+    ::Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_OFF_UP_AXIS, 2); // force Z-up
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/OFF/Cube.off", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(2, upAxis);
+}
+
+TEST_F(utOFFImportExport, contractInvalidUpAxisOverrideFailsImport) {
+    ::Assimp::Importer importer;
+    // -1 collides with Importer::GetPropertyInteger's "not set" sentinel, so
+    // the resolver treats it as absent. Out-of-range positive values are the
+    // real failure surface — use 7.
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_OFF_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/OFF/Cube.off", 0);
+    EXPECT_EQ(nullptr, scene);
+    EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("IMPORT_OFF_UP_AXIS"));
 }

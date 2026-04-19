@@ -66,4 +66,26 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /// Not all formats add this metadata.
 #define AI_METADATA_SOURCE_COPYRIGHT "SourceAsset_Copyright"
 
+/// Scene metadata holding the scale factor that converts scene-space distances
+/// into meters: `scene_meters = vertex_value * UnitScaleToMeters`.
+/// Examples: 1.0 (meters), 0.001 (millimeters), 0.0254 (inches).
+///
+/// Importers SHOULD set this whenever the source format defines a unit; the
+/// value type is `double`. Exporters MAY consume this to rescale geometry for
+/// spec-compliant output (e.g. the 3MF exporter rescales to millimetres).
+///
+/// Disjoint from the legacy `"UnitScaleFactor"` key written by the FBX importer
+/// with cm-relative semantics — the two MUST NOT be conflated. New importers
+/// and exporters added under this contract use only `UnitScaleToMeters`.
+#define AI_METADATA_UNIT_SCALE_TO_METERS "UnitScaleToMeters"
+
+/// Scene metadata holding the up-axis of the post-import vertex coordinates.
+/// 0 = +X, 1 = +Y, 2 = +Z. Value type is `int32_t` (matches the existing
+/// FBX-populated `UpAxis` encoding, so this key is shared rather than parallel).
+///
+/// Importers SHOULD set this whenever the source format defines an up-axis;
+/// exporters MAY rotate the scene into their own format's required up-axis on
+/// write (e.g. the 3MF exporter rotates to +Z per the 3MF Core Specification).
+#define AI_METADATA_UP_AXIS "UpAxis"
+
 #endif

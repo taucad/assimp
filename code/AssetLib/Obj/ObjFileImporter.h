@@ -73,6 +73,9 @@ public:
     /// \remark See BaseImporter::CanRead() for details.
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool checkSig) const override;
 
+    /// \brief  Capture the importer for resolving contract overrides.
+    void SetupProperties(const Importer *pImp) override;
+
 protected:
     //! \brief  Appends the supported extension.
     const aiImporterDesc *GetInfo() const override;
@@ -114,6 +117,8 @@ private:
     ObjFile::Object *m_pRootObject;
     //! Absolute pathname of model in file system
     std::string m_strAbsPath;
+    //! Owning Importer used to resolve contract overrides
+    const Importer *mImporter = nullptr;
 };
 
 // ------------------------------------------------------------------------------------------------

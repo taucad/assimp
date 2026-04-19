@@ -62,6 +62,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "USDLoader.h"
 #include "USDLoaderUtil.h"
 #include "USDPreprocessor.h"
+#include "Common/UnitAxisContract.h"
 
 static constexpr aiImporterDesc desc = {
     "USD Object Importer",
@@ -108,6 +109,10 @@ const aiImporterDesc *USDImporter::GetInfo() const {
     return &desc;
 }
 
+void USDImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
+}
+
 void USDImporter::InternReadFile(
         const std::string &pFile,
         aiScene *pScene,
@@ -116,6 +121,16 @@ void USDImporter::InternReadFile(
             pFile,
             pScene,
             pIOHandler);
+
+    // Record the unit/up-axis contract using the stage metadata captured by
+    // the tinyusdz implementation. USD authors `metersPerUnit` (default 1.0
+    // metre per tinyusdz fallback) and `upAxis` (default Y) on the layer;
+    // the importer applies no axis conversion, so the contract reflects the
+    // source values verbatim and exposes overrides for layers that omit
+    // them.
+    const ContractDefaults defaults{ impl.sourceMetersPerUnit, impl.sourceUpAxis };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "USD", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "USD");
 }
 
 } // namespace Assimp

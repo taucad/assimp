@@ -1088,6 +1088,409 @@ enum aiComponent
  */
 #define AI_CONFIG_IMPORT_COLLADA_USE_COLLADA_NAMES "IMPORT_COLLADA_USE_COLLADA_NAMES"
 
+// ---------------------------------------------------------------------------
+/** @brief Per-format unit/axis contract overrides — companion to the new
+ *  scene-metadata `AI_METADATA_UNIT_SCALE_TO_METERS` /
+ *  `AI_METADATA_UP_AXIS` keys defined in `commonMetaData.h`.
+ *
+ *  Importers that adopt the cross-format unit/axis contract use these
+ *  property keys to let callers override the per-format default unit
+ *  (meters per source unit) and up-axis (0=+X, 1=+Y, 2=+Z) when the
+ *  source file does not encode that information itself, OR when the
+ *  caller knows better than the format default (e.g. metric STL).
+ *
+ *  Resolution precedence: source-file metadata > caller property > format default.
+ *  See `code/Common/UnitAxisContract.h` for the resolver entry point.
+ *
+ *  All keys take the canonical pattern `IMPORT_<FMT>_UNIT_SCALE_TO_METERS`
+ *  (float, meters per source unit; must be > 0) and `IMPORT_<FMT>_UP_AXIS`
+ *  (int, in [0, 2]).
+ */
+
+/** @brief STL is unitless and axis-less by spec. Default is 0.001 (mm) and
+ *  Z-up to match the dominant 3D-printing convention.
+ *  Property type: Float. Default value: 0.001.
+ */
+#define AI_CONFIG_IMPORT_STL_UNIT_SCALE_TO_METERS "IMPORT_STL_UNIT_SCALE_TO_METERS"
+
+/** @brief STL up-axis override. Property type: Int. Default value: 2 (Z-up). */
+#define AI_CONFIG_IMPORT_STL_UP_AXIS "IMPORT_STL_UP_AXIS"
+
+/** @brief PLY is unitless and axis-less by spec. Default is 1.0 (meters)
+ *  and Y-up — the neutral baseline matching glTF's "no transformation
+ *  needed" semantics. Many PLY producers are academic/research pipelines
+ *  with no consistent industry convention; callers with a known
+ *  source (e.g. mm-scanner export) should override.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_PLY_UNIT_SCALE_TO_METERS "IMPORT_PLY_UNIT_SCALE_TO_METERS"
+
+/** @brief PLY up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_PLY_UP_AXIS "IMPORT_PLY_UP_AXIS"
+
+/** @brief 3MF unit-scale override. 3MF natively encodes unit
+ *  (`<model unit="...">`) — this property overrides the file-declared value.
+ *  Default behaviour is to honour the file. Property type: Float.
+ */
+#define AI_CONFIG_IMPORT_3MF_UNIT_SCALE_TO_METERS "IMPORT_3MF_UNIT_SCALE_TO_METERS"
+
+/** @brief 3MF up-axis override. 3MF spec is normatively Z-up (§3.3); this
+ *  property exists only to let callers force a different declared frame
+ *  (e.g. when downstream tooling assumes Y-up). Property type: Int.
+ *  Default value: 2 (Z-up).
+ */
+#define AI_CONFIG_IMPORT_3MF_UP_AXIS "IMPORT_3MF_UP_AXIS"
+
+/** @brief OFF (Object File Format) is unitless and axis-less by spec — it
+ *  stores raw vertex tuples with no scale or coordinate-system metadata.
+ *  Default is 1.0 (meters) and Y-up to match the glTF "no transformation
+ *  needed" baseline (and to mirror the PLY default). Callers with a known
+ *  producer should override.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_OFF_UNIT_SCALE_TO_METERS "IMPORT_OFF_UNIT_SCALE_TO_METERS"
+
+/** @brief OFF up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_OFF_UP_AXIS "IMPORT_OFF_UP_AXIS"
+
+/** @brief AMF natively encodes unit on `<amf unit="...">` (AMF Standard 1.2
+ *  §3.1). This property overrides the file-declared value when set. AMF does
+ *  not normatively pin a coordinate system; the importer defaults to +Z up
+ *  to match 3D-printing convention shared with STL and 3MF.
+ *  Property type: Float.
+ */
+#define AI_CONFIG_IMPORT_AMF_UNIT_SCALE_TO_METERS "IMPORT_AMF_UNIT_SCALE_TO_METERS"
+
+/** @brief AMF up-axis override. Property type: Int. Default value: 2 (Z-up). */
+#define AI_CONFIG_IMPORT_AMF_UP_AXIS "IMPORT_AMF_UP_AXIS"
+
+/** @brief X3D / X3DV / VRML default length unit is the metre per
+ *  ISO/IEC 19775-1 Part 1 §3, optionally overridden by
+ *  `<unit category="length" conversionFactor="N"/>` in the X3D `<head>`.
+ *  This property overrides both the file-declared value and the spec
+ *  default of 1.0 (meters per source unit) when set. Affects all
+ *  formats handled by the X3D importer chain: x3d, x3dv, wrl (the WRL
+ *  path is rewritten through VrmlConverter into X3D XML before parsing,
+ *  so the same contract applies).
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_X3D_UNIT_SCALE_TO_METERS "IMPORT_X3D_UNIT_SCALE_TO_METERS"
+
+/** @brief X3D / X3DV / VRML up-axis override. The X3D specification fixes
+ *  the world coordinate system to Y-up right-handed; this property exists
+ *  for callers consuming non-conformant content that needs reinterpretation.
+ *  Property type: Int. Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_X3D_UP_AXIS "IMPORT_X3D_UP_AXIS"
+
+/** @brief XGL / ZGL files do not declare a normative scene-level unit or
+ *  world up-axis (`<up>`/`<forward>` are per-object transform vectors, not
+ *  a world frame), so the importer defaults to 1.0 m and Y-up to match the
+ *  other unitless XML formats. Override when importing engineering content
+ *  that originated in a different convention.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_XGL_UNIT_SCALE_TO_METERS "IMPORT_XGL_UNIT_SCALE_TO_METERS"
+
+/** @brief XGL up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_XGL_UP_AXIS "IMPORT_XGL_UP_AXIS"
+
+/** @brief NFF (Eric Haines, "The Standard Procedural Database") and Sense8
+ *  NFF2 are unitless and axis-less by spec — coordinates are raw floats with
+ *  no declared scale and no world up-axis. Default to 1.0 m and Y-up to
+ *  match the OFF / PLY baseline. Override for known-producer content.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_NFF_UNIT_SCALE_TO_METERS "IMPORT_NFF_UNIT_SCALE_TO_METERS"
+
+/** @brief NFF up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_NFF_UP_AXIS "IMPORT_NFF_UP_AXIS"
+
+/** @brief OpenGEX (.ogex) source-unit override.
+ *
+ *  OpenGEX 2.0 §6 (Metric) defines a `distance` Metric that declares the
+ *  number of metres per source unit (default 1.0). Files that omit Metric
+ *  fall back to that default. This property lets callers override the
+ *  effective unit before normalisation; values <= 0 are rejected.
+ *
+ *  Property type: Float. Default value: file-declared distance, else 1.0.
+ */
+#define AI_CONFIG_IMPORT_OGEX_UNIT_SCALE_TO_METERS "IMPORT_OGEX_UNIT_SCALE_TO_METERS"
+
+/** @brief OpenGEX up-axis override.
+ *
+ *  OpenGEX 2.0 §6 (Metric) defines an `up` Metric ("y" or "z", default
+ *  "z"). Set this property to override the file-declared / spec-default
+ *  axis. Property type: Int (0=X, 1=Y, 2=Z). Default: 2 (Z-up).
+ */
+#define AI_CONFIG_IMPORT_OGEX_UP_AXIS "IMPORT_OGEX_UP_AXIS"
+
+/** @brief Ogre (.mesh / .mesh.xml) source-unit override.
+ *
+ *  Ogre's mesh container has no scene-level distance declaration; the
+ *  Ogre engine treats coordinates as meters and Y-up by convention. This
+ *  property lets callers override the default unit on a per-import basis.
+ *  Property type: Float. Default value: 1.0 (meters).
+ */
+#define AI_CONFIG_IMPORT_OGRE_UNIT_SCALE_TO_METERS "IMPORT_OGRE_UNIT_SCALE_TO_METERS"
+
+/** @brief Ogre up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_OGRE_UP_AXIS "IMPORT_OGRE_UP_AXIS"
+
+/** @brief COB / TrueSpace source-unit override.
+ *
+ *  COB files declare a per-Node `Unit` chunk that records the scale
+ *  required to take that node's local coordinates into the metric system
+ *  (cf. COBScene.h `Node::unit_scale`). The importer surfaces the first
+ *  top-level node's `unit_scale` as the scene-level UnitScaleToMeters,
+ *  defaulting to 1.0 when no Unit chunk was present. Use this property
+ *  to override that resolved value at import time.
+ *  Property type: Float. Default value: file-declared unit, else 1.0.
+ */
+#define AI_CONFIG_IMPORT_COB_UNIT_SCALE_TO_METERS "IMPORT_COB_UNIT_SCALE_TO_METERS"
+
+/** @brief COB up-axis override. Property type: Int. Default value: 1 (Y-up). */
+#define AI_CONFIG_IMPORT_COB_UP_AXIS "IMPORT_COB_UP_AXIS"
+
+/** @brief MD5 (Doom 3) source-unit override.
+ *
+ *  MD5 has no spec-level distance unit. The importer defaults to 1.0
+ *  (one unit per metre); set this property to override the unit.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_MD5_UNIT_SCALE_TO_METERS "IMPORT_MD5_UNIT_SCALE_TO_METERS"
+
+/** @brief MD5 up-axis override.
+ *
+ *  The MD5 importer rotates the source scene by +90° about X so the
+ *  emitted scene is Y-up. The contract therefore declares UpAxis=1 by
+ *  default. Use this property to declare a different post-rotation axis
+ *  if the producer's convention differs.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_MD5_UP_AXIS "IMPORT_MD5_UP_AXIS"
+
+/** @brief AC3D source-unit override.
+ *
+ *  AC3D files do not declare a scene-level distance unit. The de-facto
+ *  convention used by the AC3D editor and downstream consumers is one
+ *  unit per metre, which is what the importer records by default.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_AC_UNIT_SCALE_TO_METERS "IMPORT_AC_UNIT_SCALE_TO_METERS"
+
+/** @brief AC3D up-axis override.
+ *
+ *  AC3D's spec does not declare an up axis but the editor and downstream
+ *  tools (FlightGear, TORCS) treat AC3D scenes as Y-up.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_AC_UP_AXIS "IMPORT_AC_UP_AXIS"
+
+/** @brief OBJ source-unit override.
+ *
+ *  Wavefront OBJ files do not declare a scene-level distance unit. The
+ *  de-facto convention used by Wavefront, Maya and most modern
+ *  exporters is one unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_OBJ_UNIT_SCALE_TO_METERS "IMPORT_OBJ_UNIT_SCALE_TO_METERS"
+
+/** @brief OBJ up-axis override.
+ *
+ *  Wavefront OBJ does not declare an up axis. Maya / Wavefront / glTF
+ *  pipelines treat OBJ scenes as Y-up.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_OBJ_UP_AXIS "IMPORT_OBJ_UP_AXIS"
+
+/** @brief COLLADA source-unit override.
+ *
+ *  COLLADA's `<unit>` element declares meters-per-unit; the importer
+ *  bakes that scale into the root node by default, so the canonical
+ *  scene is metres. Override to a different unit value to override the
+ *  recorded contract (e.g. when AI_CONFIG_IMPORT_COLLADA_IGNORE_UNIT_SIZE
+ *  has been set).
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_COLLADA_UNIT_SCALE_TO_METERS "IMPORT_COLLADA_UNIT_SCALE_TO_METERS"
+
+/** @brief COLLADA up-axis override.
+ *
+ *  COLLADA's `<up_axis>` element declares the source up axis; the
+ *  importer rotates the scene to Y-up by default so the canonical
+ *  contract is Y-up.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_COLLADA_UP_AXIS "IMPORT_COLLADA_UP_AXIS"
+
+/** @brief 3DS source-unit override.
+ *
+ *  3DS files have no native distance-unit declaration; the MASTERSCALE
+ *  chunk is a relative scaling factor (already baked by the importer)
+ *  and not an absolute meters-per-unit ratio. The de-facto convention
+ *  used by 3D Studio Max and downstream consumers is one unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_3DS_UNIT_SCALE_TO_METERS "IMPORT_3DS_UNIT_SCALE_TO_METERS"
+
+/** @brief 3DS up-axis override.
+ *
+ *  3DS is normatively Z-up (legacy 3D Studio convention). The importer
+ *  applies no axis flip, so the canonical scene up-axis is Z (UpAxis=2).
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 2 (Z-up).
+ */
+#define AI_CONFIG_IMPORT_3DS_UP_AXIS "IMPORT_3DS_UP_AXIS"
+
+/** @brief DXF source-unit override.
+ *
+ *  DXF / AutoCAD does not have a scene-level distance unit that the
+ *  importer parses (the optional INSUNITS HEADER variable is skipped).
+ *  The de-facto convention used by AutoCAD's INSUNITS=4 default and
+ *  most DXF exporters is millimetres.
+ *  Property type: Float. Default value: 0.001.
+ */
+#define AI_CONFIG_IMPORT_DXF_UNIT_SCALE_TO_METERS "IMPORT_DXF_UNIT_SCALE_TO_METERS"
+
+/** @brief DXF up-axis override.
+ *
+ *  AutoCAD itself is Z-up, but the DXF importer applies an
+ *  AutoCAD->Assimp conversion rotation to the scene root that moves +Z
+ *  to +Y, so the canonical post-import scene is Y-up.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_DXF_UP_AXIS "IMPORT_DXF_UP_AXIS"
+
+/** @brief ASE source-unit override.
+ *
+ *  ASE files have no scene-level distance unit declaration. The
+ *  de-facto convention used by 3D Studio Max ASE exporters is one
+ *  unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_ASE_UNIT_SCALE_TO_METERS "IMPORT_ASE_UNIT_SCALE_TO_METERS"
+
+/** @brief ASE up-axis override.
+ *
+ *  3D Studio Max itself is Z-up, but the ASE importer applies an
+ *  axis-conversion rotation that moves +Z to +Y, so the canonical
+ *  post-import scene is Y-up.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_ASE_UP_AXIS "IMPORT_ASE_UP_AXIS"
+
+/** @brief LWO source-unit override.
+ *
+ *  LightWave / Modo files have no scene-level distance unit declaration
+ *  in the LWO data; the LightWave application defaults to SI metres.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_LWO_UNIT_SCALE_TO_METERS "IMPORT_LWO_UNIT_SCALE_TO_METERS"
+
+/** @brief LWO up-axis override.
+ *
+ *  LightWave is left-handed Y-up; the importer applies handedness
+ *  conversion (MakeLeftHandedProcess + FlipWindingOrderProcess) but
+ *  the up-axis remains Y after these conversions.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_LWO_UP_AXIS "IMPORT_LWO_UP_AXIS"
+
+/** @brief X (Direct3D / DirectX) source-unit override.
+ *
+ *  .x files have no scene-level distance unit declaration; the de-facto
+ *  convention used by the Direct3D SDK sample assets is one unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_X_UNIT_SCALE_TO_METERS "IMPORT_X_UNIT_SCALE_TO_METERS"
+
+/** @brief X (Direct3D / DirectX) up-axis override.
+ *
+ *  .x files are natively left-handed Y-up; the importer applies handedness
+ *  conversion (MakeLeftHandedProcess + FlipWindingOrderProcess) but the
+ *  up-axis remains Y after these conversions.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_X_UP_AXIS "IMPORT_X_UP_AXIS"
+
+/** @brief SMD source-unit override.
+ *
+ *  SMD (Valve Source Engine StudioMDL Data) files have no scene-level
+ *  distance unit declaration; Source itself uses inches but assets are
+ *  routinely authored with arbitrary scaling, so the contract default
+ *  is one unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_SMD_UNIT_SCALE_TO_METERS "IMPORT_SMD_UNIT_SCALE_TO_METERS"
+
+/** @brief SMD up-axis override.
+ *
+ *  SMD is natively right-handed Z-up (Source engine convention) and the
+ *  importer applies no axis conversion, so the canonical scene up-axis
+ *  is Z.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 2 (Z-up).
+ */
+#define AI_CONFIG_IMPORT_SMD_UP_AXIS "IMPORT_SMD_UP_AXIS"
+
+/** @brief BVH source-unit override.
+ *
+ *  BVH (Biovision Hierarchical Data) motion capture files have no
+ *  scene-level distance unit declaration; the de-facto convention used
+ *  by motion capture tooling is one unit per metre.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_BVH_UNIT_SCALE_TO_METERS "IMPORT_BVH_UNIT_SCALE_TO_METERS"
+
+/** @brief BVH up-axis override.
+ *
+ *  BVH is natively right-handed Y-up; the importer applies no axis
+ *  conversion, so the canonical scene up-axis is Y.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_BVH_UP_AXIS "IMPORT_BVH_UP_AXIS"
+
+/** @brief IFC source-unit override.
+ *
+ *  IFC files declare a global length unit via IfcSIUnit on the
+ *  IfcUnitAssignment associated with IfcProject. The Web-IFC bridge
+ *  used by this importer does not yet surface that value to Assimp, so
+ *  the contract defaults to one metre and exposes this property so
+ *  consumers can supply a known scale when the source file uses a
+ *  different unit (e.g. millimetres).
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_IFC_UNIT_SCALE_TO_METERS "IMPORT_IFC_UNIT_SCALE_TO_METERS"
+
+/** @brief IFC up-axis override.
+ *
+ *  IFC is normatively right-handed Z-up (BuildingSMART convention) and
+ *  the Web-IFC bridge applies no axis conversion, so the canonical
+ *  scene up-axis is Z.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 2 (Z-up).
+ */
+#define AI_CONFIG_IMPORT_IFC_UP_AXIS "IMPORT_IFC_UP_AXIS"
+
+/** @brief USD source-unit override.
+ *
+ *  USD layers declare `metersPerUnit` on the root layer metadata; the
+ *  importer reflects the authored value (or the USD default of 1.0
+ *  metre when omitted) verbatim. This property lets callers force a
+ *  specific scale when the layer omits the metadata or overrides need
+ *  to be applied for downstream pipelines.
+ *  Property type: Float. Default value: 1.0.
+ */
+#define AI_CONFIG_IMPORT_USD_UNIT_SCALE_TO_METERS "IMPORT_USD_UNIT_SCALE_TO_METERS"
+
+/** @brief USD up-axis override.
+ *
+ *  USD layers declare `upAxis` on the root layer metadata; the importer
+ *  reflects the authored value verbatim and applies no axis conversion.
+ *  USD only permits Y-up or Z-up; callers can use this override to
+ *  force a specific axis when the layer omits the metadata.
+ *  Property type: Int (0=X, 1=Y, 2=Z). Default value: 1 (Y-up).
+ */
+#define AI_CONFIG_IMPORT_USD_UP_AXIS "IMPORT_USD_UP_AXIS"
+
 // ---------- All the Export defines ------------
 
 /** @brief Specifies the xfile use double for real values of float

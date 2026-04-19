@@ -77,6 +77,11 @@ public:
     bool CanRead( const std::string& pFile, IOSystem* pIOHandler,
         bool CheckSig) const override;
 
+    // -------------------------------------------------------------------
+    /** Captures the active importer instance so InternReadFile can read
+     *  the unit-axis contract overrides via Assimp::Importer properties. */
+    void SetupProperties(const Importer *pImp) override;
+
 protected:
     // -------------------------------------------------------------------
     /** Return importer meta information.
@@ -141,6 +146,9 @@ protected:
 protected:
     /// Buffer to hold the loaded file
     std::vector<char> mBuffer;
+
+    /// Importer instance used to look up unit-axis contract overrides.
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

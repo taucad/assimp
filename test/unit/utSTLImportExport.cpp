@@ -42,14 +42,102 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/material.h>
+#include <assimp/mesh.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace Assimp;
+
+namespace {
+
+// Author an in-memory single-mesh box scene. The caller owns the returned
+// scene and must `delete` it; aiScene's destructor deletes the meshes,
+// materials, and nodes it owns.
+aiScene *makeStlBoxScene(const aiVector3D &halfExtents) {
+    const float x = halfExtents.x, y = halfExtents.y, z = halfExtents.z;
+    const std::array<aiVector3D, 8> v = {
+        aiVector3D(-x, -y, -z), aiVector3D(+x, -y, -z), aiVector3D(+x, +y, -z), aiVector3D(-x, +y, -z),
+        aiVector3D(-x, -y, +z), aiVector3D(+x, -y, +z), aiVector3D(+x, +y, +z), aiVector3D(-x, +y, +z)
+    };
+    const std::array<std::array<unsigned int, 3>, 12> t = { {
+        { 0, 2, 1 }, { 0, 3, 2 },
+        { 4, 5, 6 }, { 4, 6, 7 },
+        { 0, 1, 5 }, { 0, 5, 4 },
+        { 3, 7, 6 }, { 3, 6, 2 },
+        { 0, 4, 7 }, { 0, 7, 3 },
+        { 1, 2, 6 }, { 1, 6, 5 }
+    } };
+
+    auto *scene = new aiScene();
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    auto *mesh = new aiMesh();
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+    mesh->mMaterialIndex = 0;
+    mesh->mName = aiString("AuthoredBox");
+    mesh->mNumVertices = static_cast<unsigned int>(v.size());
+    mesh->mVertices = new aiVector3D[v.size()];
+    mesh->mNormals = new aiVector3D[v.size()];
+    for (size_t i = 0; i < v.size(); ++i) {
+        mesh->mVertices[i] = v[i];
+        // Normals point radially out from the origin so we can detect a
+        // rotation having been applied.
+        aiVector3D n = v[i];
+        n.Normalize();
+        mesh->mNormals[i] = n;
+    }
+    mesh->mNumFaces = static_cast<unsigned int>(t.size());
+    mesh->mFaces = new aiFace[t.size()];
+    for (size_t i = 0; i < t.size(); ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3];
+        mesh->mFaces[i].mIndices[0] = t[i][0];
+        mesh->mFaces[i].mIndices[1] = t[i][1];
+        mesh->mFaces[i].mIndices[2] = t[i][2];
+    }
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    scene->mMeshes[0] = mesh;
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mName = aiString("Root");
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1];
+    scene->mRootNode->mMeshes[0] = 0;
+    return scene;
+}
+
+aiVector3D meshExtentStl(const aiMesh *mesh) {
+    aiVector3D mn(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                  std::numeric_limits<float>::max());
+    aiVector3D mx(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                  std::numeric_limits<float>::lowest());
+    for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+        mn.x = std::min(mn.x, mesh->mVertices[i].x);
+        mn.y = std::min(mn.y, mesh->mVertices[i].y);
+        mn.z = std::min(mn.z, mesh->mVertices[i].z);
+        mx.x = std::max(mx.x, mesh->mVertices[i].x);
+        mx.y = std::max(mx.y, mesh->mVertices[i].y);
+        mx.z = std::max(mx.z, mesh->mVertices[i].z);
+    }
+    return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+} // namespace
 
 class utSTLImporterExporter : public AbstractImportExportBase {
 public:
@@ -87,6 +175,66 @@ TEST_F(utSTLImporterExporter, test_with_two_solids) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/STL/triangle_with_two_solids.stl", aiProcess_ValidateDataStructure);
     EXPECT_NE(nullptr, scene);
+}
+
+// -----------------------------------------------------------------------------
+// Unit/axis contract: STL importer must declare scene metadata so downstream
+// exporters can normalise to their own spec. STL is unitless + axis-less by
+// spec; defaults are mm + Z-up to match the dominant 3D-printing convention.
+// -----------------------------------------------------------------------------
+
+TEST_F(utSTLImporterExporter, contractDefaultsAreMmAndZUp) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/STL/Spider_ascii.stl", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double unit = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, unit))
+        << "STL importer must declare AI_METADATA_UNIT_SCALE_TO_METERS";
+    EXPECT_DOUBLE_EQ(0.001, unit) << "STL default unit must be mm";
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis))
+        << "STL importer must declare AI_METADATA_UP_AXIS";
+    EXPECT_EQ(2, upAxis) << "STL default up-axis must be Z (2)";
+}
+
+TEST_F(utSTLImporterExporter, contractUnitScaleOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyFloat(AI_CONFIG_IMPORT_STL_UNIT_SCALE_TO_METERS, 0.0254f);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/STL/Spider_ascii.stl", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    double unit = 0.0;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UNIT_SCALE_TO_METERS, unit));
+    EXPECT_NEAR(0.0254, unit, 1e-6);
+}
+
+TEST_F(utSTLImporterExporter, contractUpAxisOverrideRespected) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_STL_UP_AXIS, 1);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/STL/Spider_ascii.stl", 0);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_NE(nullptr, scene->mMetaData);
+
+    int32_t upAxis = -1;
+    ASSERT_TRUE(scene->mMetaData->Get(AI_METADATA_UP_AXIS, upAxis));
+    EXPECT_EQ(1, upAxis);
+}
+
+TEST_F(utSTLImporterExporter, contractInvalidUpAxisOverrideFailsImport) {
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_STL_UP_AXIS, 7);
+    const aiScene *scene = importer.ReadFile(
+        ASSIMP_TEST_MODELS_DIR "/STL/Spider_ascii.stl", 0);
+    EXPECT_EQ(nullptr, scene)
+        << "Out-of-range up-axis override must fail the import";
+    EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("UP_AXIS"));
 }
 
 TEST_F(utSTLImporterExporter, test_with_empty_solid) {
@@ -173,6 +321,128 @@ TEST_F(utSTLImporterExporter, test_export_pointclouds) {
     // Cleanup, delete the exported file
     ::remove(stlFileName);
     delete properties;
+}
+
+// -----------------------------------------------------------------------------
+// Unit/axis contract: STL exporter bakes a single linear transform into mesh
+// vertices/normals so the output file matches STL's de-facto spec target of
+// millimetres + Z-up. Behaviour gated on the contract opt-in
+// (`AI_METADATA_UNIT_SCALE_TO_METERS`) so legacy callers stay byte-identical.
+// -----------------------------------------------------------------------------
+
+TEST_F(utSTLImporterExporter, exportSTLBakesUnitScaleWhenSourceUnitDiffersFromMm) {
+    // 0.5m half-extent box authored as metres → re-imported STL must measure
+    // 1000mm extent on every axis (metres → millimetres).
+    aiScene *scene = makeStlBoxScene(aiVector3D(0.5f, 0.5f, 0.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0); // metres
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2)); // already Z-up
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "stl", "ut_stl_unit_m.stl"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_stl_unit_m.stl", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentStl(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(1000.0f, extent.x, 1e-3f);
+    EXPECT_NEAR(1000.0f, extent.y, 1e-3f);
+    EXPECT_NEAR(1000.0f, extent.z, 1e-3f);
+    std::remove("ut_stl_unit_m.stl");
+}
+
+TEST_F(utSTLImporterExporter, exportSTLBakesAxisRotationWhenSourceIsYUp) {
+    // Tall box on +Y (Y-up source), extents 2 x 10 x 2 mm. After Y→Z bake the
+    // tall axis must move from +Y to +Z so the slicer drops it on the bed
+    // standing upright.
+    aiScene *scene = makeStlBoxScene(aiVector3D(1.0f, 5.0f, 1.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-3); // already mm
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1)); // Y-up source
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "stl", "ut_stl_axis_yup.stl"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_stl_axis_yup.stl", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentStl(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.z, 1e-4f);
+    std::remove("ut_stl_axis_yup.stl");
+}
+
+TEST_F(utSTLImporterExporter, exportSTLIsIdentityWhenSourceAlreadyMmZUp) {
+    // Source frame matches STL spec (mm + Z-up) → identity short-circuit;
+    // round-trip must reproduce the source extents to within float epsilon.
+    aiScene *scene = makeStlBoxScene(aiVector3D(2.5f, 7.5f, 2.5f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-3);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(2));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "stl", "ut_stl_identity.stl"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_stl_identity.stl", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentStl(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(5.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(15.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(5.0f, extent.z, 1e-5f);
+    std::remove("ut_stl_identity.stl");
+}
+
+TEST_F(utSTLImporterExporter, exportSTLIsIdentityWhenContractMetadataAbsent) {
+    // No `UnitScaleToMeters` key on the scene → unmigrated/legacy caller; the
+    // exporter must produce byte-for-byte identical output as before the
+    // contract landed (no rescale, no rotation).
+    aiScene *scene = makeStlBoxScene(aiVector3D(3.0f, 3.0f, 3.0f));
+    ASSERT_EQ(nullptr, scene->mMetaData);
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "stl", "ut_stl_no_meta.stl"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_stl_no_meta.stl", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentStl(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(6.0f, extent.x, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.y, 1e-5f);
+    EXPECT_NEAR(6.0f, extent.z, 1e-5f);
+    std::remove("ut_stl_no_meta.stl");
+}
+
+TEST_F(utSTLImporterExporter, exportSTLBinaryHonorsContractTransform) {
+    // Same axis bake as the ASCII test, but exercising the binary writer to
+    // guarantee both write paths share the bake.
+    aiScene *scene = makeStlBoxScene(aiVector3D(1.0f, 5.0f, 1.0f));
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1e-3);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "stlb", "ut_stl_axis_yup_bin.stl"));
+    delete scene;
+
+    Assimp::Importer importer2;
+    const aiScene *roundtrip = importer2.ReadFile("ut_stl_axis_yup_bin.stl", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_GE(roundtrip->mNumMeshes, 1u);
+    aiVector3D extent = meshExtentStl(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(2.0f, extent.x, 1e-4f);
+    EXPECT_NEAR(2.0f, extent.y, 1e-4f);
+    EXPECT_NEAR(10.0f, extent.z, 1e-4f);
+    std::remove("ut_stl_axis_yup_bin.stl");
 }
 
 #endif

@@ -47,7 +47,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // internal headers
 #include "PlyLoader.h"
+#include "Common/UnitAxisContract.h"
 #include <assimp/IOStreamBuffer.h>
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
 #include <assimp/scene.h>
 #include <assimp/IOSystem.hpp>
@@ -123,6 +125,12 @@ PLYImporter::~PLYImporter() {
 bool PLYImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /*checkSig*/) const {
     static const char *tokens[] = { "ply" };
     return SearchFileHeaderForToken(pIOHandler, pFile, tokens, AI_COUNT_OF(tokens));
+}
+
+// ------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
+void PLYImporter::SetupProperties(const Importer *pImp) {
+    mImporter = pImp;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -260,6 +268,14 @@ void PLYImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
     for (unsigned int i = 0; i < pScene->mRootNode->mNumMeshes; ++i) {
         pScene->mRootNode->mMeshes[i] = i;
     }
+
+    // Declare the post-import vertex frame on the scene. PLY is unitless and
+    // axis-less by spec; defaults are 1.0 (m) + Y-up — the neutral baseline
+    // matching glTF semantics. Caller can override via
+    // AI_CONFIG_IMPORT_PLY_UNIT_SCALE_TO_METERS / AI_CONFIG_IMPORT_PLY_UP_AXIS.
+    const ContractDefaults plyDefaults{1.0, 1};
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "PLY", plyDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "PLY");
 }
 
 static constexpr ai_uint NotSet = 0xFFFFFFFF;

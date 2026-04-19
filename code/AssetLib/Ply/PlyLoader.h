@@ -92,6 +92,12 @@ protected:
     const aiImporterDesc *GetInfo() const override;
 
     // -------------------------------------------------------------------
+    /** Captures the Importer back-reference so InternReadFile can
+     * resolve the unit/axis contract via `resolveImporterContract`.
+     */
+    void SetupProperties(const Importer *pImp) override;
+
+    // -------------------------------------------------------------------
     /** Imports the given file into the given scene structure.
     * See BaseImporter::InternReadFile() for details
     */
@@ -124,6 +130,7 @@ private:
     unsigned char *mBuffer;
     PLY::DOM *pcDOM;
     aiMesh *mGeneratedMesh;
+    const Importer *mImporter = nullptr;
 };
 
 } // end of namespace Assimp

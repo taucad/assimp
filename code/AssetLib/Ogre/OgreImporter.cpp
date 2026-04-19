@@ -44,8 +44,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "OgreImporter.h"
 #include "OgreBinarySerializer.h"
 #include "OgreXmlSerializer.h"
+#include "Common/UnitAxisContract.h"
+#include <assimp/commonMetaData.h>
 #include <assimp/importerdesc.h>
 #include <assimp/Importer.hpp>
+#include <assimp/metadata.h>
 #include <memory>
 
 static constexpr aiImporterDesc desc = {
@@ -71,6 +74,7 @@ const aiImporterDesc *OgreImporter::GetInfo() const {
 void OgreImporter::SetupProperties(const Importer *pImp) {
     m_userDefinedMaterialLibFile = pImp->GetPropertyString(AI_CONFIG_IMPORT_OGRE_MATERIAL_FILE, "Scene.material");
     m_detectTextureTypeFromFilename = pImp->GetPropertyBool(AI_CONFIG_IMPORT_OGRE_TEXTURETYPE_FROM_FILENAME, false);
+    mImporter = pImp;
 }
 
 bool OgreImporter::CanRead(const std::string &pFile, Assimp::IOSystem *pIOHandler, bool /*checkSig*/) const {
@@ -106,6 +110,14 @@ void OgreImporter::InternReadFile(const std::string &pFile, aiScene *pScene, Ass
 
         // Convert to Assimp
         mesh->ConvertToAssimpScene(pScene);
+
+        // Ogre's mesh file format is a unitless game-engine container — it
+        // carries no scene-level distance scale or up-axis declaration.
+        // Ogre engine convention is meters and Y-up. Record that on the
+        // scene so downstream pipelines have an unambiguous reference.
+        const ContractDefaults ogreDefaults{ 1.0, 1 };
+        const ContractDefaults resolved = resolveImporterContract(mImporter, "OGRE", ogreDefaults);
+        writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "Ogre");
         return;
     }
     // XML .mesh.xml import
@@ -127,6 +139,12 @@ void OgreImporter::InternReadFile(const std::string &pFile, aiScene *pScene, Ass
 
     // Convert to Assimp
     mesh->ConvertToAssimpScene(pScene);
+
+    // .mesh.xml is the same format as binary .mesh, just XML-encoded —
+    // mirror the contract write so both flavours behave identically.
+    const ContractDefaults ogreDefaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "OGRE", ogreDefaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "Ogre");
 }
 
 } // namespace Ogre

@@ -42,6 +42,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_COLLADA_EXPORTER
 
 #include "ColladaExporter.h"
+#include "Common/UnitAxisContract.h"
 
 #include <assimp/Bitmap.h>
 #include <assimp/ColladaMetaData.h>
@@ -61,6 +62,26 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 
 namespace Assimp {
+
+namespace {
+// COLLADA spec: distances are metres (`<unit meter="1"/>`), and the up axis
+// is one of X_UP / Y_UP / Z_UP (`<up_axis>...</up_axis>`). The companion
+// importer normalises every authored frame to (1.0 m, Y-up) post-import; the
+// exporter targets the same frame so same-format round-trips are bitwise
+// identity. Behaviour gated on `AI_METADATA_UNIT_SCALE_TO_METERS` so legacy
+// callers stay byte-identical.
+constexpr double kColladaTargetUnitToMeters = 1.0;
+constexpr int32_t kColladaTargetUpAxis = 1; // Y-up
+
+// `bakeContractTransformIntoMeshes` mutates `pScene->mMeshes[*]` in place
+// (positions + normals + tangents + anim-mesh targets), matching the upstream
+// glTF2/STL/PLY/OBJ exporters. The exporter API hands us a `const aiScene*`
+// for legacy reasons; cast away const at the bake boundary only.
+void bakeColladaContract(const aiScene *pScene) {
+    bakeContractTransformIntoMeshes(const_cast<aiScene *>(pScene),
+                                    kColladaTargetUnitToMeters, kColladaTargetUpAxis);
+}
+} // namespace
 
 static const aiNode *findSkeletonRootNode(const aiScene *scene, const aiMesh *mesh) {
     std::set<const aiNode *> topParentBoneNodes;
@@ -98,6 +119,8 @@ static const aiNode *findSkeletonRootNode(const aiScene *scene, const aiMesh *me
 void ExportSceneCollada(const char *pFile, IOSystem *pIOSystem, const aiScene *pScene, const ExportProperties * /*pProperties*/) {
     std::string path = DefaultIOSystem::absolutePath(std::string(pFile));
     std::string file = DefaultIOSystem::completeBaseName(std::string(pFile));
+
+    bakeColladaContract(pScene);
 
     // invoke the exporter
     ColladaExporter iDoTheExportThing(pScene, pIOSystem, path, file);

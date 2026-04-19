@@ -58,6 +58,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tuple>
 
 // internal headers
+#include "Common/UnitAxisContract.h"
 #include "SMDLoader.h"
 
 #ifndef _MSC_VER
@@ -110,6 +111,7 @@ const aiImporterDesc* SMDImporter::GetInfo () const {
 // ------------------------------------------------------------------------------------------------
 // Setup configuration properties
 void SMDImporter::SetupProperties(const Importer* pImp) {
+    mImporter = pImp;
     // The
     // AI_CONFIG_IMPORT_SMD_KEYFRAME option overrides the
     // AI_CONFIG_IMPORT_GLOBAL_KEYFRAME option.
@@ -178,6 +180,21 @@ void SMDImporter::InternReadFile( const std::string& pFile, aiScene* scene, IOSy
     if ((pScene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) && !noSkeletonMesh) {
         SkeletonMeshBuilder skeleton(pScene);
     }
+
+    // Record the unit/up-axis contract.
+    //
+    // SMD (Valve Source Engine StudioMDL Data) files have no scene-level
+    // distance unit declaration; the de-facto convention is one unit per
+    // metre. Source itself uses inches (~0.0254 m) but assets are
+    // routinely authored with arbitrary scaling, so we expose the
+    // override channel and default to metres.
+    //
+    // SMD is natively right-handed Z-up (Source convention) and the
+    // importer applies no axis conversion, so the canonical scene
+    // up-axis is Z.
+    const ContractDefaults defaults{ 1.0, 2 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "SMD", defaults);
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "SMD");
 }
 
 // ------------------------------------------------------------------------------------------------
