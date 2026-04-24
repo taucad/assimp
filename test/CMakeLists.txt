@@ -297,6 +297,11 @@ ENDIF()
 
 target_link_libraries( unit assimp ${platform_libs} )
 
+# Match the ASSIMP_USE_LIB3MF definition that code/CMakeLists.txt sets when
+# building the assimp library, so unit tests can include the lib3mf bridge
+# header directly (e.g. utD3MFImportExport.cpp's polygon-face bridge test).
+target_compile_definitions( unit PRIVATE ASSIMP_USE_LIB3MF )
+
 # Configure Web-IFC dependencies for unit tests if enabled
 IF (ASSIMP_BUILD_IFC_IMPORTER)
     WEBIFC_PARAM_SETTER(unit)

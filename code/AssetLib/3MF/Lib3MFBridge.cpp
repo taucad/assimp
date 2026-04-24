@@ -452,6 +452,11 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             vertices[v].m_Coordinates[2] = p.z;
         }
 
+        // R3: build the triangle vector via push_back so non-triangle faces
+        // are silently skipped instead of leaving zero-initialized degenerate
+        // slots. lib3mf rejects degenerate triangles and would throw on any
+        // mesh containing a non-triangle face if we left the old indexed
+        // assignment (see docs/research/3mf-export-rendering-artifacts.md R3).
         std::vector<Lib3MF::sTriangle> triangles;
         triangles.reserve(mesh->mNumFaces);
         for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
@@ -459,7 +464,7 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             if (face.mNumIndices != 3) {
                 continue;
             }
-            Lib3MF::sTriangle tri;
+            Lib3MF::sTriangle tri{};
             tri.m_Indices[0] = face.mIndices[0];
             tri.m_Indices[1] = face.mIndices[1];
             tri.m_Indices[2] = face.mIndices[2];
@@ -523,6 +528,24 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
     checkResult(
         lib3mf_model_querywriter(model.as<Lib3MF_Model>(), "3mf", writer.ptr()),
         model.get(), "Failed to create 3MF writer"
+    );
+
+    // R1: configure lib3mf decimal precision via the writer. lib3mf's default
+    // is 6 decimal digits with truncation toward zero, which loses ~1µm of
+    // asymmetric precision per coordinate and creates nm-scale gaps between
+    // independent <object> mesh boundaries (visible in slicers as missing
+    // fragments). Default to 9 (preserves full float precision); callers may
+    // override via the "3MF_EXPORT_DECIMAL_PRECISION" ExportProperties key.
+    // Valid range is [1, 16]; out-of-range values cause lib3mf to throw,
+    // which we propagate as DeadlyExportError via checkResult.
+    // See docs/research/3mf-export-rendering-artifacts.md (R1).
+    const Lib3MF_uint32 precision = pProperties != nullptr
+        ? static_cast<Lib3MF_uint32>(
+            pProperties->GetPropertyInteger("3MF_EXPORT_DECIMAL_PRECISION", 9))
+        : 9u;
+    checkResult(
+        lib3mf_writer_setdecimalprecision(writer.as<Lib3MF_Writer>(), precision),
+        writer.get(), "Failed to set 3MF decimal precision"
     );
 
     Lib3MF_uint64 neededSize = 0;

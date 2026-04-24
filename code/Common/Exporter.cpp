@@ -225,11 +225,27 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 #ifndef ASSIMP_BUILD_NO_3MF_EXPORTER
 	// 3MF requires triangulated meshes (Core Spec §4.1) and a flattened scene
 	// graph (no per-build-item world transforms in our pipeline — vertices are
-	// baked in `Lib3MFBridge`). Enforce both as default pp flags so callers using
-	// the top-level `Exporter::Export` get spec-compliant output without having
-	// to know the bridge's prerequisites.
+	// baked in `Lib3MFBridge`). Enforce both as default pp flags so callers
+	// using the top-level `Exporter::Export` get spec-compliant output without
+	// having to know the bridge's prerequisites.
+	//
+	// R2 + R4 (docs/research/3mf-export-rendering-artifacts.md):
+	// JoinIdenticalVertices  — welds bit-identical duplicates within each
+	//                          aiMesh (per JoinVerticesProcess.cpp), which
+	//                          tightens vertex indices without merging meshes
+	//                          (per-mesh material/color structure preserved).
+	// FindDegenerates        — drops zero-area triangles before write so the
+	//                          R3 bridge skip path doesn't need to defend
+	//                          against runtime-introduced degeneracy.
+	// FindInvalidData        — drops NaN/Inf coordinates and meshes with
+	//                          degenerate AABBs (legitimate sub-mm CAD meshes
+	//                          still have non-zero AABBs, so this is safe).
 	exporters.emplace_back("3mf", "The 3MF-File-Format", "3mf", &ExportScene3MF,
-		aiProcess_Triangulate | aiProcess_PreTransformVertices);
+		aiProcess_Triangulate
+		| aiProcess_PreTransformVertices
+		| aiProcess_JoinIdenticalVertices
+		| aiProcess_FindDegenerates
+		| aiProcess_FindInvalidData);
 #endif
 
 #ifndef ASSIMP_BUILD_NO_PBRT_EXPORTER

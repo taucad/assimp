@@ -51,6 +51,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#ifdef ASSIMP_USE_LIB3MF
+#include "AssetLib/3MF/Lib3MFBridge.h"
+#endif
+
+#include <memory>
+#include <string>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -742,5 +748,387 @@ TEST_F(utD3MFImporterExporter, glbToThreeMfRoundtripPreservesPhysicalDimensions)
     EXPECT_NEAR(gltfExtent.y * 1000.0f, threeMfExtent.z, 1.0f);
     std::remove("ut_3mf_glb_roundtrip.3mf");
 }
+
+
+// ===== R1: lib3mf decimal precision (3MF_EXPORT_DECIMAL_PRECISION) =====
+//
+// Background: lib3mf's writer truncates vertex coordinates to N decimal digits
+// using fixed-point conversion (NOT rounding). The lib3mf default is 6, which
+// loses ~1µm of asymmetric precision and causes nm-scale gaps between separate
+// mesh objects in 3MF (visible as missing fragments in slicers like Bambu Studio).
+// The Lib3MFBridge bumps the default to 9 and exposes the lib3mf writer setting
+// via the ExportProperties key "3MF_EXPORT_DECIMAL_PRECISION".
+//
+// See docs/research/3mf-export-rendering-artifacts.md (R1).
+
+namespace {
+
+// Build a one-mesh, one-triangle scene where the first vertex carries enough
+// non-trivial decimal digits to expose lib3mf's truncation behavior. Caller
+// owns the returned scene.
+aiScene *buildSinglePrecisionVertexScene() {
+    aiScene *scene = new aiScene();
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    aiMesh *mesh = new aiMesh();
+    scene->mMeshes[0] = mesh;
+
+    mesh->mNumVertices = 3;
+    mesh->mVertices = new aiVector3D[3];
+    // Diagnostic vertex: float repr of 0.123456789 ≈ 0.12345679f.
+    // - precision=6 truncation -> "0.123456" (re-imports as 0.123456f, error ~7e-7)
+    // - precision=9 truncation -> "0.123456790" (re-imports as ~0.12345679f, error <1e-8)
+    mesh->mVertices[0] = aiVector3D(0.123456789f, 0.0f, 0.0f);
+    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
+    mesh->mVertices[2] = aiVector3D(0.0f, 1.0f, 0.0f);
+
+    mesh->mNumFaces = 1;
+    mesh->mFaces = new aiFace[1];
+    mesh->mFaces[0].mNumIndices = 3;
+    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1]{0};
+
+    return scene;
+}
+
+} // namespace
+
+TEST_F(utD3MFImporterExporter, export3MFDefaultPrecisionIs9Digits) {
+    std::unique_ptr<aiScene> scene(buildSinglePrecisionVertexScene());
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_precision_default.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath));
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+    ASSERT_GE(reimported->mNumMeshes, 1u);
+    ASSERT_GE(reimported->mMeshes[0]->mNumVertices, 1u);
+
+    const float reimportedX = reimported->mMeshes[0]->mVertices[0].x;
+    // 1e-7 tolerance: precision-6 truncation drops the seventh decimal digit
+    // (~7e-7 of error), failing this bound. Precision-9 truncation loses
+    // <1e-8, well within the bound.
+    EXPECT_NEAR(0.123456789f, reimportedX, 1e-7f);
+
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFRespectsExplicitDecimalPrecision) {
+    std::unique_ptr<aiScene> scene(buildSinglePrecisionVertexScene());
+
+    Assimp::ExportProperties props;
+    props.SetPropertyInteger("3MF_EXPORT_DECIMAL_PRECISION", 12);
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_precision_12.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath, 0u, &props));
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+    ASSERT_GE(reimported->mNumMeshes, 1u);
+    ASSERT_GE(reimported->mMeshes[0]->mNumVertices, 1u);
+
+    // 12-digit precision exceeds float's ~7 useful decimal digits, so the
+    // re-imported value is bounded by float precision (~6e-8) rather than
+    // string truncation. Asserting <1e-7 confirms the writer wrote enough
+    // digits to preserve full float precision.
+    const float reimportedX = reimported->mMeshes[0]->mVertices[0].x;
+    EXPECT_NEAR(0.123456789f, reimportedX, 1e-7f);
+
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFRejectsOutOfRangePrecision) {
+    // lib3mf's CModelWriter::SetDecimalPrecision asserts the precision is
+    // in [1, 16]; values outside that range cause it to throw, which the
+    // bridge propagates as a non-AI_SUCCESS export return.
+    {
+        std::unique_ptr<aiScene> scene(buildSinglePrecisionVertexScene());
+        Assimp::ExportProperties props;
+        props.SetPropertyInteger("3MF_EXPORT_DECIMAL_PRECISION", 0);
+        Assimp::Exporter exporter;
+        const char *outPath = "ut_3mf_precision_0.3mf";
+        EXPECT_NE(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath, 0u, &props));
+        std::remove(outPath);
+    }
+    {
+        std::unique_ptr<aiScene> scene(buildSinglePrecisionVertexScene());
+        Assimp::ExportProperties props;
+        props.SetPropertyInteger("3MF_EXPORT_DECIMAL_PRECISION", 17);
+        Assimp::Exporter exporter;
+        const char *outPath = "ut_3mf_precision_17.3mf";
+        EXPECT_NE(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath, 0u, &props));
+        std::remove(outPath);
+    }
+}
+
+// ===== R2: 3MF exporter mEnforcePP — multi-mesh structure preserved =====
+//
+// The 3MF exporter now enforces aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
+// (plus FindDegenerates / FindInvalidData defensively, see R4). JoinIdenticalVertices
+// operates per-aiMesh (see PostProcessing/JoinVerticesProcess.cpp) so it MUST NOT
+// merge distinct meshes — preserving per-mesh material colors that 3MF stores as
+// per-object base material refs.
+//
+// See docs/research/3mf-export-rendering-artifacts.md (R2).
+
+namespace {
+
+aiMesh *buildColoredTriangleMesh(unsigned int materialIndex) {
+    aiMesh *mesh = new aiMesh();
+    mesh->mNumVertices = 3;
+    mesh->mVertices = new aiVector3D[3];
+    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
+    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
+    mesh->mVertices[2] = aiVector3D(0.0f, 1.0f, 0.0f);
+    mesh->mNumFaces = 1;
+    mesh->mFaces = new aiFace[1];
+    mesh->mFaces[0].mNumIndices = 3;
+    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
+    mesh->mMaterialIndex = materialIndex;
+    return mesh;
+}
+
+aiMaterial *buildColoredMaterial(float r, float g, float b) {
+    aiMaterial *mat = new aiMaterial();
+    aiColor4D color(r, g, b, 1.0f);
+    mat->AddProperty(&color, 1, AI_MATKEY_COLOR_DIFFUSE);
+    return mat;
+}
+
+} // namespace
+
+TEST_F(utD3MFImporterExporter, export3MFPreservesMeshCountWithJoinIdenticalVertices) {
+    std::unique_ptr<aiScene> scene(new aiScene());
+    scene->mNumMeshes = 3;
+    scene->mMeshes = new aiMesh *[3];
+    scene->mMeshes[0] = buildColoredTriangleMesh(0);
+    scene->mMeshes[1] = buildColoredTriangleMesh(1);
+    scene->mMeshes[2] = buildColoredTriangleMesh(2);
+
+    scene->mNumMaterials = 3;
+    scene->mMaterials = new aiMaterial *[3];
+    scene->mMaterials[0] = buildColoredMaterial(1.0f, 0.0f, 0.0f);
+    scene->mMaterials[1] = buildColoredMaterial(0.0f, 1.0f, 0.0f);
+    scene->mMaterials[2] = buildColoredMaterial(0.0f, 0.0f, 1.0f);
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 3;
+    scene->mRootNode->mMeshes = new unsigned int[3]{0, 1, 2};
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_multi_mesh.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath));
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+
+    // Per-mesh material structure must be preserved — the enforced
+    // JoinIdenticalVertices step must NOT collapse meshes together.
+    EXPECT_EQ(3u, reimported->mNumMeshes);
+    EXPECT_EQ(3u, reimported->mNumMaterials);
+
+    // Per-mesh colors must round-trip via the 3MF base material group.
+    aiColor4D colors[3];
+    for (unsigned int i = 0; i < 3 && i < reimported->mNumMaterials; ++i) {
+        ASSERT_EQ(AI_SUCCESS,
+            reimported->mMaterials[i]->Get(AI_MATKEY_COLOR_DIFFUSE, colors[i]));
+    }
+    // Channel sums (R+G+B) must each cover one primary channel — order is
+    // implementation-defined so we assert presence rather than ordering.
+    float rTotal = 0.0f, gTotal = 0.0f, bTotal = 0.0f;
+    for (unsigned int i = 0; i < 3; ++i) {
+        rTotal += colors[i].r;
+        gTotal += colors[i].g;
+        bTotal += colors[i].b;
+    }
+    EXPECT_NEAR(1.0f, rTotal, 0.05f);
+    EXPECT_NEAR(1.0f, gTotal, 0.05f);
+    EXPECT_NEAR(1.0f, bTotal, 0.05f);
+
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFTriangulatesQuadFaces) {
+    std::unique_ptr<aiScene> scene(new aiScene());
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    aiMesh *mesh = new aiMesh();
+    scene->mMeshes[0] = mesh;
+
+    mesh->mNumVertices = 4;
+    mesh->mVertices = new aiVector3D[4];
+    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
+    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
+    mesh->mVertices[2] = aiVector3D(1.0f, 1.0f, 0.0f);
+    mesh->mVertices[3] = aiVector3D(0.0f, 1.0f, 0.0f);
+
+    // Single quad face — without enforced aiProcess_Triangulate, the
+    // Lib3MFBridge would skip this 4-index face (and prior to R3 would
+    // emit a degenerate (0,0,0) triangle that lib3mf rejects). With R2's
+    // enforced Triangulate, the quad becomes 2 triangles before the bridge
+    // sees the scene, and lib3mf accepts the geometry.
+    mesh->mNumFaces = 1;
+    mesh->mFaces = new aiFace[1];
+    mesh->mFaces[0].mNumIndices = 4;
+    mesh->mFaces[0].mIndices = new unsigned int[4]{0, 1, 2, 3};
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1]{0};
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_quad_triangulate.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath));
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+    ASSERT_GE(reimported->mNumMeshes, 1u);
+
+    EXPECT_EQ(2u, reimported->mMeshes[0]->mNumFaces);
+    for (unsigned int f = 0; f < reimported->mMeshes[0]->mNumFaces; ++f) {
+        EXPECT_EQ(3u, reimported->mMeshes[0]->mFaces[f].mNumIndices);
+    }
+
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFWeldsIdenticalVerticesWithinMesh) {
+    std::unique_ptr<aiScene> scene(new aiScene());
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    aiMesh *mesh = new aiMesh();
+    scene->mMeshes[0] = mesh;
+
+    // 6 vertices forming 2 triangles that share 2 bit-identical vertices
+    // (i.e. only 4 unique positions, but stored as 6).
+    mesh->mNumVertices = 6;
+    mesh->mVertices = new aiVector3D[6];
+    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
+    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
+    mesh->mVertices[2] = aiVector3D(1.0f, 1.0f, 0.0f);
+    mesh->mVertices[3] = aiVector3D(0.0f, 0.0f, 0.0f); // duplicate of vertex 0
+    mesh->mVertices[4] = aiVector3D(1.0f, 1.0f, 0.0f); // duplicate of vertex 2
+    mesh->mVertices[5] = aiVector3D(0.0f, 1.0f, 0.0f);
+
+    mesh->mNumFaces = 2;
+    mesh->mFaces = new aiFace[2];
+    mesh->mFaces[0].mNumIndices = 3;
+    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
+    mesh->mFaces[1].mNumIndices = 3;
+    mesh->mFaces[1].mIndices = new unsigned int[3]{3, 4, 5};
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1]{0};
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_weld_vertices.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath));
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+    ASSERT_GE(reimported->mNumMeshes, 1u);
+
+    // After the enforced JoinIdenticalVertices, the duplicates collapse
+    // and only 4 unique vertices remain.
+    EXPECT_EQ(4u, reimported->mMeshes[0]->mNumVertices);
+    EXPECT_EQ(2u, reimported->mMeshes[0]->mNumFaces);
+
+    std::remove(outPath);
+}
+
+// ===== R3: Lib3MFBridge handles non-triangle faces without polluting output =====
+//
+// Prior to R3, the bridge allocated a triangle vector sized to mNumFaces and
+// only assigned slots for triangle faces, leaving zero-initialized degenerate
+// triangles for non-triangles. lib3mf rejects degenerate triangles, so any
+// scene reaching the bridge with a non-triangle face caused the export to
+// throw. R3 switches to push_back so non-triangles are silently skipped and
+// the triangle vector size matches the actual triangle count.
+//
+// This test bypasses Assimp::Exporter (which now enforces Triangulate via R2)
+// and calls the bridge directly to isolate the bug.
+//
+// See docs/research/3mf-export-rendering-artifacts.md (R3).
+
+#ifdef ASSIMP_USE_LIB3MF
+
+TEST_F(utD3MFImporterExporter, export3MFBridgeHandlesNonTriangleFacesWithoutDegeneratePollution) {
+    std::unique_ptr<aiScene> scene(new aiScene());
+    scene->mNumMeshes = 1;
+    scene->mMeshes = new aiMesh *[1];
+    aiMesh *mesh = new aiMesh();
+    scene->mMeshes[0] = mesh;
+
+    mesh->mNumVertices = 5;
+    mesh->mVertices = new aiVector3D[5];
+    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
+    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
+    mesh->mVertices[2] = aiVector3D(2.0f, 1.0f, 0.0f);
+    mesh->mVertices[3] = aiVector3D(1.0f, 2.0f, 0.0f);
+    mesh->mVertices[4] = aiVector3D(0.0f, 1.0f, 0.0f);
+
+    // One pentagon face plus one well-formed triangle. The bridge must skip
+    // the pentagon (no degenerate slot) and keep the triangle.
+    mesh->mNumFaces = 2;
+    mesh->mFaces = new aiFace[2];
+    mesh->mFaces[0].mNumIndices = 5;
+    mesh->mFaces[0].mIndices = new unsigned int[5]{0, 1, 2, 3, 4};
+    mesh->mFaces[1].mNumIndices = 3;
+    mesh->mFaces[1].mIndices = new unsigned int[3]{0, 1, 2};
+
+    scene->mNumMaterials = 1;
+    scene->mMaterials = new aiMaterial *[1];
+    scene->mMaterials[0] = new aiMaterial();
+
+    scene->mRootNode = new aiNode();
+    scene->mRootNode->mNumMeshes = 1;
+    scene->mRootNode->mMeshes = new unsigned int[1]{0};
+
+    Assimp::DefaultIOSystem ioSystem;
+    const std::string outPath = "ut_3mf_bridge_polygon.3mf";
+
+    // Bypass Assimp::Exporter to skip the enforced aiProcess_Triangulate.
+    // Pre-R3 this throws DeadlyExportError; post-R3 it succeeds because
+    // push_back leaves the triangle vector size = 1 (just the real triangle).
+    EXPECT_NO_THROW(
+        Assimp::D3MF::Lib3MFBridge::ExportScene(scene.get(), outPath, &ioSystem)
+    );
+
+    Assimp::Importer importer;
+    const aiScene *reimported = importer.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, reimported);
+    ASSERT_GE(reimported->mNumMeshes, 1u);
+
+    // Only the actual triangle survives; the pentagon was skipped, never
+    // emitted as a degenerate.
+    EXPECT_EQ(1u, reimported->mMeshes[0]->mNumFaces);
+
+    std::remove(outPath.c_str());
+}
+
+#endif // ASSIMP_USE_LIB3MF
 
 #endif // ASSIMP_BUILD_NO_EXPORT
