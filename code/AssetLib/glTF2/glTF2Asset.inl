@@ -760,7 +760,7 @@ inline void Buffer::Grow(size_t amount) {
     // Just allocate data which we need
     capacity = byteLength + amount;
 
-    uint8_t *b = new uint8_t[capacity];
+    uint8_t *b = new uint8_t[capacity]();
     if (nullptr != mData) {
         memcpy(b, mData.get(), byteLength);
     }

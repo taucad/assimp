@@ -1150,7 +1150,7 @@ void ExportSkin(Asset &mAsset, const aiMesh *aimesh, Ref<Mesh> &meshRef, Ref<Buf
                 ComponentTypeSize(vertexJointAccessor->componentType);
             size_t s_bytesLen = bytesLen * s_bytesPerComp / bytesPerComp;
             Ref<Buffer> buf = vertexJointAccessor->bufferView->buffer;
-            uint8_t *arrys = new uint8_t[bytesLen];
+            uint8_t *arrys = new uint8_t[s_bytesLen];
             unsigned int i = 0;
             for (unsigned int j = 0; j < bytesLen; j += bytesPerComp) {
                 size_t len_p = offset + j;
@@ -1159,7 +1159,7 @@ void ExportSkin(Asset &mAsset, const aiMesh *aimesh, Ref<Mesh> &meshRef, Ref<Buf
                 memcpy(&arrys[i * s_bytesPerComp], &c, s_bytesPerComp);
                 ++i;
             }
-            buf->ReplaceData_joint(offset, bytesLen, arrys, bytesLen);
+            buf->ReplaceData_joint(offset, bytesLen, arrys, s_bytesLen);
             vertexJointAccessor->componentType = ComponentType_UNSIGNED_SHORT;
             vertexJointAccessor->bufferView->byteLength = s_bytesLen;
 

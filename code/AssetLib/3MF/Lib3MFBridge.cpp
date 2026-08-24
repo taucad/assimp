@@ -61,6 +61,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -74,6 +75,69 @@ namespace Assimp {
 namespace D3MF {
 
 namespace {
+
+constexpr uint64_t FnvOffset = 14695981039346656037ULL;
+constexpr uint64_t FnvPrime = 1099511628211ULL;
+
+uint64_t hashBytes(uint64_t hash, const void *data, size_t size) {
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    for (size_t index = 0; index < size; ++index) {
+        hash = (hash ^ bytes[index]) * FnvPrime;
+    }
+    return hash;
+}
+
+uint64_t hashSceneNode(uint64_t hash, const aiNode *node) {
+    if (node == nullptr) {
+        return hash;
+    }
+    hash = hashBytes(hash, node->mName.C_Str(), node->mName.length);
+    hash = hashBytes(hash, &node->mTransformation, sizeof(node->mTransformation));
+    hash = hashBytes(hash, node->mMeshes, node->mNumMeshes * sizeof(*node->mMeshes));
+    for (unsigned int index = 0; index < node->mNumChildren; ++index) {
+        hash = hashSceneNode(hash, node->mChildren[index]);
+    }
+    return hash;
+}
+
+uint64_t hashScene(const aiScene *scene) {
+    uint64_t hash = hashBytes(FnvOffset, &scene->mNumMeshes, sizeof(scene->mNumMeshes));
+    for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
+        const aiMesh *mesh = scene->mMeshes[meshIndex];
+        hash = hashBytes(hash, mesh->mName.C_Str(), mesh->mName.length);
+        hash = hashBytes(hash, mesh->mVertices, mesh->mNumVertices * sizeof(*mesh->mVertices));
+        for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
+            const aiFace &face = mesh->mFaces[faceIndex];
+            hash = hashBytes(hash, face.mIndices, face.mNumIndices * sizeof(*face.mIndices));
+        }
+    }
+    return hashSceneNode(hash, scene->mRootNode);
+}
+
+uint64_t splitMix64(uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+std::string deterministicUuid(uint64_t sceneHash, uint64_t ordinal) {
+    const uint64_t high = splitMix64(sceneHash ^ ordinal);
+    const uint64_t low = splitMix64(high);
+    uint8_t bytes[16];
+    for (unsigned int index = 0; index < 8; ++index) {
+        bytes[index] = static_cast<uint8_t>(high >> (index * 8));
+        bytes[index + 8] = static_cast<uint8_t>(low >> (index * 8));
+    }
+    bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x80); // UUIDv8: content-derived.
+    bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
+    char uuid[37];
+    std::snprintf(uuid, sizeof(uuid),
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    return uuid;
+}
 
 class Lib3MFHandle {
 public:
@@ -310,6 +374,10 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
                     const ExportProperties *pProperties) {
     Lib3MFHandle model;
     checkResult(lib3mf_createmodel(model.ptr()), nullptr, "Failed to create lib3mf model");
+    const uint64_t sceneHash = hashScene(pScene);
+    const std::string buildUuid = deterministicUuid(sceneHash, 0);
+    checkResult(lib3mf_model_setbuilduuid(model.as<Lib3MF_Model>(), buildUuid.c_str()),
+            model.get(), "Failed to set deterministic build UUID");
 
     // ---- TARGET UNIT (3MF file) ----
     // Resolver: ExportProperty `3MF_EXPORT_UNIT` (string) → spec default `millimeter`.
@@ -416,6 +484,7 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         }
     }
 
+    uint64_t meshOrdinal = 0;
     for (const auto &entry : meshEntries) {
         unsigned int meshIdx = entry.first;
         const aiMatrix4x4 &nodeTransform = entry.second;
@@ -426,6 +495,9 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             lib3mf_model_addmeshobject(model.as<Lib3MF_Model>(), meshObject.ptr()),
             model.get(), "Failed to add mesh object"
         );
+        const std::string objectUuid = deterministicUuid(sceneHash, 1 + meshOrdinal * 2);
+        checkResult(lib3mf_object_setuuid(meshObject.as<Lib3MF_Object>(), objectUuid.c_str()),
+                meshObject.get(), "Failed to set deterministic object UUID");
 
         if (mesh->mName.length > 0) {
             lib3mf_object_setname(meshObject.as<Lib3MF_Object>(), mesh->mName.C_Str());
@@ -522,6 +594,10 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             ),
             model.get(), "Failed to add build item"
         );
+        const std::string itemUuid = deterministicUuid(sceneHash, 2 + meshOrdinal * 2);
+        checkResult(lib3mf_builditem_setuuid(buildItem.as<Lib3MF_BuildItem>(), itemUuid.c_str()),
+                buildItem.get(), "Failed to set deterministic build item UUID");
+        ++meshOrdinal;
     }
 
     Lib3MFHandle writer;
