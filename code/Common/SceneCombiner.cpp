@@ -1064,6 +1064,7 @@ void SceneCombiner::CopyScene(aiScene **_dest, const aiScene *src, bool allocate
     // source private data might be nullptr if the scene is user-allocated (i.e. for use with the export API)
     if (src->mPrivate != nullptr) {
         ScenePriv(dest)->mPPStepsApplied = ScenePriv(src) ? ScenePriv(src)->mPPStepsApplied : 0;
+        ScenePriv(dest)->mManifoldMeshes = ScenePriv(src)->mManifoldMeshes;
     }
 }
 

@@ -48,10 +48,27 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/ai_assert.h>
 #include <assimp/scene.h>
 
+#include <cstddef>
+#include <vector>
+
 namespace Assimp {
 
 // Forward declarations
 class Importer;
+
+struct ManifoldPrimitiveRun {
+    unsigned int mMeshIndex = 0;
+    unsigned int mMaterialIndex = 0;
+    size_t mFirstIndex = 0;
+    size_t mIndexCount = 0;
+};
+
+struct ManifoldMeshTopology {
+    unsigned int mSourceMeshIndex = 0;
+    std::vector<aiVector3D> mPositions;
+    std::vector<unsigned int> mIndices;
+    std::vector<ManifoldPrimitiveRun> mRuns;
+};
 
 struct ScenePrivateData {
     //  The struct constructor.
@@ -70,6 +87,9 @@ struct ScenePrivateData {
     // and mOrigImporter are no longer safe to rely on and only
     // serve informative purposes.
     bool mIsCopy;
+
+    // Canonical topology retained from validated EXT_mesh_manifold records.
+    std::vector<ManifoldMeshTopology> mManifoldMeshes;
 };
 
 inline

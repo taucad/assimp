@@ -223,9 +223,9 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 #endif
 
 #ifndef ASSIMP_BUILD_NO_3MF_EXPORTER
-	// 3MF requires triangulated meshes (Core Spec §4.1) and a flattened scene
-	// graph (no per-build-item world transforms in our pipeline — vertices are
-	// baked in `Lib3MFBridge`). Enforce both as default pp flags so callers
+	// 3MF requires triangulated meshes (Core Spec §4.1). The lib3mf bridge
+	// traverses nodes and bakes their world transforms while it writes vertices,
+	// so pre-transforming here would erase source-mesh provenance. Callers
 	// using the top-level `Exporter::Export` get spec-compliant output without
 	// having to know the bridge's prerequisites.
 	//
@@ -242,7 +242,6 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 	//                          still have non-zero AABBs, so this is safe).
 	exporters.emplace_back("3mf", "The 3MF-File-Format", "3mf", &ExportScene3MF,
 		aiProcess_Triangulate
-		| aiProcess_PreTransformVertices
 		| aiProcess_JoinIdenticalVertices
 		| aiProcess_FindDegenerates
 		| aiProcess_FindInvalidData);
@@ -423,6 +422,32 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
 
                 std::unique_ptr<aiScene> scenecopy(scenecopy_tmp);
                 const ScenePrivateData* const priv = ScenePriv(pScene);
+
+                if (!strcmp(pFormatId, "3mf") && priv && !priv->mManifoldMeshes.empty()) {
+                    const unsigned int safeManifoldSteps =
+                            aiProcess_CalcTangentSpace |
+                            aiProcess_JoinIdenticalVertices |
+                            aiProcess_GenNormals |
+                            aiProcess_GenSmoothNormals |
+                            aiProcess_Triangulate |
+                            aiProcess_GenUVCoords |
+                            aiProcess_FindDegenerates |
+                            aiProcess_FindInvalidData |
+                            aiProcess_ImproveCacheLocality |
+                            aiProcess_SortByPType |
+                            aiProcess_TransformUVCoords |
+                            aiProcess_FlipUVs |
+                            aiProcess_ValidateDataStructure;
+                    const unsigned int unsafeSteps =
+                            (priv->mPPStepsApplied | pPreprocessing) & ~safeManifoldSteps;
+                    if (unsafeSteps != 0) {
+                        throw DeadlyExportError(
+                                "3MF export cannot preserve EXT_mesh_manifold after topology-changing "
+                                "post-processing flags: ", unsafeSteps,
+                                " (source mesh ",
+                                priv->mManifoldMeshes.front().mSourceMeshIndex, ")");
+                    }
+                }
 
                 // steps that are not idempotent, i.e. we might need to run them again, usually to get back to the
                 // original state before the step was applied first. When checking which steps we don't need

@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "glTF2Importer.h"
 #include "glTF2Asset.h"
+#include "Common/ScenePrivate.h"
 #include "PostProcessing/MakeVerboseFormat.h"
 
 #if !defined(ASSIMP_BUILD_NO_EXPORT)
@@ -61,7 +62,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/Importer.hpp>
 
 #include <cstdint>
+#include <cmath>
+#include <map>
 #include <memory>
+#include <queue>
+#include <set>
 #include <unordered_map>
 
 #include <rapidjson/document.h>
@@ -490,6 +495,291 @@ aiColor4D *GetVertexColorsForType(Ref<Accessor> input, std::vector<unsigned int>
     return output;
 }
 
+static bool IsUnsignedScalarAccessor(const Accessor &accessor) {
+    return accessor.type == AttribType::SCALAR &&
+            (accessor.componentType == ComponentType_UNSIGNED_BYTE ||
+                    accessor.componentType == ComponentType_UNSIGNED_SHORT ||
+                    accessor.componentType == ComponentType_UNSIGNED_INT);
+}
+
+static bool SameAccessorList(const Mesh::AccessorList &a, const Mesh::AccessorList &b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (static_cast<bool>(a[i]) != static_cast<bool>(b[i]) ||
+                (a[i] && a[i].GetIndex() != b[i].GetIndex())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static ManifoldMeshTopology ValidateManifoldMesh(
+        Mesh &mesh, unsigned int sourceMeshIndex, unsigned int firstAiMesh,
+        unsigned int defaultMaterialIndex) {
+    const std::string context = getContextForErrorMessages(mesh.id, mesh.name);
+    const auto fail = [&](const std::string &message) {
+        throw DeadlyImportError("GLTF: EXT_mesh_manifold mesh ", context, ": ", message);
+    };
+
+    if (mesh.primitives.empty()) {
+        fail("requires at least one render primitive");
+    }
+
+    Mesh::Primitive &first = mesh.primitives.front();
+    if (first.attributes.position.size() != 1 || !first.attributes.position[0]) {
+        fail("render primitives require one POSITION accessor");
+    }
+
+    Ref<Accessor> positionAccessor = first.attributes.position[0];
+    if (positionAccessor->type != AttribType::VEC3 ||
+            positionAccessor->componentType != ComponentType_FLOAT) {
+        fail("POSITION must be a floating-point VEC3 accessor");
+    }
+
+    size_t renderIndexCount = 0;
+    std::vector<unsigned int> renderIndices;
+    ManifoldMeshTopology topology;
+    topology.mSourceMeshIndex = sourceMeshIndex;
+
+    unsigned int indexBufferView = 0;
+    bool haveIndexBufferView = false;
+    for (size_t primitiveIndex = 0; primitiveIndex < mesh.primitives.size(); ++primitiveIndex) {
+        Mesh::Primitive &primitive = mesh.primitives[primitiveIndex];
+        if (primitive.mode != PrimitiveMode_TRIANGLES || !primitive.indices) {
+            fail("render primitive " + std::to_string(primitiveIndex) +
+                    " must use indexed TRIANGLES");
+        }
+        if (!IsUnsignedScalarAccessor(*primitive.indices)) {
+            fail("render primitive " + std::to_string(primitiveIndex) +
+                    " indices must use an unsigned SCALAR accessor");
+        }
+        if (primitive.indices->count % 3 != 0) {
+            fail("render primitive " + std::to_string(primitiveIndex) +
+                    " index count must be divisible by three");
+        }
+        if (!primitive.indices->bufferView) {
+            fail("render primitive " + std::to_string(primitiveIndex) +
+                    " indices must reference a bufferView");
+        }
+        if (!haveIndexBufferView) {
+            indexBufferView = primitive.indices->bufferView.GetIndex();
+            haveIndexBufferView = true;
+        } else if (primitive.indices->bufferView.GetIndex() != indexBufferView) {
+            fail("all render primitive indices must reference the same bufferView");
+        }
+
+        const auto &attributes = primitive.attributes;
+        const auto &firstAttributes = first.attributes;
+        if (!SameAccessorList(attributes.position, firstAttributes.position) ||
+                !SameAccessorList(attributes.normal, firstAttributes.normal) ||
+                !SameAccessorList(attributes.tangent, firstAttributes.tangent) ||
+                !SameAccessorList(attributes.texcoord, firstAttributes.texcoord) ||
+                !SameAccessorList(attributes.color, firstAttributes.color) ||
+                !SameAccessorList(attributes.joint, firstAttributes.joint) ||
+                !SameAccessorList(attributes.jointmatrix, firstAttributes.jointmatrix) ||
+                !SameAccessorList(attributes.weight, firstAttributes.weight)) {
+            fail("same attributes in different render primitives must reference the same accessors");
+        }
+
+        Accessor::Indexer indices = primitive.indices->GetIndexer();
+        if (!indices.IsValid()) {
+            fail("render primitive " + std::to_string(primitiveIndex) +
+                    " has an invalid index accessor");
+        }
+        const size_t firstIndex = renderIndices.size();
+        for (size_t i = 0; i < primitive.indices->count; ++i) {
+            const unsigned int index = indices.GetUInt(i);
+            if (index >= positionAccessor->count) {
+                fail("render primitive " + std::to_string(primitiveIndex) +
+                        " contains an out-of-range index");
+            }
+            renderIndices.push_back(index);
+        }
+        renderIndexCount += primitive.indices->count;
+        topology.mRuns.push_back({
+                firstAiMesh + static_cast<unsigned int>(primitiveIndex),
+                primitive.material ? primitive.material.GetIndex() : defaultMaterialIndex,
+                firstIndex,
+                primitive.indices->count,
+        });
+    }
+
+    Mesh::Primitive &canonicalPrimitive = mesh.manifold.primitive;
+    if (canonicalPrimitive.mode != PrimitiveMode_TRIANGLES || !canonicalPrimitive.indices) {
+        fail("manifoldPrimitive must use indexed TRIANGLES");
+    }
+    if (canonicalPrimitive.material || !canonicalPrimitive.targets.empty()) {
+        fail("manifoldPrimitive must not define a material or morph targets");
+    }
+    if (canonicalPrimitive.attributes.position.size() != 1 ||
+            !canonicalPrimitive.attributes.position[0] ||
+            canonicalPrimitive.attributes.position[0].GetIndex() != positionAccessor.GetIndex()) {
+        fail("manifoldPrimitive POSITION must reference the shared render POSITION accessor");
+    }
+    const auto &canonicalAttributes = canonicalPrimitive.attributes;
+    if (!canonicalAttributes.normal.empty() || !canonicalAttributes.tangent.empty() ||
+            !canonicalAttributes.texcoord.empty() || !canonicalAttributes.color.empty() ||
+            !canonicalAttributes.joint.empty() || !canonicalAttributes.jointmatrix.empty() ||
+            !canonicalAttributes.weight.empty()) {
+        fail("manifoldPrimitive must contain only the shared POSITION attribute");
+    }
+    if (!IsUnsignedScalarAccessor(*canonicalPrimitive.indices)) {
+        fail("manifoldPrimitive indices must use an unsigned SCALAR accessor");
+    }
+    if (canonicalPrimitive.indices->count != renderIndexCount ||
+            canonicalPrimitive.indices->count % 3 != 0) {
+        fail("canonical index count must equal the render index count and be divisible by three");
+    }
+
+    aiVector3D *rawPositions = nullptr;
+    const size_t positionCount = positionAccessor->ExtractData(rawPositions);
+    std::unique_ptr<aiVector3D[]> ownedPositions(rawPositions);
+    if (positionCount == 0) {
+        fail("POSITION accessor must not be empty");
+    }
+    topology.mPositions.assign(rawPositions, rawPositions + positionCount);
+    for (size_t i = 0; i < topology.mPositions.size(); ++i) {
+        const aiVector3D &position = topology.mPositions[i];
+        if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+                !std::isfinite(position.z)) {
+            fail("POSITION contains a non-finite value at vertex " + std::to_string(i));
+        }
+    }
+
+    Accessor::Indexer canonical = canonicalPrimitive.indices->GetIndexer();
+    if (!canonical.IsValid()) {
+        fail("manifoldPrimitive has an invalid index accessor");
+    }
+    topology.mIndices.resize(canonicalPrimitive.indices->count);
+    for (size_t i = 0; i < topology.mIndices.size(); ++i) {
+        topology.mIndices[i] = canonical.GetUInt(i);
+        if (topology.mIndices[i] >= topology.mPositions.size()) {
+            fail("canonical index " + std::to_string(i) + " is out of range");
+        }
+    }
+
+    const bool hasMergeIndices = static_cast<bool>(mesh.manifold.mergeIndices);
+    const bool hasMergeValues = static_cast<bool>(mesh.manifold.mergeValues);
+    if (hasMergeIndices != hasMergeValues) {
+        fail("mergeIndices and mergeValues must be defined together");
+    }
+
+    std::vector<bool> merged(topology.mIndices.size(), false);
+    std::vector<unsigned int> reconstructedIndices = renderIndices;
+    if (hasMergeIndices) {
+        if (!IsUnsignedScalarAccessor(*mesh.manifold.mergeIndices) ||
+                !IsUnsignedScalarAccessor(*mesh.manifold.mergeValues) ||
+                mesh.manifold.mergeIndices->count != mesh.manifold.mergeValues->count) {
+            fail("merge accessors must be compatible unsigned SCALAR accessors");
+        }
+        Accessor::Indexer mergeIndices = mesh.manifold.mergeIndices->GetIndexer();
+        Accessor::Indexer mergeValues = mesh.manifold.mergeValues->GetIndexer();
+        if (!mergeIndices.IsValid() || !mergeValues.IsValid()) {
+            fail("merge accessors are invalid");
+        }
+        for (size_t i = 0; i < mesh.manifold.mergeIndices->count; ++i) {
+            const unsigned int slot = mergeIndices.GetUInt(i);
+            const unsigned int value = mergeValues.GetUInt(i);
+            if (slot >= topology.mIndices.size() || value >= topology.mPositions.size() ||
+                    merged[slot]) {
+                fail("merge accessor entry " + std::to_string(i) + " is out of range or duplicated");
+            }
+            const aiVector3D &before = topology.mPositions[renderIndices[slot]];
+            const aiVector3D &after = topology.mPositions[value];
+            if (before.x != after.x || before.y != after.y || before.z != after.z) {
+                fail("merge accessor entry " + std::to_string(i) +
+                        " joins vertices with different POSITION values");
+            }
+            merged[slot] = true;
+            reconstructedIndices[slot] = value;
+        }
+    }
+    if (reconstructedIndices != topology.mIndices) {
+        fail("merge accessors do not exactly reproduce the canonical index stream");
+    }
+
+    using Edge = std::pair<unsigned int, unsigned int>;
+    std::map<Edge, std::pair<unsigned int, unsigned int>> edgeDirections;
+    std::vector<std::map<unsigned int, std::vector<unsigned int>>> vertexLinks(
+            topology.mPositions.size());
+    for (size_t triangle = 0; triangle < topology.mIndices.size(); triangle += 3) {
+        const unsigned int a = topology.mIndices[triangle];
+        const unsigned int b = topology.mIndices[triangle + 1];
+        const unsigned int c = topology.mIndices[triangle + 2];
+        if (a == b || b == c || a == c) {
+            fail("canonical triangle " + std::to_string(triangle / 3) +
+                    " repeats a vertex");
+        }
+        const aiVector3D cross = (topology.mPositions[b] - topology.mPositions[a]) ^
+                (topology.mPositions[c] - topology.mPositions[a]);
+        if (cross.SquareLength() == 0) {
+            fail("canonical triangle " + std::to_string(triangle / 3) +
+                    " has zero area");
+        }
+
+        const unsigned int triangleVertices[3] = { a, b, c };
+        for (unsigned int edge = 0; edge < 3; ++edge) {
+            const unsigned int from = triangleVertices[edge];
+            const unsigned int to = triangleVertices[(edge + 1) % 3];
+            auto &directions = edgeDirections[{ std::min(from, to), std::max(from, to) }];
+            if (from < to) {
+                ++directions.first;
+            } else {
+                ++directions.second;
+            }
+        }
+
+        vertexLinks[a][b].push_back(c);
+        vertexLinks[a][c].push_back(b);
+        vertexLinks[b][c].push_back(a);
+        vertexLinks[b][a].push_back(c);
+        vertexLinks[c][a].push_back(b);
+        vertexLinks[c][b].push_back(a);
+    }
+
+    for (const auto &entry : edgeDirections) {
+        if (entry.second.first != 1 || entry.second.second != 1) {
+            fail("canonical half-edge (" + std::to_string(entry.first.first) + ", " +
+                    std::to_string(entry.first.second) +
+                    ") does not have exactly one reverse half-edge");
+        }
+    }
+
+    for (size_t vertex = 0; vertex < vertexLinks.size(); ++vertex) {
+        const auto &link = vertexLinks[vertex];
+        if (link.empty()) {
+            continue;
+        }
+        for (const auto &neighbor : link) {
+            if (neighbor.second.size() != 2) {
+                fail("canonical vertex " + std::to_string(vertex) +
+                        " does not have a single-cycle link");
+            }
+        }
+        std::set<unsigned int> visited;
+        std::queue<unsigned int> pending;
+        pending.push(link.begin()->first);
+        while (!pending.empty()) {
+            const unsigned int neighbor = pending.front();
+            pending.pop();
+            if (!visited.insert(neighbor).second) {
+                continue;
+            }
+            for (unsigned int adjacent : link.at(neighbor)) {
+                pending.push(adjacent);
+            }
+        }
+        if (visited.size() != link.size()) {
+            fail("canonical vertex " + std::to_string(vertex) +
+                    " has disconnected incident triangle fans");
+        }
+    }
+
+    return topology;
+}
+
 void glTF2Importer::ImportMeshes(glTF2::Asset &r) {
     ASSIMP_LOG_DEBUG("Importing ", r.meshes.Size(), " meshes");
     std::vector<std::unique_ptr<aiMesh>> meshes;
@@ -911,6 +1201,11 @@ void glTF2Importer::ImportMeshes(glTF2::Asset &r) {
             } else {
                 aim->mMaterialIndex = mScene->mNumMaterials - 1;
             }
+        }
+
+        if (mesh.manifold.present) {
+            ScenePriv(mScene)->mManifoldMeshes.push_back(ValidateManifoldMesh(
+                    mesh, m, meshOffsets[m], mScene->mNumMaterials - 1));
         }
     }
 

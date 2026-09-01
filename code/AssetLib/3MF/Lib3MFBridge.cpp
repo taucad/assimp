@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "Lib3MFBridge.h"
 
+#include "Common/ScenePrivate.h"
 #include "Common/UnitAxisContract.h"
 
 #include <assimp/Exceptional.h>
@@ -66,6 +67,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cstring>
 #include <map>
 #include <memory>
+#include <queue>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -109,6 +111,25 @@ uint64_t hashScene(const aiScene *scene) {
         for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
             const aiFace &face = mesh->mFaces[faceIndex];
             hash = hashBytes(hash, face.mIndices, face.mNumIndices * sizeof(*face.mIndices));
+        }
+    }
+    const ScenePrivateData *privateData = ScenePriv(scene);
+    if (privateData != nullptr) {
+        for (const ManifoldMeshTopology &topology : privateData->mManifoldMeshes) {
+            hash = hashBytes(hash, &topology.mSourceMeshIndex, sizeof(topology.mSourceMeshIndex));
+            for (const aiVector3D &position : topology.mPositions) {
+                hash = hashBytes(hash, &position.x, sizeof(position.x));
+                hash = hashBytes(hash, &position.y, sizeof(position.y));
+                hash = hashBytes(hash, &position.z, sizeof(position.z));
+            }
+            hash = hashBytes(hash, topology.mIndices.data(),
+                    topology.mIndices.size() * sizeof(*topology.mIndices.data()));
+            for (const ManifoldPrimitiveRun &run : topology.mRuns) {
+                hash = hashBytes(hash, &run.mMeshIndex, sizeof(run.mMeshIndex));
+                hash = hashBytes(hash, &run.mMaterialIndex, sizeof(run.mMaterialIndex));
+                hash = hashBytes(hash, &run.mFirstIndex, sizeof(run.mFirstIndex));
+                hash = hashBytes(hash, &run.mIndexCount, sizeof(run.mIndexCount));
+            }
         }
     }
     return hashSceneNode(hash, scene->mRootNode);
@@ -279,15 +300,91 @@ using ::Assimp::readSceneUnitScaleToMeters;
 using ::Assimp::readSceneUpAxis;
 using ::Assimp::writeContractMetadata;
 
-void collectMeshNodes(const aiScene *scene, const aiNode *node,
-                      const aiMatrix4x4 &parentTransform,
-                      std::vector<std::pair<unsigned int, aiMatrix4x4>> &meshEntries) {
+struct NodeMeshEntry {
+    const aiNode *node = nullptr;
+    aiMatrix4x4 transform;
+    std::vector<unsigned int> meshes;
+};
+
+void collectMeshNodes(const aiNode *node, const aiMatrix4x4 &parentTransform,
+                      std::vector<NodeMeshEntry> &entries) {
     aiMatrix4x4 globalTransform = parentTransform * node->mTransformation;
-    for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
-        meshEntries.emplace_back(node->mMeshes[i], globalTransform);
+    if (node->mNumMeshes > 0) {
+        NodeMeshEntry entry;
+        entry.node = node;
+        entry.transform = globalTransform;
+        entry.meshes.assign(node->mMeshes, node->mMeshes + node->mNumMeshes);
+        entries.push_back(std::move(entry));
     }
     for (unsigned int i = 0; i < node->mNumChildren; ++i) {
-        collectMeshNodes(scene, node->mChildren[i], globalTransform, meshEntries);
+        collectMeshNodes(node->mChildren[i], globalTransform, entries);
+    }
+}
+
+void orientClosedComponents(std::vector<Lib3MF::sPosition> &vertices,
+                            std::vector<Lib3MF::sTriangle> &triangles,
+                            const std::string &source) {
+    std::vector<std::vector<size_t>> incident(vertices.size());
+    for (size_t triangleIndex = 0; triangleIndex < triangles.size(); ++triangleIndex) {
+        for (unsigned int corner = 0; corner < 3; ++corner) {
+            const Lib3MF_uint32 vertex = triangles[triangleIndex].m_Indices[corner];
+            if (vertex >= vertices.size()) {
+                throw DeadlyExportError("3MF ", source, " triangle ", triangleIndex,
+                        " contains an out-of-range vertex index");
+            }
+            incident[vertex].push_back(triangleIndex);
+        }
+    }
+
+    std::vector<bool> visited(triangles.size(), false);
+    for (size_t start = 0; start < triangles.size(); ++start) {
+        if (visited[start]) {
+            continue;
+        }
+
+        std::vector<size_t> component;
+        std::queue<size_t> pending;
+        pending.push(start);
+        while (!pending.empty()) {
+            const size_t triangleIndex = pending.front();
+            pending.pop();
+            if (visited[triangleIndex]) {
+                continue;
+            }
+            visited[triangleIndex] = true;
+            component.push_back(triangleIndex);
+            for (unsigned int corner = 0; corner < 3; ++corner) {
+                const Lib3MF_uint32 vertex = triangles[triangleIndex].m_Indices[corner];
+                for (size_t adjacent : incident[vertex]) {
+                    if (!visited[adjacent]) {
+                        pending.push(adjacent);
+                    }
+                }
+            }
+        }
+
+        double signedVolumeTimesSix = 0.0;
+        for (size_t triangleIndex : component) {
+            const Lib3MF::sTriangle &triangle = triangles[triangleIndex];
+            const Lib3MF::sPosition &a = vertices[triangle.m_Indices[0]];
+            const Lib3MF::sPosition &b = vertices[triangle.m_Indices[1]];
+            const Lib3MF::sPosition &c = vertices[triangle.m_Indices[2]];
+            const double ax = a.m_Coordinates[0], ay = a.m_Coordinates[1], az = a.m_Coordinates[2];
+            const double bx = b.m_Coordinates[0], by = b.m_Coordinates[1], bz = b.m_Coordinates[2];
+            const double cx = c.m_Coordinates[0], cy = c.m_Coordinates[1], cz = c.m_Coordinates[2];
+            signedVolumeTimesSix += ax * (by * cz - bz * cy) -
+                    ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+        }
+        if (signedVolumeTimesSix == 0.0) {
+            throw DeadlyExportError("3MF ", source, " component containing triangle ",
+                    start, " has zero signed volume");
+        }
+        if (signedVolumeTimesSix < 0.0) {
+            for (size_t triangleIndex : component) {
+                std::swap(triangles[triangleIndex].m_Indices[1],
+                        triangles[triangleIndex].m_Indices[2]);
+            }
+        }
     }
 }
 
@@ -473,23 +570,42 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         }
     }
 
-    std::vector<std::pair<unsigned int, aiMatrix4x4>> meshEntries;
+    std::vector<NodeMeshEntry> meshEntries;
     if (pScene->mRootNode) {
-        collectMeshNodes(pScene, pScene->mRootNode, aiMatrix4x4(), meshEntries);
+        collectMeshNodes(pScene->mRootNode, aiMatrix4x4(), meshEntries);
     }
 
     if (meshEntries.empty()) {
+        NodeMeshEntry entry;
+        entry.transform = aiMatrix4x4();
         for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
-            meshEntries.emplace_back(i, aiMatrix4x4());
+            entry.meshes.push_back(i);
         }
+        meshEntries.push_back(std::move(entry));
     }
 
-    uint64_t meshOrdinal = 0;
-    for (const auto &entry : meshEntries) {
-        unsigned int meshIdx = entry.first;
-        const aiMatrix4x4 &nodeTransform = entry.second;
-        const aiMesh *mesh = pScene->mMeshes[meshIdx];
+    Lib3MF_uint32 baseMaterialResourceID = 0;
+    if (baseMaterialGroup.get()) {
+        checkResult(
+                lib3mf_resource_getuniqueresourceid(
+                        baseMaterialGroup.as<Lib3MF_Resource>(), &baseMaterialResourceID),
+                baseMaterialGroup.get(), "Failed to get base material resource ID");
+    }
 
+    aiMatrix4x4 unitScaleMatrix;
+    unitScaleMatrix.a1 = static_cast<float>(vertexScale);
+    unitScaleMatrix.b2 = static_cast<float>(vertexScale);
+    unitScaleMatrix.c3 = static_cast<float>(vertexScale);
+
+    uint64_t meshOrdinal = 0;
+    const auto emitMeshObject = [&](const std::string &name, const std::string &source,
+                                    std::vector<Lib3MF::sPosition> vertices,
+                                    std::vector<Lib3MF::sTriangle> triangles,
+                                    const std::vector<unsigned int> &triangleMaterials) {
+        if (vertices.empty() || triangles.empty()) {
+            throw DeadlyExportError("3MF ", source, " contains no mesh geometry");
+        }
+        orientClosedComponents(vertices, triangles, source);
         Lib3MFHandle meshObject;
         checkResult(
             lib3mf_model_addmeshobject(model.as<Lib3MF_Model>(), meshObject.ptr()),
@@ -499,55 +615,11 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         checkResult(lib3mf_object_setuuid(meshObject.as<Lib3MF_Object>(), objectUuid.c_str()),
                 meshObject.get(), "Failed to set deterministic object UUID");
 
-        if (mesh->mName.length > 0) {
-            lib3mf_object_setname(meshObject.as<Lib3MF_Object>(), mesh->mName.C_Str());
+        if (!name.empty()) {
+            checkResult(lib3mf_object_setname(
+                    meshObject.as<Lib3MF_Object>(), name.c_str()),
+                    meshObject.get(), "Failed to set mesh object name");
         }
-
-        // Bake (axis rotation) × (unit scale) × (per-node hierarchy transform) into
-        // every vertex so the build item can carry an identity transform. The
-        // `aiProcess_PreTransformVertices` pp flag (R9') normally collapses the
-        // hierarchy ahead of the bridge, but we still apply `nodeTransform` here so
-        // direct `Lib3MFBridge::ExportScene` callers (bypassing the top-level
-        // Exporter) get correct output too.
-        aiMatrix4x4 unitScaleMatrix;
-        unitScaleMatrix.a1 = static_cast<float>(vertexScale);
-        unitScaleMatrix.b2 = static_cast<float>(vertexScale);
-        unitScaleMatrix.c3 = static_cast<float>(vertexScale);
-
-        const aiMatrix4x4 vertexTransform = axisRotation * unitScaleMatrix * nodeTransform;
-
-        std::vector<Lib3MF::sPosition> vertices(mesh->mNumVertices);
-        for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-            aiVector3D p = vertexTransform * mesh->mVertices[v];
-            vertices[v].m_Coordinates[0] = p.x;
-            vertices[v].m_Coordinates[1] = p.y;
-            vertices[v].m_Coordinates[2] = p.z;
-        }
-
-        // R3: build the triangle vector via push_back so non-triangle faces
-        // are silently skipped instead of leaving zero-initialized degenerate
-        // slots. lib3mf rejects degenerate triangles and would throw on any
-        // mesh containing a non-triangle face if we left the old indexed
-        // assignment (see docs/research/3mf-export-rendering-artifacts.md R3).
-        std::vector<Lib3MF::sTriangle> triangles;
-        triangles.reserve(mesh->mNumFaces);
-        for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
-            const aiFace &face = mesh->mFaces[f];
-            if (face.mNumIndices != 3) {
-                continue;
-            }
-            Lib3MF::sTriangle tri{};
-            tri.m_Indices[0] = face.mIndices[0];
-            tri.m_Indices[1] = face.mIndices[1];
-            tri.m_Indices[2] = face.mIndices[2];
-            triangles.push_back(tri);
-        }
-
-        // Position-only weld closes the per-face-normal seams that produced the
-        // "non-manifold edge" diagnostics in slicers. Epsilon is sized at one
-        // micrometre in scene units (post-rescale) so that tessellation noise
-        // disappears but legitimately distinct CAD vertices survive.
-        weldByPosition(vertices, triangles, 1e-6);
 
         checkResult(
             lib3mf_meshobject_setgeometry(
@@ -558,31 +630,45 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
             meshObject.get(), "Failed to set mesh geometry"
         );
 
-        if (!materialPropertyIDs.empty() && mesh->mMaterialIndex < materialPropertyIDs.size()) {
-            Lib3MF_uint32 matPropID = materialPropertyIDs[mesh->mMaterialIndex];
-
-            Lib3MF_uint32 uniqueResID = 0;
-            lib3mf_resource_getuniqueresourceid(baseMaterialGroup.as<Lib3MF_Resource>(), &uniqueResID);
-
-            lib3mf_meshobject_setobjectlevelproperty(
-                meshObject.as<Lib3MF_MeshObject>(), uniqueResID, matPropID
-            );
-
-            std::vector<Lib3MF::sTriangleProperties> triProps(triangles.size());
-            for (size_t f = 0; f < triangles.size(); ++f) {
-                triProps[f].m_ResourceID = uniqueResID;
-                triProps[f].m_PropertyIDs[0] = matPropID;
-                triProps[f].m_PropertyIDs[1] = matPropID;
-                triProps[f].m_PropertyIDs[2] = matPropID;
-            }
-            lib3mf_meshobject_setalltriangleproperties(
-                meshObject.as<Lib3MF_MeshObject>(),
-                triProps.size(), triProps.data()
-            );
+        bool manifoldAndOriented = false;
+        checkResult(lib3mf_meshobject_ismanifoldandoriented(
+                meshObject.as<Lib3MF_MeshObject>(), &manifoldAndOriented),
+                meshObject.get(), "Failed to validate 3MF mesh object");
+        if (!manifoldAndOriented) {
+            throw DeadlyExportError("3MF ", source,
+                    " is not manifold and oriented after geometry conversion");
         }
 
-        // Build-item transform is identity — every transform contribution has
-        // already been baked into the vertex stream above.
+        if (!materialPropertyIDs.empty() &&
+                triangleMaterials.size() == triangles.size()) {
+            const unsigned int firstMaterial = triangleMaterials.front();
+            if (firstMaterial >= materialPropertyIDs.size()) {
+                throw DeadlyExportError("3MF ", source,
+                        " references an out-of-range material");
+            }
+            checkResult(lib3mf_meshobject_setobjectlevelproperty(
+                    meshObject.as<Lib3MF_MeshObject>(), baseMaterialResourceID,
+                    materialPropertyIDs[firstMaterial]),
+                    meshObject.get(), "Failed to set object material");
+            std::vector<Lib3MF::sTriangleProperties> triProps(triangles.size());
+            for (size_t f = 0; f < triangles.size(); ++f) {
+                const unsigned int material = triangleMaterials[f];
+                if (material >= materialPropertyIDs.size()) {
+                    throw DeadlyExportError("3MF ", source,
+                            " references an out-of-range triangle material");
+                }
+                const Lib3MF_uint32 propertyID = materialPropertyIDs[material];
+                triProps[f].m_ResourceID = baseMaterialResourceID;
+                triProps[f].m_PropertyIDs[0] = propertyID;
+                triProps[f].m_PropertyIDs[1] = propertyID;
+                triProps[f].m_PropertyIDs[2] = propertyID;
+            }
+            checkResult(lib3mf_meshobject_setalltriangleproperties(
+                meshObject.as<Lib3MF_MeshObject>(),
+                triProps.size(), triProps.data()
+            ), meshObject.get(), "Failed to set triangle materials");
+        }
+
         Lib3MFHandle buildItem;
         Lib3MF::sTransform identityTransform = aiMatrixToLib3MFTransform(aiMatrix4x4());
         checkResult(
@@ -598,6 +684,135 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         checkResult(lib3mf_builditem_setuuid(buildItem.as<Lib3MF_BuildItem>(), itemUuid.c_str()),
                 buildItem.get(), "Failed to set deterministic build item UUID");
         ++meshOrdinal;
+    };
+
+    const ScenePrivateData *privateData = ScenePriv(pScene);
+    for (const NodeMeshEntry &entry : meshEntries) {
+        const aiMatrix4x4 vertexTransform =
+                axisRotation * unitScaleMatrix * entry.transform;
+        std::vector<bool> consumed(entry.meshes.size(), false);
+
+        if (privateData != nullptr) {
+            for (const ManifoldMeshTopology &topology : privateData->mManifoldMeshes) {
+                if (topology.mPositions.empty() || topology.mIndices.empty() ||
+                        topology.mIndices.size() % 3 != 0 || topology.mRuns.empty()) {
+                    throw DeadlyExportError("3MF EXT_mesh_manifold source mesh ",
+                            topology.mSourceMeshIndex, " has an invalid private topology record");
+                }
+                size_t expectedFirstIndex = 0;
+                for (const ManifoldPrimitiveRun &run : topology.mRuns) {
+                    if (run.mMeshIndex >= pScene->mNumMeshes ||
+                            pScene->mMeshes[run.mMeshIndex] == nullptr ||
+                            run.mMaterialIndex >= pScene->mNumMaterials ||
+                            pScene->mMeshes[run.mMeshIndex]->mMaterialIndex != run.mMaterialIndex ||
+                            run.mFirstIndex != expectedFirstIndex || run.mIndexCount == 0 ||
+                            run.mIndexCount % 3 != 0 || expectedFirstIndex > topology.mIndices.size() ||
+                            run.mIndexCount > topology.mIndices.size() - expectedFirstIndex) {
+                        throw DeadlyExportError("3MF EXT_mesh_manifold source mesh ",
+                                topology.mSourceMeshIndex,
+                                " has stale or invalid primitive-run provenance");
+                    }
+                    expectedFirstIndex += run.mIndexCount;
+                }
+                if (expectedFirstIndex != topology.mIndices.size()) {
+                    throw DeadlyExportError("3MF EXT_mesh_manifold source mesh ",
+                            topology.mSourceMeshIndex,
+                            " primitive runs do not partition the canonical index stream");
+                }
+
+                std::vector<size_t> matched;
+                for (const ManifoldPrimitiveRun &run : topology.mRuns) {
+                    size_t match = entry.meshes.size();
+                    for (size_t i = 0; i < entry.meshes.size(); ++i) {
+                        if (!consumed[i] && entry.meshes[i] == run.mMeshIndex &&
+                                std::find(matched.begin(), matched.end(), i) == matched.end()) {
+                            match = i;
+                            break;
+                        }
+                    }
+                    if (match == entry.meshes.size()) {
+                        matched.clear();
+                        break;
+                    }
+                    matched.push_back(match);
+                }
+                if (matched.size() != topology.mRuns.size()) {
+                    continue;
+                }
+                for (size_t match : matched) {
+                    consumed[match] = true;
+                }
+
+                std::vector<Lib3MF::sPosition> vertices(topology.mPositions.size());
+                for (size_t i = 0; i < topology.mPositions.size(); ++i) {
+                    const aiVector3D position = vertexTransform * topology.mPositions[i];
+                    vertices[i].m_Coordinates[0] = position.x;
+                    vertices[i].m_Coordinates[1] = position.y;
+                    vertices[i].m_Coordinates[2] = position.z;
+                }
+
+                std::vector<Lib3MF::sTriangle> triangles(topology.mIndices.size() / 3);
+                for (size_t i = 0; i < triangles.size(); ++i) {
+                    triangles[i].m_Indices[0] = topology.mIndices[i * 3];
+                    triangles[i].m_Indices[1] = topology.mIndices[i * 3 + 1];
+                    triangles[i].m_Indices[2] = topology.mIndices[i * 3 + 2];
+                }
+
+                std::vector<unsigned int> triangleMaterials(triangles.size());
+                for (const ManifoldPrimitiveRun &run : topology.mRuns) {
+                    const size_t firstTriangle = run.mFirstIndex / 3;
+                    const size_t triangleCount = run.mIndexCount / 3;
+                    for (size_t i = 0; i < triangleCount; ++i) {
+                        triangleMaterials[firstTriangle + i] = run.mMaterialIndex;
+                    }
+                }
+
+                const aiMesh *firstMesh = pScene->mMeshes[topology.mRuns.front().mMeshIndex];
+                emitMeshObject(
+                        firstMesh->mName.C_Str(),
+                        "EXT_mesh_manifold source mesh " +
+                                std::to_string(topology.mSourceMeshIndex),
+                        std::move(vertices), std::move(triangles), triangleMaterials);
+            }
+        }
+
+        for (size_t entryMesh = 0; entryMesh < entry.meshes.size(); ++entryMesh) {
+            if (consumed[entryMesh]) {
+                continue;
+            }
+            const unsigned int meshIndex = entry.meshes[entryMesh];
+            const aiMesh *mesh = pScene->mMeshes[meshIndex];
+            std::vector<Lib3MF::sPosition> vertices(mesh->mNumVertices);
+            for (unsigned int vertex = 0; vertex < mesh->mNumVertices; ++vertex) {
+                const aiVector3D position = vertexTransform * mesh->mVertices[vertex];
+                vertices[vertex].m_Coordinates[0] = position.x;
+                vertices[vertex].m_Coordinates[1] = position.y;
+                vertices[vertex].m_Coordinates[2] = position.z;
+            }
+
+            std::vector<Lib3MF::sTriangle> triangles;
+            triangles.reserve(mesh->mNumFaces);
+            for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
+                const aiFace &face = mesh->mFaces[faceIndex];
+                if (face.mNumIndices != 3) {
+                    continue;
+                }
+                Lib3MF::sTriangle triangle{};
+                triangle.m_Indices[0] = face.mIndices[0];
+                triangle.m_Indices[1] = face.mIndices[1];
+                triangle.m_Indices[2] = face.mIndices[2];
+                triangles.push_back(triangle);
+            }
+            weldByPosition(vertices, triangles, 1e-6);
+            std::vector<unsigned int> triangleMaterials(
+                    triangles.size(), mesh->mMaterialIndex);
+            emitMeshObject(
+                    mesh->mName.C_Str(),
+                    "fallback node " +
+                            std::string(entry.node ? entry.node->mName.C_Str() : "<root>") +
+                            " mesh " + std::to_string(meshIndex),
+                    std::move(vertices), std::move(triangles), triangleMaterials);
+        }
     }
 
     Lib3MFHandle writer;

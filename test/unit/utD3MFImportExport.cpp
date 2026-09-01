@@ -39,11 +39,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ---------------------------------------------------------------------------
 */
 #include "AbstractImportExportBase.h"
+#include "Common/ScenePrivate.h"
+#include "Common/UnitAxisContract.h"
 #include "UnitTestPCH.h"
 
 #include <assimp/Exceptional.h>
+#include <assimp/DefaultIOSystem.h>
 #include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
+#include <assimp/SceneCombiner.h>
 #include <assimp/commonMetaData.h>
 #include <assimp/config.h>
 #include <assimp/material.h>
@@ -53,6 +57,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #ifdef ASSIMP_USE_LIB3MF
 #include "AssetLib/3MF/Lib3MFBridge.h"
+#include <lib3mf_abi.hpp>
+#include <lib3mf_types.hpp>
 #endif
 
 #include <memory>
@@ -61,6 +67,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -145,7 +153,7 @@ aiScene *makePerFaceBoxScene(const aiVector3D &halfExtents) {
         t.push_back({ base + 0, base + 2, base + 3 });
     };
 
-    pushQuad({ -x, -y, -z }, { +x, +y, -z }, { +x, -y, -z }, { -x, +y, -z }); // -Z (intentionally degenerate ordering kept simple)
+    pushQuad({ -x, -y, -z }, { -x, +y, -z }, { +x, +y, -z }, { +x, -y, -z }); // -Z
     pushQuad({ -x, -y, +z }, { +x, -y, +z }, { +x, +y, +z }, { -x, +y, +z }); // +Z
     pushQuad({ -x, -y, -z }, { +x, -y, -z }, { +x, -y, +z }, { -x, -y, +z }); // -Y
     pushQuad({ -x, +y, -z }, { -x, +y, +z }, { +x, +y, +z }, { +x, +y, -z }); // +Y
@@ -181,6 +189,49 @@ aiVector3D meshExtent(const aiMesh *mesh) {
     aiVector3D mx = meshMax(mesh);
     aiVector3D mn = meshMin(mesh);
     return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
+}
+
+bool findGlobalTransformForMesh(const aiNode *node, unsigned int meshIndex,
+        const aiMatrix4x4 &parent, aiMatrix4x4 &result) {
+    const aiMatrix4x4 global = parent * node->mTransformation;
+    for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+        if (node->mMeshes[i] == meshIndex) {
+            result = global;
+            return true;
+        }
+    }
+    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+        if (findGlobalTransformForMesh(node->mChildren[i], meshIndex, global, result)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void addManifoldTopologyForMesh(aiScene *scene, unsigned int meshIndex) {
+    const aiMesh *mesh = scene->mMeshes[meshIndex];
+    Assimp::ManifoldMeshTopology topology;
+    topology.mSourceMeshIndex = meshIndex;
+    topology.mPositions.assign(mesh->mVertices, mesh->mVertices + mesh->mNumVertices);
+    for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
+        const aiFace &face = mesh->mFaces[faceIndex];
+        if (face.mNumIndices != 3) {
+            continue;
+        }
+        topology.mIndices.insert(
+                topology.mIndices.end(), face.mIndices, face.mIndices + 3);
+    }
+    topology.mRuns.push_back({
+            meshIndex, mesh->mMaterialIndex, 0, topology.mIndices.size()
+    });
+    Assimp::ScenePriv(scene)->mManifoldMeshes.push_back(std::move(topology));
+}
+
+std::vector<uint8_t> readBytes(const char *path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::vector<uint8_t>(
+            std::istreambuf_iterator<char>(stream),
+            std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -284,6 +335,461 @@ TEST_F(utD3MFImporterExporter, export3MFWithMaterials) {
     Assimp::Exporter exporter;
     EXPECT_EQ(AI_SUCCESS, exporter.Export(scene, "3mf", "ut_3mf_mat_test.3mf"));
     std::remove("ut_3mf_mat_test.3mf");
+}
+
+TEST_F(utD3MFImporterExporter, export3MFPreservesExtMeshManifoldAsOneClosedObject) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/EXT_mesh_manifold/TwoMaterialBox.glb", 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(2u, scene->mNumMeshes);
+    const Assimp::ScenePrivateData *privateData = Assimp::ScenePriv(scene);
+    ASSERT_NE(nullptr, privateData);
+    ASSERT_EQ(1u, privateData->mManifoldMeshes.size());
+    const Assimp::ManifoldMeshTopology &topology = privateData->mManifoldMeshes[0];
+    ASSERT_EQ(40u, topology.mPositions.size());
+    ASSERT_EQ(60u, topology.mIndices.size());
+    ASSERT_EQ(2u, topology.mRuns.size());
+    EXPECT_EQ(30u, topology.mRuns[0].mIndexCount);
+    EXPECT_EQ(30u, topology.mRuns[1].mIndexCount);
+
+    const char *outPath = "ut_3mf_ext_mesh_manifold.3mf";
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "3mf", outPath))
+            << exporter.GetErrorString();
+
+#ifdef ASSIMP_USE_LIB3MF
+    Lib3MF_Model model = nullptr;
+    Lib3MF_Reader reader = nullptr;
+    Lib3MF_MeshObjectIterator iterator = nullptr;
+    Lib3MF_MeshObject object = nullptr;
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_createmodel(&model));
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_model_queryreader(model, "3mf", &reader));
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_reader_readfromfile(reader, outPath));
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_model_getmeshobjects(model, &iterator));
+    bool hasNext = false;
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_resourceiterator_movenext(
+                    static_cast<Lib3MF_ResourceIterator>(iterator), &hasNext));
+    ASSERT_TRUE(hasNext);
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_meshobjectiterator_getcurrentmeshobject(iterator, &object));
+
+    Lib3MF_uint32 vertexCount = 0;
+    Lib3MF_uint32 triangleCount = 0;
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_meshobject_getvertexcount(object, &vertexCount));
+    ASSERT_EQ(LIB3MF_SUCCESS, lib3mf_meshobject_gettrianglecount(object, &triangleCount));
+    ASSERT_EQ(topology.mPositions.size(), vertexCount);
+    ASSERT_EQ(topology.mIndices.size() / 3, triangleCount);
+
+    std::vector<Lib3MF::sPosition> vertices(vertexCount);
+    std::vector<Lib3MF::sTriangle> triangles(triangleCount);
+    std::vector<Lib3MF::sTriangleProperties> properties(triangleCount);
+    Lib3MF_uint64 needed = 0;
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_meshobject_getvertices(object, vertices.size(), &needed, vertices.data()));
+    ASSERT_EQ(vertices.size(), needed);
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_meshobject_gettriangleindices(
+                    object, triangles.size(), &needed, triangles.data()));
+    ASSERT_EQ(triangles.size(), needed);
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_meshobject_getalltriangleproperties(
+                    object, properties.size(), &needed, properties.data()));
+    ASSERT_EQ(properties.size(), needed);
+
+    aiMatrix4x4 nodeTransform;
+    ASSERT_TRUE(findGlobalTransformForMesh(
+            scene->mRootNode, topology.mRuns[0].mMeshIndex,
+            aiMatrix4x4(), nodeTransform));
+    aiMatrix4x4 unitScale;
+    const float vertexScale = static_cast<float>(
+            Assimp::readSceneUnitScaleToMeters(scene) / 1e-3);
+    unitScale.a1 = vertexScale;
+    unitScale.b2 = vertexScale;
+    unitScale.c3 = vertexScale;
+    aiMatrix4x4 axis;
+    const int32_t sourceUpAxis = Assimp::readSceneUpAxis(scene);
+    if (sourceUpAxis >= 0) {
+        axis = Assimp::buildAxisRotationMatrix(sourceUpAxis, 2);
+    }
+    const aiMatrix4x4 expectedTransform = axis * unitScale * nodeTransform;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const aiVector3D expected = expectedTransform * topology.mPositions[i];
+        EXPECT_NEAR(expected.x, vertices[i].m_Coordinates[0], 1e-6f);
+        EXPECT_NEAR(expected.y, vertices[i].m_Coordinates[1], 1e-6f);
+        EXPECT_NEAR(expected.z, vertices[i].m_Coordinates[2], 1e-6f);
+    }
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        EXPECT_EQ(topology.mIndices[i * 3], triangles[i].m_Indices[0]);
+        EXPECT_EQ(topology.mIndices[i * 3 + 1], triangles[i].m_Indices[1]);
+        EXPECT_EQ(topology.mIndices[i * 3 + 2], triangles[i].m_Indices[2]);
+        const Lib3MF_uint32 expectedProperty = properties[i < 10 ? 0 : 10].m_PropertyIDs[0];
+        EXPECT_EQ(expectedProperty, properties[i].m_PropertyIDs[0]);
+    }
+    EXPECT_NE(properties[0].m_PropertyIDs[0], properties[10].m_PropertyIDs[0]);
+    bool manifoldAndOriented = false;
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_meshobject_ismanifoldandoriented(object, &manifoldAndOriented));
+    EXPECT_TRUE(manifoldAndOriented);
+    ASSERT_EQ(LIB3MF_SUCCESS,
+            lib3mf_resourceiterator_movenext(
+                    static_cast<Lib3MF_ResourceIterator>(iterator), &hasNext));
+    EXPECT_FALSE(hasNext);
+    lib3mf_release(object);
+    lib3mf_release(iterator);
+    lib3mf_release(reader);
+    lib3mf_release(model);
+#endif
+
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    EXPECT_EQ(1u, roundtrip->mNumMeshes);
+    if (roundtrip->mNumMeshes == 1u) {
+        EXPECT_EQ(40u, roundtrip->mMeshes[0]->mNumVertices);
+        EXPECT_EQ(20u, roundtrip->mMeshes[0]->mNumFaces);
+    }
+
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, importExtMeshManifoldRejectsInvalidContracts) {
+    struct InvalidCase {
+        const char *file;
+        const char *error;
+    };
+    const InvalidCase cases[] = {
+        { "MissingMergeValues.glb",
+          "GLTF: EXT_mesh_manifold in mesh meshes[0] (\"Shape 1\") must define mergeIndices and mergeValues together" },
+        { "MergeCountMismatch.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): merge accessors must be compatible unsigned SCALAR accessors" },
+        { "InvalidCanonicalIndexType.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): manifoldPrimitive indices must use an unsigned SCALAR accessor" },
+        { "CanonicalIndexOutOfRange.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): canonical index 3 is out of range" },
+        { "CanonicalCountMismatch.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"CanonicalCountMismatch\"): canonical index count must equal the render index count and be divisible by three" },
+        { "PositionNonFinite.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): POSITION contains a non-finite value at vertex 0" },
+        { "UnequalMergePositions.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): merge accessor entry 0 joins vertices with different POSITION values" },
+        { "MergeEntryOutOfRange.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): merge accessor entry 0 is out of range or duplicated" },
+        { "MergeEntryDuplicated.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): merge accessor entry 1 is out of range or duplicated" },
+        { "MergeReconstructionMismatch.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): merge accessors do not exactly reproduce the canonical index stream" },
+        { "CanonicalMaterial.glb",
+          "GLTF: EXT_mesh_manifold manifoldPrimitive in mesh meshes[0] (\"Shape 1\") must not contain material or targets" },
+        { "CanonicalExtraAttribute.glb",
+          "GLTF: EXT_mesh_manifold manifoldPrimitive in mesh meshes[0] (\"Shape 1\") must contain only a POSITION accessor" },
+        { "CanonicalMorphTarget.glb",
+          "GLTF: EXT_mesh_manifold manifoldPrimitive in mesh meshes[0] (\"Shape 1\") must not contain material or targets" },
+        { "RenderAttributeMismatch.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): same attributes in different render primitives must reference the same accessors" },
+        { "RenderIndexBufferViewMismatch.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): all render primitive indices must reference the same bufferView" },
+        { "RenderIndexOutOfRange.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): render primitive 0 contains an out-of-range index" },
+        { "RenderPrimitiveUnindexed.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"Shape 1\"): render primitive 0 must use indexed TRIANGLES" },
+        { "OpenEdge.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"OpenEdge\"): canonical half-edge (1, 2) does not have exactly one reverse half-edge" },
+        { "SameDirectionEdge.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"SameDirectionEdge\"): canonical half-edge (0, 1) does not have exactly one reverse half-edge" },
+        { "OversubscribedEdge.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"OversubscribedEdge\"): canonical half-edge (0, 1) does not have exactly one reverse half-edge" },
+        { "DisconnectedVertexLink.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"DisconnectedVertexLink\"): canonical vertex 0 has disconnected incident triangle fans" },
+        { "RepeatedTriangleVertex.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"RepeatedTriangleVertex\"): canonical triangle 0 repeats a vertex" },
+        { "ZeroAreaTriangle.glb",
+          "GLTF: EXT_mesh_manifold mesh meshes[0] (\"ZeroAreaTriangle\"): canonical triangle 0 has zero area" },
+    };
+
+    for (const InvalidCase &testCase : cases) {
+        SCOPED_TRACE(testCase.file);
+        Assimp::Importer importer;
+        const std::string path = std::string(ASSIMP_TEST_MODELS_DIR) +
+                "/glTF2/EXT_mesh_manifold/invalid/" + testCase.file;
+        EXPECT_EQ(nullptr, importer.ReadFile(path, 0));
+        EXPECT_STREQ(testCase.error, importer.GetErrorString());
+    }
+}
+
+TEST_F(utD3MFImporterExporter, copyScenePreservesExtMeshManifoldTopology) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/EXT_mesh_manifold/TwoMaterialBox.glb", 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+
+    aiScene *rawCopy = nullptr;
+    Assimp::SceneCombiner::CopyScene(&rawCopy, scene);
+    std::unique_ptr<aiScene> copy(rawCopy);
+    ASSERT_NE(nullptr, copy);
+    const Assimp::ScenePrivateData *sourcePrivate = Assimp::ScenePriv(scene);
+    const Assimp::ScenePrivateData *copyPrivate = Assimp::ScenePriv(copy.get());
+    ASSERT_NE(nullptr, sourcePrivate);
+    ASSERT_NE(nullptr, copyPrivate);
+    ASSERT_EQ(1u, sourcePrivate->mManifoldMeshes.size());
+    ASSERT_EQ(1u, copyPrivate->mManifoldMeshes.size());
+
+    const auto &source = sourcePrivate->mManifoldMeshes[0];
+    const auto &copied = copyPrivate->mManifoldMeshes[0];
+    ASSERT_EQ(source.mPositions.size(), copied.mPositions.size());
+    ASSERT_EQ(source.mIndices, copied.mIndices);
+    ASSERT_EQ(source.mRuns.size(), copied.mRuns.size());
+    for (size_t i = 0; i < source.mPositions.size(); ++i) {
+        EXPECT_EQ(source.mPositions[i], copied.mPositions[i]);
+    }
+    for (size_t i = 0; i < source.mRuns.size(); ++i) {
+        EXPECT_EQ(source.mRuns[i].mMeshIndex, copied.mRuns[i].mMeshIndex);
+        EXPECT_EQ(source.mRuns[i].mMaterialIndex, copied.mRuns[i].mMaterialIndex);
+        EXPECT_EQ(source.mRuns[i].mFirstIndex, copied.mRuns[i].mFirstIndex);
+        EXPECT_EQ(source.mRuns[i].mIndexCount, copied.mRuns[i].mIndexCount);
+    }
+}
+
+TEST_F(utD3MFImporterExporter, export3MFRejectsTopologyChangingPostProcessForManifoldSource) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/EXT_mesh_manifold/TwoMaterialBox.glb", 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+
+    Assimp::Exporter exporter;
+    EXPECT_EQ(AI_FAILURE, exporter.Export(
+            scene, "3mf", "ut_3mf_unsafe_postprocess.3mf",
+            aiProcess_PreTransformVertices));
+    EXPECT_EQ(
+            "3MF export cannot preserve EXT_mesh_manifold after topology-changing "
+            "post-processing flags: " +
+                    std::to_string(aiProcess_PreTransformVertices) +
+                    " (source mesh 0)",
+            exporter.GetErrorString());
+    std::remove("ut_3mf_unsafe_postprocess.3mf");
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathSupportsCanonicalRenderIndices) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_one_material.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    ASSERT_EQ(1u, roundtrip->mNumMeshes);
+    EXPECT_EQ(8u, roundtrip->mMeshes[0]->mNumVertices);
+    EXPECT_EQ(12u, roundtrip->mMeshes[0]->mNumFaces);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathAppliesNodeUnitAndAxisTransforms) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f, 2.0f, 3.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    scene->mMetaData = new aiMetadata();
+    scene->mMetaData->Add(AI_METADATA_UNIT_SCALE_TO_METERS, 1.0);
+    scene->mMetaData->Add(AI_METADATA_UP_AXIS, static_cast<int32_t>(1));
+
+    delete[] scene->mRootNode->mMeshes;
+    scene->mRootNode->mMeshes = nullptr;
+    scene->mRootNode->mNumMeshes = 0;
+    aiMatrix4x4 translation;
+    aiMatrix4x4::Translation(aiVector3D(5.0f, 0.0f, 0.0f), translation);
+    scene->mRootNode->mTransformation = translation;
+
+    auto *child = new aiNode();
+    child->mParent = scene->mRootNode;
+    child->mNumMeshes = 1;
+    child->mMeshes = new unsigned int[1]{0};
+    aiMatrix4x4 rotation;
+    aiMatrix4x4::RotationZ(static_cast<ai_real>(AI_MATH_PI_F * 0.5f), rotation);
+    aiMatrix4x4 scaling;
+    aiMatrix4x4::Scaling(aiVector3D(2.0f, 3.0f, 4.0f), scaling);
+    child->mTransformation = rotation * scaling;
+    scene->mRootNode->mNumChildren = 1;
+    scene->mRootNode->mChildren = new aiNode *[1]{child};
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_transform.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    ASSERT_EQ(1u, roundtrip->mNumMeshes);
+    const aiVector3D extent = meshExtent(roundtrip->mMeshes[0]);
+    EXPECT_NEAR(12000.0f, extent.x, 1e-2f);
+    EXPECT_NEAR(24000.0f, extent.y, 1e-2f);
+    EXPECT_NEAR(4000.0f, extent.z, 1e-2f);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathCorrectsReflectedWinding) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    scene->mRootNode->mTransformation.a1 = -1.0f;
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_reflected.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    ASSERT_EQ(1u, roundtrip->mNumMeshes);
+    EXPECT_EQ(12u, roundtrip->mMeshes[0]->mNumFaces);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathOrientsDisconnectedComponentsIndependently) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    auto &topology = Assimp::ScenePriv(scene.get())->mManifoldMeshes[0];
+    const std::vector<aiVector3D> positions = topology.mPositions;
+    const std::vector<unsigned int> indices = topology.mIndices;
+    topology.mPositions.clear();
+    for (const aiVector3D &position : positions) {
+        topology.mPositions.emplace_back(position.x - 3.0f, position.y, position.z);
+    }
+    for (const aiVector3D &position : positions) {
+        topology.mPositions.emplace_back(position.x + 3.0f, position.y, position.z);
+    }
+    topology.mIndices = indices;
+    for (size_t i = 0; i < indices.size(); i += 3) {
+        topology.mIndices.push_back(indices[i] + 8);
+        topology.mIndices.push_back(indices[i + 2] + 8);
+        topology.mIndices.push_back(indices[i + 1] + 8);
+    }
+    topology.mRuns[0].mIndexCount = topology.mIndices.size();
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_components.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    ASSERT_EQ(1u, roundtrip->mNumMeshes);
+    EXPECT_EQ(16u, roundtrip->mMeshes[0]->mNumVertices);
+    EXPECT_EQ(24u, roundtrip->mMeshes[0]->mNumFaces);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathEmitsEachNodeInstance) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    delete[] scene->mRootNode->mMeshes;
+    scene->mRootNode->mMeshes = nullptr;
+    scene->mRootNode->mNumMeshes = 0;
+    scene->mRootNode->mNumChildren = 2;
+    scene->mRootNode->mChildren = new aiNode *[2];
+    for (unsigned int i = 0; i < 2; ++i) {
+        auto *child = new aiNode();
+        child->mParent = scene->mRootNode;
+        child->mNumMeshes = 1;
+        child->mMeshes = new unsigned int[1]{0};
+        aiMatrix4x4::Translation(
+                aiVector3D(i == 0 ? -3.0f : 3.0f, 0.0f, 0.0f),
+                child->mTransformation);
+        scene->mRootNode->mChildren[i] = child;
+    }
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_instances.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    EXPECT_EQ(2u, roundtrip->mNumMeshes);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFSupportsMixedExactAndFallbackMeshes) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    std::unique_ptr<aiScene> secondScene(makeBoxScene(aiVector3D(1.0f)));
+    for (unsigned int i = 0; i < secondScene->mMeshes[0]->mNumVertices; ++i) {
+        secondScene->mMeshes[0]->mVertices[i].x += 4.0f;
+    }
+    aiMesh *secondMesh = secondScene->mMeshes[0];
+    secondScene->mMeshes[0] = nullptr;
+    aiMesh *firstMesh = scene->mMeshes[0];
+    delete[] scene->mMeshes;
+    scene->mNumMeshes = 2;
+    scene->mMeshes = new aiMesh *[2]{firstMesh, secondMesh};
+    delete[] scene->mRootNode->mMeshes;
+    scene->mRootNode->mNumMeshes = 2;
+    scene->mRootNode->mMeshes = new unsigned int[2]{0, 1};
+    addManifoldTopologyForMesh(scene.get(), 0);
+
+    Assimp::Exporter exporter;
+    const char *outPath = "ut_3mf_ext_mesh_manifold_mixed.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene.get(), "3mf", outPath))
+            << exporter.GetErrorString();
+    Assimp::Importer reimporter;
+    const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
+    ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
+    EXPECT_EQ(2u, roundtrip->mNumMeshes);
+    std::remove(outPath);
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathRejectsZeroVolumeComponent) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    auto &topology = Assimp::ScenePriv(scene.get())->mManifoldMeshes[0];
+    topology.mPositions = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}
+    };
+    topology.mIndices = {
+        0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3
+    };
+    topology.mRuns[0].mIndexCount = topology.mIndices.size();
+
+    Assimp::Exporter exporter;
+    EXPECT_EQ(AI_FAILURE, exporter.Export(
+            scene.get(), "3mf", "ut_3mf_ext_mesh_manifold_zero_volume.3mf"));
+    EXPECT_STREQ(
+            "3MF EXT_mesh_manifold source mesh 0 component containing triangle 0 "
+            "has zero signed volume",
+            exporter.GetErrorString());
+    std::remove("ut_3mf_ext_mesh_manifold_zero_volume.3mf");
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathRejectsStalePrimitiveRuns) {
+    std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
+    addManifoldTopologyForMesh(scene.get(), 0);
+    Assimp::ScenePriv(scene.get())->mManifoldMeshes[0].mRuns[0].mFirstIndex = 3;
+
+    Assimp::Exporter exporter;
+    EXPECT_EQ(AI_FAILURE, exporter.Export(
+            scene.get(), "3mf", "ut_3mf_ext_mesh_manifold_stale.3mf"));
+    EXPECT_STREQ(
+            "3MF EXT_mesh_manifold source mesh 0 has stale or invalid primitive-run provenance",
+            exporter.GetErrorString());
+    std::remove("ut_3mf_ext_mesh_manifold_stale.3mf");
+}
+
+TEST_F(utD3MFImporterExporter, export3MFExactPathIsByteDeterministic) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/glTF2/EXT_mesh_manifold/TwoMaterialBox.glb", 0);
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+
+    Assimp::Exporter exporter;
+    const char *firstPath = "ut_3mf_ext_mesh_manifold_deterministic_1.3mf";
+    const char *secondPath = "ut_3mf_ext_mesh_manifold_deterministic_2.3mf";
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "3mf", firstPath))
+            << exporter.GetErrorString();
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "3mf", secondPath))
+            << exporter.GetErrorString();
+    EXPECT_EQ(readBytes(firstPath), readBytes(secondPath));
+    std::remove(firstPath);
+    std::remove(secondPath);
 }
 
 // ===== ROUNDTRIP TESTS =====
@@ -763,7 +1269,7 @@ TEST_F(utD3MFImporterExporter, glbToThreeMfRoundtripPreservesPhysicalDimensions)
 
 namespace {
 
-// Build a one-mesh, one-triangle scene where the first vertex carries enough
+// Build a closed tetrahedron where the first vertex carries enough
 // non-trivial decimal digits to expose lib3mf's truncation behavior. Caller
 // owns the returned scene.
 aiScene *buildSinglePrecisionVertexScene() {
@@ -773,19 +1279,27 @@ aiScene *buildSinglePrecisionVertexScene() {
     aiMesh *mesh = new aiMesh();
     scene->mMeshes[0] = mesh;
 
-    mesh->mNumVertices = 3;
-    mesh->mVertices = new aiVector3D[3];
+    mesh->mNumVertices = 4;
+    mesh->mVertices = new aiVector3D[4];
     // Diagnostic vertex: float repr of 0.123456789 ≈ 0.12345679f.
     // - precision=6 truncation -> "0.123456" (re-imports as 0.123456f, error ~7e-7)
     // - precision=9 truncation -> "0.123456790" (re-imports as ~0.12345679f, error <1e-8)
     mesh->mVertices[0] = aiVector3D(0.123456789f, 0.0f, 0.0f);
     mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
     mesh->mVertices[2] = aiVector3D(0.0f, 1.0f, 0.0f);
+    mesh->mVertices[3] = aiVector3D(0.0f, 0.0f, 1.0f);
 
-    mesh->mNumFaces = 1;
-    mesh->mFaces = new aiFace[1];
-    mesh->mFaces[0].mNumIndices = 3;
-    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
+    const unsigned int faces[4][3] = {
+        {0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}
+    };
+    mesh->mNumFaces = 4;
+    mesh->mFaces = new aiFace[4];
+    for (unsigned int i = 0; i < 4; ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3]{
+            faces[i][0], faces[i][1], faces[i][2]
+        };
+    }
 
     scene->mNumMaterials = 1;
     scene->mMaterials = new aiMaterial *[1];
@@ -884,17 +1398,30 @@ TEST_F(utD3MFImporterExporter, export3MFRejectsOutOfRangePrecision) {
 
 namespace {
 
-aiMesh *buildColoredTriangleMesh(unsigned int materialIndex) {
+aiMesh *buildColoredBoxMesh(unsigned int materialIndex, float offsetX) {
     aiMesh *mesh = new aiMesh();
-    mesh->mNumVertices = 3;
-    mesh->mVertices = new aiVector3D[3];
-    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
-    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
-    mesh->mVertices[2] = aiVector3D(0.0f, 1.0f, 0.0f);
-    mesh->mNumFaces = 1;
-    mesh->mFaces = new aiFace[1];
-    mesh->mFaces[0].mNumIndices = 3;
-    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
+    const aiVector3D vertices[8] = {
+        {offsetX - 1, -1, -1}, {offsetX + 1, -1, -1},
+        {offsetX + 1, +1, -1}, {offsetX - 1, +1, -1},
+        {offsetX - 1, -1, +1}, {offsetX + 1, -1, +1},
+        {offsetX + 1, +1, +1}, {offsetX - 1, +1, +1},
+    };
+    const unsigned int triangles[12][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2},
+        {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5},
+    };
+    mesh->mNumVertices = 8;
+    mesh->mVertices = new aiVector3D[8];
+    std::copy(std::begin(vertices), std::end(vertices), mesh->mVertices);
+    mesh->mNumFaces = 12;
+    mesh->mFaces = new aiFace[12];
+    for (unsigned int i = 0; i < 12; ++i) {
+        mesh->mFaces[i].mNumIndices = 3;
+        mesh->mFaces[i].mIndices = new unsigned int[3]{
+            triangles[i][0], triangles[i][1], triangles[i][2]
+        };
+    }
     mesh->mMaterialIndex = materialIndex;
     return mesh;
 }
@@ -912,9 +1439,9 @@ TEST_F(utD3MFImporterExporter, export3MFPreservesMeshCountWithJoinIdenticalVerti
     std::unique_ptr<aiScene> scene(new aiScene());
     scene->mNumMeshes = 3;
     scene->mMeshes = new aiMesh *[3];
-    scene->mMeshes[0] = buildColoredTriangleMesh(0);
-    scene->mMeshes[1] = buildColoredTriangleMesh(1);
-    scene->mMeshes[2] = buildColoredTriangleMesh(2);
+    scene->mMeshes[0] = buildColoredBoxMesh(0, -4.0f);
+    scene->mMeshes[1] = buildColoredBoxMesh(1, 0.0f);
+    scene->mMeshes[2] = buildColoredBoxMesh(2, 4.0f);
 
     scene->mNumMaterials = 3;
     scene->mMaterials = new aiMaterial *[3];
@@ -967,22 +1494,25 @@ TEST_F(utD3MFImporterExporter, export3MFTriangulatesQuadFaces) {
     aiMesh *mesh = new aiMesh();
     scene->mMeshes[0] = mesh;
 
-    mesh->mNumVertices = 4;
-    mesh->mVertices = new aiVector3D[4];
-    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
-    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
-    mesh->mVertices[2] = aiVector3D(1.0f, 1.0f, 0.0f);
-    mesh->mVertices[3] = aiVector3D(0.0f, 1.0f, 0.0f);
-
-    // Single quad face — without enforced aiProcess_Triangulate, the
-    // Lib3MFBridge would skip this 4-index face (and prior to R3 would
-    // emit a degenerate (0,0,0) triangle that lib3mf rejects). With R2's
-    // enforced Triangulate, the quad becomes 2 triangles before the bridge
-    // sees the scene, and lib3mf accepts the geometry.
-    mesh->mNumFaces = 1;
-    mesh->mFaces = new aiFace[1];
-    mesh->mFaces[0].mNumIndices = 4;
-    mesh->mFaces[0].mIndices = new unsigned int[4]{0, 1, 2, 3};
+    const aiVector3D vertices[8] = {
+        {-1, -1, -1}, {+1, -1, -1}, {+1, +1, -1}, {-1, +1, -1},
+        {-1, -1, +1}, {+1, -1, +1}, {+1, +1, +1}, {-1, +1, +1},
+    };
+    const unsigned int quads[6][4] = {
+        {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+        {3, 7, 6, 2}, {0, 4, 7, 3}, {1, 2, 6, 5},
+    };
+    mesh->mNumVertices = 8;
+    mesh->mVertices = new aiVector3D[8];
+    std::copy(std::begin(vertices), std::end(vertices), mesh->mVertices);
+    mesh->mNumFaces = 6;
+    mesh->mFaces = new aiFace[6];
+    for (unsigned int i = 0; i < 6; ++i) {
+        mesh->mFaces[i].mNumIndices = 4;
+        mesh->mFaces[i].mIndices = new unsigned int[4]{
+            quads[i][0], quads[i][1], quads[i][2], quads[i][3]
+        };
+    }
 
     scene->mNumMaterials = 1;
     scene->mMaterials = new aiMaterial *[1];
@@ -1001,7 +1531,7 @@ TEST_F(utD3MFImporterExporter, export3MFTriangulatesQuadFaces) {
     ASSERT_NE(nullptr, reimported);
     ASSERT_GE(reimported->mNumMeshes, 1u);
 
-    EXPECT_EQ(2u, reimported->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(12u, reimported->mMeshes[0]->mNumFaces);
     for (unsigned int f = 0; f < reimported->mMeshes[0]->mNumFaces; ++f) {
         EXPECT_EQ(3u, reimported->mMeshes[0]->mFaces[f].mNumIndices);
     }
@@ -1010,37 +1540,7 @@ TEST_F(utD3MFImporterExporter, export3MFTriangulatesQuadFaces) {
 }
 
 TEST_F(utD3MFImporterExporter, export3MFWeldsIdenticalVerticesWithinMesh) {
-    std::unique_ptr<aiScene> scene(new aiScene());
-    scene->mNumMeshes = 1;
-    scene->mMeshes = new aiMesh *[1];
-    aiMesh *mesh = new aiMesh();
-    scene->mMeshes[0] = mesh;
-
-    // 6 vertices forming 2 triangles that share 2 bit-identical vertices
-    // (i.e. only 4 unique positions, but stored as 6).
-    mesh->mNumVertices = 6;
-    mesh->mVertices = new aiVector3D[6];
-    mesh->mVertices[0] = aiVector3D(0.0f, 0.0f, 0.0f);
-    mesh->mVertices[1] = aiVector3D(1.0f, 0.0f, 0.0f);
-    mesh->mVertices[2] = aiVector3D(1.0f, 1.0f, 0.0f);
-    mesh->mVertices[3] = aiVector3D(0.0f, 0.0f, 0.0f); // duplicate of vertex 0
-    mesh->mVertices[4] = aiVector3D(1.0f, 1.0f, 0.0f); // duplicate of vertex 2
-    mesh->mVertices[5] = aiVector3D(0.0f, 1.0f, 0.0f);
-
-    mesh->mNumFaces = 2;
-    mesh->mFaces = new aiFace[2];
-    mesh->mFaces[0].mNumIndices = 3;
-    mesh->mFaces[0].mIndices = new unsigned int[3]{0, 1, 2};
-    mesh->mFaces[1].mNumIndices = 3;
-    mesh->mFaces[1].mIndices = new unsigned int[3]{3, 4, 5};
-
-    scene->mNumMaterials = 1;
-    scene->mMaterials = new aiMaterial *[1];
-    scene->mMaterials[0] = new aiMaterial();
-
-    scene->mRootNode = new aiNode();
-    scene->mRootNode->mNumMeshes = 1;
-    scene->mRootNode->mMeshes = new unsigned int[1]{0};
+    std::unique_ptr<aiScene> scene(makePerFaceBoxScene(aiVector3D(1.0f)));
 
     Assimp::Exporter exporter;
     const char *outPath = "ut_3mf_weld_vertices.3mf";
@@ -1051,10 +1551,8 @@ TEST_F(utD3MFImporterExporter, export3MFWeldsIdenticalVerticesWithinMesh) {
     ASSERT_NE(nullptr, reimported);
     ASSERT_GE(reimported->mNumMeshes, 1u);
 
-    // After the enforced JoinIdenticalVertices, the duplicates collapse
-    // and only 4 unique vertices remain.
-    EXPECT_EQ(4u, reimported->mMeshes[0]->mNumVertices);
-    EXPECT_EQ(2u, reimported->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(8u, reimported->mMeshes[0]->mNumVertices);
+    EXPECT_EQ(12u, reimported->mMeshes[0]->mNumFaces);
 
     std::remove(outPath);
 }
@@ -1075,7 +1573,7 @@ TEST_F(utD3MFImporterExporter, export3MFWeldsIdenticalVerticesWithinMesh) {
 
 #ifdef ASSIMP_USE_LIB3MF
 
-TEST_F(utD3MFImporterExporter, export3MFBridgeHandlesNonTriangleFacesWithoutDegeneratePollution) {
+TEST_F(utD3MFImporterExporter, export3MFBridgeRejectsOpenGeometryAfterSkippingNonTriangleFaces) {
     std::unique_ptr<aiScene> scene(new aiScene());
     scene->mNumMeshes = 1;
     scene->mMeshes = new aiMesh *[1];
@@ -1110,22 +1608,11 @@ TEST_F(utD3MFImporterExporter, export3MFBridgeHandlesNonTriangleFacesWithoutDege
     Assimp::DefaultIOSystem ioSystem;
     const std::string outPath = "ut_3mf_bridge_polygon.3mf";
 
-    // Bypass Assimp::Exporter to skip the enforced aiProcess_Triangulate.
-    // Pre-R3 this throws DeadlyExportError; post-R3 it succeeds because
-    // push_back leaves the triangle vector size = 1 (just the real triangle).
-    EXPECT_NO_THROW(
-        Assimp::D3MF::Lib3MFBridge::ExportScene(scene.get(), outPath, &ioSystem)
-    );
-
-    Assimp::Importer importer;
-    const aiScene *reimported = importer.ReadFile(outPath, 0);
-    ASSERT_NE(nullptr, reimported);
-    ASSERT_GE(reimported->mNumMeshes, 1u);
-
-    // Only the actual triangle survives; the pentagon was skipped, never
-    // emitted as a degenerate.
-    EXPECT_EQ(1u, reimported->mMeshes[0]->mNumFaces);
-
+    // Bypass Assimp::Exporter to prove the bridge rejects the open triangle
+    // left after unsupported faces are skipped.
+    EXPECT_THROW(
+            Assimp::D3MF::Lib3MFBridge::ExportScene(scene.get(), outPath, &ioSystem),
+            DeadlyExportError);
     std::remove(outPath.c_str());
 }
 

@@ -1734,6 +1734,44 @@ inline void Mesh::Read(Value &pJSON_Object, Asset &pAsset_Root) {
         }
     }
 
+    if (Value *extension = FindExtension(pJSON_Object, "EXT_mesh_manifold")) {
+        manifold.present = true;
+        Value *primitive = FindObject(*extension, "manifoldPrimitive");
+        if (primitive == nullptr) {
+            throw DeadlyImportError("GLTF: EXT_mesh_manifold in mesh ", getContextForErrorMessages(id, name),
+                    " is missing manifoldPrimitive");
+        }
+
+        manifold.primitive.mode = MemberOrDefault(*primitive, "mode", PrimitiveMode_TRIANGLES);
+        if (Value *indices = FindUInt(*primitive, "indices")) {
+            manifold.primitive.indices = pAsset_Root.accessors.Retrieve(indices->GetUint());
+        }
+        if (Value *attributes = FindObject(*primitive, "attributes")) {
+            if (attributes->MemberCount() != 1 || !attributes->HasMember("POSITION") ||
+                    !(*attributes)["POSITION"].IsUint()) {
+                throw DeadlyImportError("GLTF: EXT_mesh_manifold manifoldPrimitive in mesh ",
+                        getContextForErrorMessages(id, name), " must contain only a POSITION accessor");
+            }
+            manifold.primitive.attributes.position.push_back(
+                    pAsset_Root.accessors.Retrieve((*attributes)["POSITION"].GetUint()));
+        }
+        if (primitive->HasMember("material") || primitive->HasMember("targets")) {
+            throw DeadlyImportError("GLTF: EXT_mesh_manifold manifoldPrimitive in mesh ",
+                    getContextForErrorMessages(id, name), " must not contain material or targets");
+        }
+
+        Value *mergeIndices = FindUInt(*extension, "mergeIndices");
+        Value *mergeValues = FindUInt(*extension, "mergeValues");
+        if ((mergeIndices == nullptr) != (mergeValues == nullptr)) {
+            throw DeadlyImportError("GLTF: EXT_mesh_manifold in mesh ", getContextForErrorMessages(id, name),
+                    " must define mergeIndices and mergeValues together");
+        }
+        if (mergeIndices != nullptr) {
+            manifold.mergeIndices = pAsset_Root.accessors.Retrieve(mergeIndices->GetUint());
+            manifold.mergeValues = pAsset_Root.accessors.Retrieve(mergeValues->GetUint());
+        }
+    }
+
     Value *curWeights = FindArray(pJSON_Object, "weights");
     if (nullptr != curWeights) {
         this->weights.resize(curWeights->Size());
@@ -2261,6 +2299,7 @@ inline void Asset::ReadExtensionsRequired(Document &doc) {
 
     CHECK_REQUIRED_EXT(KHR_draco_mesh_compression);
     CHECK_REQUIRED_EXT(KHR_texture_basisu);
+    CHECK_REQUIRED_EXT(EXT_mesh_manifold);
 
 #undef CHECK_REQUIRED_EXT
 }
@@ -2294,6 +2333,7 @@ inline void Asset::ReadExtensionsUsed(Document &doc) {
     CHECK_EXT(KHR_animation_pointer);
     CHECK_EXT(KHR_texture_basisu);
     CHECK_EXT(EXT_texture_webp);
+    CHECK_EXT(EXT_mesh_manifold);
 
 #undef CHECK_EXT
 }

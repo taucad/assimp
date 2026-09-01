@@ -928,10 +928,17 @@ struct Mesh : public Object {
         // extension: FB_ngon_encoding
         bool ngonEncoded;
 
-        Primitive(): ngonEncoded(false) {}
+        Primitive(): mode(PrimitiveMode_TRIANGLES), ngonEncoded(false) {}
     };
 
     std::vector<Primitive> primitives;
+
+    struct Manifold {
+        bool present = false;
+        Primitive primitive;
+        Ref<Accessor> mergeIndices;
+        Ref<Accessor> mergeValues;
+    } manifold;
 
     std::vector<float> weights;
     std::vector<std::string> targetNames;
@@ -1174,6 +1181,7 @@ public:
         bool FB_ngon_encoding;
         bool KHR_texture_basisu;
         bool EXT_texture_webp;
+        bool EXT_mesh_manifold;
 
         Extensions() :
                 KHR_materials_pbrSpecularGlossiness(false),
@@ -1193,7 +1201,8 @@ public:
                 KHR_animation_pointer(false),
                 FB_ngon_encoding(false),
                 KHR_texture_basisu(false),
-                EXT_texture_webp(false) {
+                EXT_texture_webp(false),
+                EXT_mesh_manifold(false) {
             // empty
         }
     } extensionsUsed;
@@ -1202,8 +1211,9 @@ public:
     struct RequiredExtensions {
         bool KHR_draco_mesh_compression;
         bool KHR_texture_basisu;
+        bool EXT_mesh_manifold;
 
-        RequiredExtensions() : KHR_draco_mesh_compression(false), KHR_texture_basisu(false) {
+        RequiredExtensions() : KHR_draco_mesh_compression(false), KHR_texture_basisu(false), EXT_mesh_manifold(false) {
             // empty
         }
     } extensionsRequired;
