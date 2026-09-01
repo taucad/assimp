@@ -1448,6 +1448,7 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
             lib3mf_repo
             GIT_REPOSITORY "https://github.com/3MFConsortium/lib3mf"
             GIT_TAG        ${LIB3MF_GIT_TAG}
+            GIT_SHALLOW    TRUE
             GIT_SUBMODULES ""
     )
     # Use FetchContent_Populate (not MakeAvailable) because we only need the source files;
