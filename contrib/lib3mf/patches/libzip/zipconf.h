@@ -13,6 +13,11 @@
 
 #define ZIP_STATIC
 
+#if !defined(__clang__)
+#define _Nonnull
+#define _Nullable
+#endif
+
 #include <stdint.h>
 
 typedef int8_t zip_int8_t;
