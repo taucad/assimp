@@ -1436,9 +1436,10 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
     set(Lib3MF_REPO_ABSPATH "${Lib3MF_BASE_ABSPATH}/autoclone")
 
     # v2.4.1 stable release
-    set(LIB3MF_GIT_TAG "v2.4.1")
+    set(LIB3MF_COMMIT "20c335489c69d15c64f3eaf1e15143b8176901f5")
+    set(LIB3MF_ARCHIVE_SHA256 "51fce5bbaae5f6009c6328f2548f5faf64cb5539e425b63693af32824ed90c2f")
     message("****")
-    message("\n\n**** Cloning lib3mf repo, git tag ${LIB3MF_GIT_TAG}\n\n")
+    message("\n\n**** Fetching lib3mf repo, commit ${LIB3MF_COMMIT}\n\n")
 
     include(FetchContent)
     set(FETCHCONTENT_BASE_DIR ${Lib3MF_REPO_ABSPATH})
@@ -1446,10 +1447,9 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
     set(FETCHCONTENT_UPDATES_DISCONNECTED on)
     FetchContent_Declare(
             lib3mf_repo
-            GIT_REPOSITORY "https://github.com/3MFConsortium/lib3mf"
-            GIT_TAG        ${LIB3MF_GIT_TAG}
-            GIT_SHALLOW    TRUE
-            GIT_SUBMODULES ""
+            URL "https://github.com/3MFConsortium/lib3mf/archive/${LIB3MF_COMMIT}.tar.gz"
+            URL_HASH "SHA256=${LIB3MF_ARCHIVE_SHA256}"
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE
     )
     # Use FetchContent_Populate (not MakeAvailable) because we only need the source files;
     # lib3mf's own CMakeLists.txt is not compatible and would conflict with assimp's build.
