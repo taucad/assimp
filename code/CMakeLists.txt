@@ -1142,7 +1142,7 @@ IF (ASSIMP_BUILD_IFC_IMPORTER)
     message("\n\n**** Cloning web-ifc repo, git tag ${WEBIFC_GIT_TAG}\n\n")
 
     # Patch required for C++20 compatibility with Apple Clang
-    set(WEBIFC_PATCH_CMD patch -p1 < ${WebIFC_BASE_ABSPATH}/patches/web-ifc-cpp20-compatibility.patch)
+    set(WEBIFC_PATCH_CMD git apply ${WebIFC_BASE_ABSPATH}/patches/web-ifc-cpp20-compatibility.patch)
 
     # Note: CMake's "FetchContent" (which executes at configure time) is much better for this use case
     #       than "ExternalProject" (which executes at build time); we just want to clone a repo and
