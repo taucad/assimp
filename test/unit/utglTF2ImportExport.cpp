@@ -295,6 +295,67 @@ TEST_F(utglTF2ImportExport, importGLBPopulatesUnitScaleToMetersAndUpAxisInSceneM
 
 // ===== R12 — glTF2 EXPORTER HONORS UnitScaleToMeters / UpAxis CONTRACT =====
 
+TEST_F(utglTF2ImportExport, exportGLBPointCloudWithoutFaces) {
+    const std::vector<aiVector3D> points = {
+        { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f }, { 7.0f, 8.0f, 9.0f }
+    };
+    aiScene *scene = makeGltfSingleMeshScene(points, {});
+    scene->mMeshes[0]->mPrimitiveTypes = aiPrimitiveType_POINT;
+    ASSERT_EQ(0u, scene->mMeshes[0]->mNumFaces);
+
+    Assimp::Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_points.glb"));
+    delete scene;
+
+    Assimp::Importer importer;
+    const aiScene *roundtrip = importer.ReadFile("ut_glb_points.glb", 0);
+    ASSERT_NE(nullptr, roundtrip);
+    ASSERT_EQ(1u, roundtrip->mNumMeshes);
+    ASSERT_EQ(1u, roundtrip->mRootNode->mNumMeshes);
+    const aiMesh *mesh = roundtrip->mMeshes[0];
+    EXPECT_EQ(aiPrimitiveType_POINT, mesh->mPrimitiveTypes);
+    EXPECT_EQ(points.size(), mesh->mNumVertices);
+    ASSERT_EQ(points.size(), mesh->mNumFaces);
+    EXPECT_EQ(1u, mesh->mFaces[0].mNumIndices);
+    std::remove("ut_glb_points.glb");
+}
+
+TEST_F(utglTF2ImportExport, rejectFaceLessTriangleMesh) {
+    const std::vector<aiVector3D> vertices = {
+        { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f }, { 7.0f, 8.0f, 9.0f }
+    };
+    aiScene *scene = makeGltfSingleMeshScene(vertices, {});
+
+    Assimp::Exporter exporter;
+    EXPECT_EQ(AI_FAILURE, exporter.Export(scene, "glb2", "ut_glb_faceless_triangle.glb"));
+    EXPECT_STREQ("GLTF2: Cannot export face-less non-point mesh", exporter.GetErrorString());
+    delete scene;
+    std::remove("ut_glb_faceless_triangle.glb");
+}
+
+#ifndef ASSIMP_BUILD_NO_PLY_IMPORTER
+TEST_F(utglTF2ImportExport, exportGLBPointCloudPLYFixtures) {
+    const char *fixtures[] = { "/PLY/issue623.ply", "/PLY/points.ply", "/PLY/pond.0.ply" };
+    for (const char *fixture : fixtures) {
+        SCOPED_TRACE(fixture);
+        Assimp::Importer plyImporter;
+        const aiScene *scene = plyImporter.ReadFile(std::string(ASSIMP_TEST_MODELS_DIR) + fixture, 0);
+        ASSERT_NE(nullptr, scene);
+
+        Assimp::Exporter exporter;
+        ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "glb2", "ut_glb_ply_points.glb"));
+
+        Assimp::Importer glbImporter;
+        const aiScene *roundtrip = glbImporter.ReadFile("ut_glb_ply_points.glb", 0);
+        ASSERT_NE(nullptr, roundtrip);
+        ASSERT_EQ(1u, roundtrip->mNumMeshes);
+        EXPECT_EQ(aiPrimitiveType_POINT, roundtrip->mMeshes[0]->mPrimitiveTypes);
+        EXPECT_EQ(scene->mMeshes[0]->mNumVertices, roundtrip->mMeshes[0]->mNumVertices);
+    }
+    std::remove("ut_glb_ply_points.glb");
+}
+#endif
+
 TEST_F(utglTF2ImportExport, exportGLBHonorsUnitScaleToMetersByScalingVerticesToMeters) {
     // 2-unit cube authored as millimetres (UnitScaleToMeters = 1e-3).
     // Spec target = meters → expected output extent = 2 * 1e-3 = 0.002 m on every axis.
@@ -1453,4 +1514,3 @@ TEST_F(utglTF2ImportExport, import_single_skin_no_duplication) {
     ASSERT_NE(nullptr, scene);
     EXPECT_EQ(1u, scene->mNumMeshes);
 }
-

@@ -1257,8 +1257,11 @@ void glTF2Exporter::ExportMeshes() {
 
     for (unsigned int idx_mesh = 0; idx_mesh < mScene->mNumMeshes; ++idx_mesh) {
         const aiMesh *aim = mScene->mMeshes[idx_mesh];
-        if (aim->mNumFaces == 0) {
-            continue;
+        if (!aim->HasPositions()) {
+            throw DeadlyExportError("GLTF2: Cannot export mesh without vertex positions");
+        }
+        if (aim->mNumFaces == 0 && aim->mPrimitiveTypes != aiPrimitiveType_POINT) {
+            throw DeadlyExportError("GLTF2: Cannot export face-less non-point mesh");
         }
 
         // ---- R12 — BAKE TRANSFORM INTO MESH DATA IN-PLACE ----
