@@ -368,7 +368,7 @@ ELSEIF(MSVC)
   endif()
   if(NOT /utf-8 IN_LIST CMAKE_CXX_FLAGS)
     # Source code is encoded in UTF-8
-    ADD_COMPILE_OPTIONS(/source-charset:utf-8)
+    ADD_COMPILE_OPTIONS(/utf-8)
   endif()
 ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang" )
   IF(NOT ASSIMP_HUNTER_ENABLED)
