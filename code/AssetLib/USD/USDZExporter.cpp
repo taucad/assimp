@@ -436,30 +436,10 @@ void USDZExporter::ExportNodeHierarchy(const aiNode* node, tinyusdz::Prim* paren
         return;
     }
 
-    tinyusdz::Xform* xform = ConvertNode(node, parentPrim);
-    if (!xform) {
+    tinyusdz::Prim* currentPrim = ConvertNode(node, parentPrim);
+    if (!currentPrim) {
         ReportWarning("Failed to convert node: " + std::string(node->mName.C_Str()));
         return;
-    }
-
-    // Find the USD prim we just created to pass as parent to children
-    tinyusdz::Prim* currentPrim = nullptr;
-    if (parentPrim) {
-        // Find the newly created child prim in the parent's children
-        for (auto& child : parentPrim->children()) {
-            if (child.element_name() == xform->name) {
-                currentPrim = &child;
-                break;
-            }
-        }
-    } else {
-        // This is a root node, find it in stage root prims
-        for (auto& rootPrim : mStage->root_prims()) {
-            if (rootPrim.element_name() == xform->name) {
-                currentPrim = &rootPrim;
-                break;
-            }
-        }
     }
 
     // Process children recursively with the current prim as parent
@@ -4386,10 +4366,10 @@ void USDZExporter::ConvertLight(const aiLight* light) {
 
 // ------------------------------------------------------------------------------------------------
 // Convert node
-tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim) {
+tinyusdz::Prim* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim) {
     if (!node) return nullptr;
     
-    auto xform = std::make_unique<tinyusdz::Xform>();
+    tinyusdz::Xform xform;
     
     std::string nodeName = SanitizeName(node->mName.C_Str());
     if (nodeName.empty()) {
@@ -4397,10 +4377,10 @@ tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* p
     }
     nodeName = GenerateUniqueName(nodeName);
     
-    xform->name = nodeName;
+    xform.name = nodeName;
     mNodeIdMap[node] = nodeName;
     
-    SetupNodeTransform(node, *xform);
+    SetupNodeTransform(node, xform);
 
     if (node->mMetaData) {
         aiMetadata extensions;
@@ -4412,25 +4392,25 @@ tinyusdz::Xform* USDZExporter::ConvertNode(const aiNode* node, tinyusdz::Prim* p
                 if (!visible) {
                     tinyusdz::Animatable<tinyusdz::Visibility> vis;
                     vis.set_default(tinyusdz::Visibility::Invisible);
-                    xform->visibility.set_value(vis);
+                    xform.visibility.set_value(vis);
                 }
             }
         }
     }
 
     // Convert to Prim
-    tinyusdz::Prim xformPrim(*xform);
+    tinyusdz::Prim xformPrim(xform);
     
     // Add to parent or root depending on hierarchy
     if (parentPrim) {
         // Add as child to parent prim
         parentPrim->children().emplace_back(std::move(xformPrim));
-    } else {
-        // This is a root node, add to stage root prims
-        mStage->root_prims().emplace_back(std::move(xformPrim));
+        return &parentPrim->children().back();
     }
-    
-    return xform.release(); // Return raw pointer, ownership transferred to stage
+
+    // This is a root node, add to stage root prims
+    mStage->root_prims().emplace_back(std::move(xformPrim));
+    return &mStage->root_prims().back();
 }
 
 // ------------------------------------------------------------------------------------------------
