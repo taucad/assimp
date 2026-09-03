@@ -20,12 +20,20 @@ diff --git a/src/cpp/web-ifc/parsing/IfcLoader.cpp b/src/cpp/web-ifc/parsing/Ifc
 index 828f1324..2ad61c08 100644
 --- a/src/cpp/web-ifc/parsing/IfcLoader.cpp
 +++ b/src/cpp/web-ifc/parsing/IfcLoader.cpp
+@@ -6,7 +6,6 @@
+ #include <string>
+ #include <cmath>
+ #include <algorithm>
+-#include <format>
+ #include <fast_float/fast_float.h>
+ #include <spdlog/spdlog.h>
+ #include "IfcLoader.h"
 @@ -346,7 +346,8 @@ namespace webifc::parsing {
  
     void IfcLoader::PushDouble(double input)
     {             
 -      std::string numberString = std::format("{}", input);
-+      // Replaced std::format with std::to_string for Apple Clang compatibility  
++      // Replaced std::format with std::to_string for Apple Clang compatibility
 +      std::string numberString = std::to_string(input);
        size_t eLoc = numberString.find_first_of('e');
        if (eLoc != std::string::npos) numberString[eLoc]='E';

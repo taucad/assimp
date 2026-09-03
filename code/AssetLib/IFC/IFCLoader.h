@@ -51,6 +51,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/LogAux.h>
 #include <assimp/mesh.h>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <map>
 #include <unordered_map>
