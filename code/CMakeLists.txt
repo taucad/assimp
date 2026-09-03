@@ -1284,6 +1284,7 @@ IF (ASSIMP_BUILD_IFC_IMPORTER)
         target_include_directories(${THE_TARGET} PRIVATE ${glm_SOURCE_DIR}/glm)
         target_include_directories(${THE_TARGET} PRIVATE ${spdlog_SOURCE_DIR}/include)
         target_include_directories(${THE_TARGET} PRIVATE ${stduuid_SOURCE_DIR}/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${stduuid_SOURCE_DIR})
         # Use existing earcut from contrib
         target_include_directories(${THE_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/earcut-hpp")
     endfunction()
