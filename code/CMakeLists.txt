@@ -1524,8 +1524,16 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
         ADD_DEFINITIONS(-DGUID_CUSTOM)
     endif()
 
-    # Suppress warnings for lib3mf source files (third-party library)
-    if(NOT MSVC)
+    # Match lib3mf's supported MSVC build. Assimp globally enables
+    # WIN32_LEAN_AND_MEAN, but lib3mf relies on the complete Windows type set.
+    if(MSVC)
+        foreach(lib3mf_file ${Lib3MF_SRCS})
+            set_source_files_properties(${lib3mf_file} PROPERTIES
+                COMPILE_FLAGS "/UWIN32_LEAN_AND_MEAN /DNOMINMAX"
+            )
+        endforeach()
+    else()
+        # Suppress warnings for lib3mf source files (third-party library)
         foreach(lib3mf_file ${Lib3MF_SRCS})
             set_source_files_properties(${lib3mf_file} PROPERTIES
                 COMPILE_FLAGS "-w"
