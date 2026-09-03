@@ -1439,6 +1439,12 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
     # v2.4.1 stable release
     set(LIB3MF_COMMIT "20c335489c69d15c64f3eaf1e15143b8176901f5")
     set(LIB3MF_ARCHIVE_SHA256 "51fce5bbaae5f6009c6328f2548f5faf64cb5539e425b63693af32824ed90c2f")
+    # https://github.com/3MFConsortium/lib3mf/commit/96b2f5ec9714088907fe8a6f05633e2bbd82053f
+    set(Lib3MF_PATCH_CMD
+        ${CMAKE_COMMAND}
+        -DSOURCE_FILE=<SOURCE_DIR>/Source/Model/Writer/v100/NMR_ResourceDependencySorter.cpp
+        -P ${Lib3MF_BASE_ABSPATH}/patches/lib3mf-algorithm.cmake
+    )
     message("****")
     message("\n\n**** Fetching lib3mf repo, commit ${LIB3MF_COMMIT}\n\n")
 
@@ -1451,6 +1457,7 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
             URL "https://github.com/3MFConsortium/lib3mf/archive/${LIB3MF_COMMIT}.tar.gz"
             URL_HASH "SHA256=${LIB3MF_ARCHIVE_SHA256}"
             DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+            PATCH_COMMAND ${Lib3MF_PATCH_CMD}
     )
     # Use FetchContent_Populate (not MakeAvailable) because we only need the source files;
     # lib3mf's own CMakeLists.txt is not compatible and would conflict with assimp's build.
