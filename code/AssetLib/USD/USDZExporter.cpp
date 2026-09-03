@@ -72,7 +72,6 @@ struct Assimp::USDZExporter::BlendShapeResult {
 // Standard library
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 #include <set>
 
 // tinyusdz includes
@@ -88,6 +87,8 @@ struct Assimp::USDZExporter::BlendShapeResult {
 using namespace Assimp;
 
 namespace {
+
+constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
     [[maybe_unused]] static const char* TAG = "USDZExporter";
     
     // Export configuration keys
@@ -4673,13 +4674,13 @@ tinyusdz::Shader USDZExporter::CreateStTransform(const std::string& inputConnect
         // in V-up produces the same visual rotation as Convention B in V-down for the
         // same angle, so we need theta_gltf = -mRotation.
         if (uvTransform->mRotation != 0.0f) {
-            float rotationDegrees = -uvTransform->mRotation * 180.0f / std::numbers::pi_v<float>;
+            float rotationDegrees = -uvTransform->mRotation * kRadiansToDegrees;
             transform2d.rotation.set_value(rotationDegrees);
         }
         
         ASSIMP_LOG_DEBUG("USDZExporter: Refined result: scale(" + ai_to_string(scaleX) + "," + ai_to_string(scaleY) + 
                        ") trans(" + ai_to_string(transX) + "," + ai_to_string(transY) + 
-                       ") rot(" + ai_to_string(-uvTransform->mRotation * 180.0f / std::numbers::pi_v<float>) + ")");
+                       ") rot(" + ai_to_string(-uvTransform->mRotation * kRadiansToDegrees) + ")");
     } else {
         // Default Y-flip transformation (common for textures)
         if (flipY) {
