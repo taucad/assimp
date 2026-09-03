@@ -54,7 +54,11 @@
 
 #endif
 
+#ifdef _WIN32
+#define SIZEOF_OFF_T 4
+#else
 #define SIZEOF_OFF_T 8
+#endif
 #ifdef __EMSCRIPTEN__
 #define SIZEOF_SIZE_T 4
 #else
