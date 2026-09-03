@@ -460,7 +460,7 @@ private:
     void ConvertLight(const aiLight* light);
 
     // Node hierarchy helpers
-    tinyusdz::Xform* ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim = nullptr);
+    tinyusdz::Prim* ConvertNode(const aiNode* node, tinyusdz::Prim* parentPrim = nullptr);
     void SetupNodeTransform(const aiNode* node, tinyusdz::Xform& xform);
     bool IsBoneNode(const aiNode* node) const;
     const aiNode* FindNodeByName(const aiNode* node, const std::string& name) const;

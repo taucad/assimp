@@ -8,6 +8,7 @@
 *.hpp text eol=lf
 *.txt text eol=lf
 *.cmake text eol=lf
+*.patch text eol=lf
 *.sh text eol=lf
 CHANGES text eol=lf
 CREDITS text eol=lf
@@ -19,4 +20,3 @@ Readme.md text eol=lf
 /.travis*	export-ignore
 /.coveralls*	export-ignore
 appveyor.yml	export-ignore
-

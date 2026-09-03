@@ -1142,7 +1142,7 @@ IF (ASSIMP_BUILD_IFC_IMPORTER)
     message("\n\n**** Cloning web-ifc repo, git tag ${WEBIFC_GIT_TAG}\n\n")
 
     # Patch required for C++20 compatibility with Apple Clang
-    set(WEBIFC_PATCH_CMD patch -p1 < ${WebIFC_BASE_ABSPATH}/patches/web-ifc-cpp20-compatibility.patch)
+    set(WEBIFC_PATCH_CMD git apply ${WebIFC_BASE_ABSPATH}/patches/web-ifc-cpp20-compatibility.patch)
 
     # Note: CMake's "FetchContent" (which executes at configure time) is much better for this use case
     #       than "ExternalProject" (which executes at build time); we just want to clone a repo and
@@ -1284,6 +1284,7 @@ IF (ASSIMP_BUILD_IFC_IMPORTER)
         target_include_directories(${THE_TARGET} PRIVATE ${glm_SOURCE_DIR}/glm)
         target_include_directories(${THE_TARGET} PRIVATE ${spdlog_SOURCE_DIR}/include)
         target_include_directories(${THE_TARGET} PRIVATE ${stduuid_SOURCE_DIR}/include)
+        target_include_directories(${THE_TARGET} PRIVATE ${stduuid_SOURCE_DIR})
         # Use existing earcut from contrib
         target_include_directories(${THE_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/earcut-hpp")
     endfunction()
@@ -1438,6 +1439,12 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
     # v2.4.1 stable release
     set(LIB3MF_COMMIT "20c335489c69d15c64f3eaf1e15143b8176901f5")
     set(LIB3MF_ARCHIVE_SHA256 "51fce5bbaae5f6009c6328f2548f5faf64cb5539e425b63693af32824ed90c2f")
+    # https://github.com/3MFConsortium/lib3mf/commit/96b2f5ec9714088907fe8a6f05633e2bbd82053f
+    set(Lib3MF_PATCH_CMD
+        ${CMAKE_COMMAND}
+        -DSOURCE_FILE=<SOURCE_DIR>/Source/Model/Writer/v100/NMR_ResourceDependencySorter.cpp
+        -P ${Lib3MF_BASE_ABSPATH}/patches/lib3mf-algorithm.cmake
+    )
     message("****")
     message("\n\n**** Fetching lib3mf repo, commit ${LIB3MF_COMMIT}\n\n")
 
@@ -1450,6 +1457,7 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
             URL "https://github.com/3MFConsortium/lib3mf/archive/${LIB3MF_COMMIT}.tar.gz"
             URL_HASH "SHA256=${LIB3MF_ARCHIVE_SHA256}"
             DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+            PATCH_COMMAND ${Lib3MF_PATCH_CMD}
     )
     # Use FetchContent_Populate (not MakeAvailable) because we only need the source files;
     # lib3mf's own CMakeLists.txt is not compatible and would conflict with assimp's build.
@@ -1510,7 +1518,9 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
 
     # lib3mf requires these definitions
     ADD_DEFINITIONS(-DFASTFLOAT_ALLOWS_LEADING_PLUS=1)
-    ADD_DEFINITIONS(-D__LIB3MF_EXPORTS)
+    if(NOT WIN32 OR BUILD_SHARED_LIBS)
+        ADD_DEFINITIONS(-D__LIB3MF_EXPORTS)
+    endif()
 
     # UUID generation backend required by lib3mf
     if(WIN32)
@@ -1523,8 +1533,16 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
         ADD_DEFINITIONS(-DGUID_CUSTOM)
     endif()
 
-    # Suppress warnings for lib3mf source files (third-party library)
-    if(NOT MSVC)
+    # Match lib3mf's supported MSVC build. Assimp globally enables
+    # WIN32_LEAN_AND_MEAN, but lib3mf relies on the complete Windows type set.
+    if(MSVC)
+        foreach(lib3mf_file ${Lib3MF_SRCS})
+            set_source_files_properties(${lib3mf_file} PROPERTIES
+                COMPILE_FLAGS "/UWIN32_LEAN_AND_MEAN /DNOMINMAX"
+            )
+        endforeach()
+    else()
+        # Suppress warnings for lib3mf source files (third-party library)
         foreach(lib3mf_file ${Lib3MF_SRCS})
             set_source_files_properties(${lib3mf_file} PROPERTIES
                 COMPILE_FLAGS "-w"

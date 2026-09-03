@@ -20,13 +20,27 @@ diff --git a/src/cpp/web-ifc/parsing/IfcLoader.cpp b/src/cpp/web-ifc/parsing/Ifc
 index 828f1324..2ad61c08 100644
 --- a/src/cpp/web-ifc/parsing/IfcLoader.cpp
 +++ b/src/cpp/web-ifc/parsing/IfcLoader.cpp
-@@ -346,7 +346,8 @@ namespace webifc::parsing {
+@@ -5,8 +5,10 @@
+ #include <sstream>
+ #include <string>
+ #include <cmath>
+ #include <algorithm>
+-#include <format>
++#include <iomanip>
++#include <limits>
++#include <locale>
+ #include <fast_float/fast_float.h>
+ #include <spdlog/spdlog.h>
+ #include "IfcLoader.h"
+@@ -346,7 +348,10 @@ namespace webifc::parsing {
  
     void IfcLoader::PushDouble(double input)
     {             
 -      std::string numberString = std::format("{}", input);
-+      // Replaced std::format with std::to_string for Apple Clang compatibility  
-+      std::string numberString = std::to_string(input);
++      std::ostringstream numberStream;
++      numberStream.imbue(std::locale::classic());
++      numberStream << std::setprecision(std::numeric_limits<double>::max_digits10) << input;
++      std::string numberString = numberStream.str();
        size_t eLoc = numberString.find_first_of('e');
        if (eLoc != std::string::npos) numberString[eLoc]='E';
        else if (std::floor(input) == input) numberString+='.';

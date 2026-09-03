@@ -4,8 +4,28 @@
 #include "zipconf.h"
 #endif
 
-/* Pre-configured for lib3mf integration into assimp.
-   Supports POSIX, macOS, and Emscripten platforms. */
+/* Pre-configured for lib3mf integration into assimp. */
+
+#ifdef _WIN32
+#define HAVE__CLOSE
+#define HAVE__DUP
+#define HAVE__FDOPEN
+#define HAVE__FILENO
+#define HAVE__SETMODE
+#define HAVE__STRDUP
+#define HAVE__STRICMP
+#define HAVE__STRTOI64
+#define HAVE__STRTOUI64
+#define HAVE__UNLINK
+#define HAVE_SNPRINTF
+#define HAVE_LOCALTIME_S
+#define HAVE__SNWPRINTF_S
+#define HAVE_MEMCPY_S
+#define HAVE__SNPRINTF_S
+#define HAVE_STRNCPY_S
+#define HAVE_STRERROR_S
+#define HAVE_STRERRORLEN_S
+#else
 
 /* POSIX/Emscripten features */
 #define HAVE_FILENO
@@ -32,7 +52,13 @@
 #define HAVE_CLONEFILE
 #endif
 
+#endif
+
+#ifdef _WIN32
+#define SIZEOF_OFF_T 4
+#else
 #define SIZEOF_OFF_T 8
+#endif
 #ifdef __EMSCRIPTEN__
 #define SIZEOF_SIZE_T 4
 #else

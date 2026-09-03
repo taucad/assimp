@@ -309,6 +309,7 @@ ENDIF()
 # Configure Web-IFC dependencies for unit tests if enabled
 IF (ASSIMP_BUILD_IFC_IMPORTER)
     WEBIFC_PARAM_SETTER(unit)
+    set_source_files_properties(unit/utIFCImportExport.cpp PROPERTIES COMPILE_DEFINITIONS ASSIMP_ENABLE_WEBIFC)
     # Also add the Web-IFC include path for test compilation
     target_include_directories(unit PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/web-ifc/autoclone/webifc_repo-src/src/cpp")
     MESSAGE(STATUS "Applied Web-IFC parameter configuration to unit test target")
