@@ -59,6 +59,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <algorithm>
 #include <cmath>
+#include "web-ifc/parsing/IfcLoader.h"
 #include "web-ifc/schema/IfcSchemaManager.h"
 #include "web-ifc/schema/ifc-schema.h"
 
@@ -2586,7 +2587,7 @@ int readUpAxis(const aiScene *scene) {
 
 } // namespace
 
-TEST(utIFCImportExport, contractWritesUnitScaleToMetersAndUpAxis) {
+TEST_F(utIFCImportExport, contractWritesUnitScaleToMetersAndUpAxis) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
     ASSERT_NE(scene, nullptr);
@@ -2595,7 +2596,7 @@ TEST(utIFCImportExport, contractWritesUnitScaleToMetersAndUpAxis) {
     EXPECT_EQ(readUpAxis(scene), 2);
 }
 
-TEST(utIFCImportExport, contractUnitScaleOverrideRespected) {
+TEST_F(utIFCImportExport, contractUnitScaleOverrideRespected) {
     Assimp::Importer importer;
     importer.SetPropertyFloat(AI_CONFIG_IMPORT_IFC_UNIT_SCALE_TO_METERS, 0.001f);
     const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
@@ -2604,7 +2605,7 @@ TEST(utIFCImportExport, contractUnitScaleOverrideRespected) {
     EXPECT_EQ(readUpAxis(scene), 2);
 }
 
-TEST(utIFCImportExport, contractUpAxisOverrideRespected) {
+TEST_F(utIFCImportExport, contractUpAxisOverrideRespected) {
     Assimp::Importer importer;
     importer.SetPropertyInteger(AI_CONFIG_IMPORT_IFC_UP_AXIS, 1);
     const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
@@ -2612,13 +2613,25 @@ TEST(utIFCImportExport, contractUpAxisOverrideRespected) {
     EXPECT_EQ(readUpAxis(scene), 1);
 }
 
-TEST(utIFCImportExport, contractInvalidUpAxisOverrideFailsImport) {
+TEST_F(utIFCImportExport, contractInvalidUpAxisOverrideFailsImport) {
     Assimp::Importer importer;
     importer.SetPropertyInteger(AI_CONFIG_IMPORT_IFC_UP_AXIS, 7);
     const aiScene *scene = importer.ReadFile(kIfcFixture, 0);
     EXPECT_EQ(scene, nullptr);
     const std::string err = importer.GetErrorString();
     EXPECT_NE(err.find("IMPORT_IFC_UP_AXIS"), std::string::npos) << err;
+}
+
+TEST_F(utIFCImportExport, webIfcDoubleSerializationRoundTrips) {
+    webifc::schema::IfcSchemaManager schemaManager;
+    webifc::parsing::IfcLoader loader(256, 0, 256, schemaManager);
+
+    for (const double value : { 1e-7, 1.2345678901234567 }) {
+        const auto offset = static_cast<uint32_t>(loader.GetTotalSize());
+        loader.Push<char>(static_cast<char>(webifc::parsing::IfcTokenType::REAL));
+        loader.PushDouble(value);
+        EXPECT_DOUBLE_EQ(loader.GetDoubleArgument(offset), value);
+    }
 }
 
 #endif // ASSIMP_ENABLE_WEBIFC
