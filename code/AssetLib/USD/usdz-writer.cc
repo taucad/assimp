@@ -13,8 +13,6 @@
 #include <vector>
 #include <map>
 #include <memory>
-#include <unistd.h>
-
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/stage.hh"
 #include "../../../contrib/tinyusdz/autoclone/tinyusdz_repo-src/src/external/miniz.h"
 
