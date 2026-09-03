@@ -31,7 +31,11 @@
 
 // Set this to control attributes for public classes/functions, i.e.:
 #ifdef _WIN32
-#   define PUGIXML_API __declspec(dllexport) // to export all public symbols from DLL
+#  ifdef ASSIMP_BUILD_DLL_EXPORT
+#    define PUGIXML_API __declspec(dllexport) // to export all public symbols from DLL
+#  else
+#    define PUGIXML_API
+#  endif
 #else
 #  define PUGIXML_API __attribute__((visibility("default")))
 #endif // _WIN32

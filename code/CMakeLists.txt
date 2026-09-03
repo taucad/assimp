@@ -1511,7 +1511,9 @@ IF (ASSIMP_BUILD_3MF_LIB3MF)
 
     # lib3mf requires these definitions
     ADD_DEFINITIONS(-DFASTFLOAT_ALLOWS_LEADING_PLUS=1)
-    ADD_DEFINITIONS(-D__LIB3MF_EXPORTS)
+    if(NOT WIN32 OR BUILD_SHARED_LIBS)
+        ADD_DEFINITIONS(-D__LIB3MF_EXPORTS)
+    endif()
 
     # UUID generation backend required by lib3mf
     if(WIN32)
