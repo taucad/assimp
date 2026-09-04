@@ -2,9 +2,9 @@ name: C/C++ CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, codex/ext-mesh-manifold-3mf ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, codex/ext-mesh-manifold-3mf ]
 
 permissions:
   contents: write # to fetch code (actions/checkout),and release
