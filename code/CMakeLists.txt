@@ -1905,7 +1905,7 @@ if( MSVC )
       set(MSVC_PREFIX "vc150")
     endif()
   endif()
-  set(LIBRARY_SUFFIX "${ASSIMP_LIBRARY_SUFFIX}-${MSVC_PREFIX}-mt" CACHE STRING "the suffix for the assimp windows library")
+  set(LIBRARY_SUFFIX "${ASSIMP_LIBRARY_SUFFIX}-${ASSIMP_SOVERSION}-${MSVC_PREFIX}-mt" CACHE STRING "the suffix for the assimp windows library")
 endif()
 
 if (MINGW)

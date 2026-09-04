@@ -602,7 +602,6 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
     ai_assert(nullptr != pimpl);
 
     ASSIMP_BEGIN_EXCEPTION_REGION();
-    pimpl->mProgressHandler->ResetCancellation(!pimpl->mIsDefaultProgressHandler);
     const std::string pFile(_pFile);
 
     // ----------------------------------------------------------------------
@@ -715,7 +714,7 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
             ext = desc->mName;
         }
         ASSIMP_LOG_INFO("Found a matching importer for this file format: ", ext, "." );
-        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileReadAndCheck( 0, fileSize ))) {
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileRead( 0, fileSize ))) {
             return nullptr;
         }
 
@@ -729,7 +728,7 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
             profiler->EndRegion("import");
         }
 
-        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileReadAndCheck( fileSize, fileSize ))) {
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileRead( fileSize, fileSize ))) {
             return nullptr;
         }
 
@@ -811,7 +810,6 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
     ai_assert(nullptr != pimpl);
 
     ASSIMP_BEGIN_EXCEPTION_REGION();
-    pimpl->mProgressHandler->ResetCancellation(!pimpl->mIsDefaultProgressHandler);
     // Return immediately if no scene is active
     if (!pimpl->mScene) {
         return nullptr;
@@ -854,7 +852,7 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
     std::unique_ptr<Profiler> profiler(GetPropertyInteger(AI_CONFIG_GLOB_MEASURE_TIME, 0) ? new Profiler() : nullptr);
     for( unsigned int a = 0; a < pimpl->mPostProcessingSteps.size(); a++)   {
         BaseProcess* process = pimpl->mPostProcessingSteps[a];
-        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcessAndCheck(
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcess(
                 static_cast<int>(a), static_cast<int>(pimpl->mPostProcessingSteps.size()) ))) {
             return nullptr;
         }
@@ -888,7 +886,7 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
 #endif  // no validation
 #endif // ! DEBUG
     }
-    if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcessAndCheck(
+    if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcess(
             static_cast<int>(pimpl->mPostProcessingSteps.size()),
             static_cast<int>(pimpl->mPostProcessingSteps.size()) ))) {
         return nullptr;

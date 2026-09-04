@@ -218,15 +218,17 @@ public:
         return keepGoing;
     }
 
-    void UpdateFileRead(int currentStep, int numberOfSteps) override {
+    bool UpdateFileRead(int currentStep, int numberOfSteps) override {
         fileReadSteps.push_back(currentStep);
         cancel = cancelOnUpdate != 0 && fileReadSteps.size() == cancelOnUpdate;
-        ProgressHandler::UpdateFileRead(currentStep, numberOfSteps);
+        const float progress = numberOfSteps ? currentStep / static_cast<float>(numberOfSteps) : 1.0f;
+        return Update(progress * 0.5f);
     }
 
-    void UpdatePostProcess(int currentStep, int numberOfSteps) override {
+    bool UpdatePostProcess(int currentStep, int numberOfSteps) override {
         postProcessSteps.push_back(currentStep);
-        ProgressHandler::UpdatePostProcess(currentStep, numberOfSteps);
+        const float progress = numberOfSteps ? currentStep / static_cast<float>(numberOfSteps) : 1.0f;
+        return Update(progress * 0.5f + 0.5f);
     }
 
     size_t cancelOnUpdate;
@@ -269,12 +271,14 @@ public:
         return keepGoing;
     }
 
-    void UpdateFileRead(int, int) override {
+    bool UpdateFileRead(int, int) override {
         ++fileReadUpdates;
+        return Update();
     }
 
-    void UpdatePostProcess(int, int) override {
+    bool UpdatePostProcess(int, int) override {
         ++postProcessUpdates;
+        return Update();
     }
 
     bool &cancel;
@@ -305,11 +309,11 @@ public:
         return true;
     }
 
-    void UpdateFileRead(int currentStep, int numberOfSteps) override {
+    bool UpdateFileRead(int currentStep, int numberOfSteps) override {
         if (currentStep > 0 && currentStep < numberOfSteps) {
             ++intermediateUpdates;
         }
-        ProgressHandler::UpdateFileRead(currentStep, numberOfSteps);
+        return ProgressHandler::UpdateFileRead(currentStep, numberOfSteps);
     }
 
     bool cancelledOnce = false;
@@ -318,6 +322,15 @@ public:
 #endif
 
 } // namespace
+
+TEST_F(ImporterTest, defaultProgressHandlerContinues) {
+    ProgressHandler *progress = pImp->GetProgressHandler();
+    ASSERT_NE(nullptr, progress);
+    EXPECT_TRUE(progress->Update(0.5f));
+    EXPECT_TRUE(progress->UpdateFileRead(1, 2));
+    EXPECT_TRUE(progress->UpdatePostProcess(1, 2));
+    EXPECT_TRUE(progress->UpdateFileWrite(1, 2));
+}
 
 TEST_F(ImporterTest, progressCancellationBeforeParsing) {
     ProgressImporter *reader = new ProgressImporter;
@@ -384,6 +397,7 @@ TEST_F(ImporterTest, progressCancellationBetweenPostProcessPhases) {
     bool continueAfterFirst = false;
     ASSERT_EQ(AI_SUCCESS, pImp->RegisterPPStep(new CancellingProcess(firstExecutions, cancel, requestCancellation)));
     ASSERT_EQ(AI_SUCCESS, pImp->RegisterPPStep(new CancellingProcess(secondExecutions, cancel, continueAfterFirst)));
+    const int cancellationCheckpointCount = static_cast<int>(pImp->Pimpl()->mPostProcessingSteps.size());
     ProcessProgressHandler *progress = new ProcessProgressHandler(cancel);
     pImp->SetProgressHandler(progress);
 
@@ -393,7 +407,7 @@ TEST_F(ImporterTest, progressCancellationBetweenPostProcessPhases) {
     EXPECT_EQ(1, firstExecutions);
     EXPECT_EQ(0, secondExecutions);
     EXPECT_EQ(1, sharedStateDestructions);
-    EXPECT_GT(progress->postProcessUpdates, 0);
+    EXPECT_EQ(cancellationCheckpointCount, progress->postProcessUpdates);
     EXPECT_EQ(progress->postProcessUpdates, progress->updates);
 
     cancel = false;
@@ -433,6 +447,10 @@ TEST_F(ImporterTest, progressCancellationStopsObjParserAtCheckpoint) {
             "f 1 2 3\n";
     EXPECT_NE(nullptr, pImp->ReadFileFromMemory(recoveryObj, sizeof(recoveryObj) - 1, 0, "obj"));
     EXPECT_STREQ("", pImp->GetErrorString());
+
+    Importer defaultImporter;
+    EXPECT_NE(nullptr, defaultImporter.ReadFileFromMemory(recoveryObj, sizeof(recoveryObj) - 1, 0, "obj"));
+    EXPECT_STREQ("", defaultImporter.GetErrorString());
 }
 #endif
 

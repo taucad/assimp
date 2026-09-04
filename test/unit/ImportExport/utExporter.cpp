@@ -110,10 +110,11 @@ public:
         return keepGoing;
     }
 
-    void UpdateFileWrite(int currentStep, int numberOfSteps) override {
+    bool UpdateFileWrite(int currentStep, int numberOfSteps) override {
         fileWriteSteps.push_back(currentStep);
         cancel = cancelOnUpdate != 0 && fileWriteSteps.size() == cancelOnUpdate;
-        ProgressHandler::UpdateFileWrite(currentStep, numberOfSteps);
+        const float progress = numberOfSteps ? currentStep / static_cast<float>(numberOfSteps) : 1.0f;
+        return Update(progress * 0.5f);
     }
 
     size_t cancelOnUpdate;

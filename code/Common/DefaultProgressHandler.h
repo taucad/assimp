@@ -57,7 +57,7 @@ class DefaultProgressHandler : public ProgressHandler    {
 public:
     ///	@brief Ignores the update callback.
     bool Update(float) override {
-        return false;
+        return true;
     }
 };
 
