@@ -42,6 +42,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assimp/Exporter.hpp>
 #include <assimp/ProgressHandler.hpp>
+#include <assimp/scene.h>
 
 using namespace Assimp;
 
@@ -72,6 +73,105 @@ TEST_F(ExporterTest, ProgressHandlerTest) {
     Exporter exporter;
     TestProgressHandler *ph(new TestProgressHandler);
     exporter.SetProgressHandler(ph);
+}
+
+namespace {
+
+int s_exportCalls = 0;
+
+void CountedExport(const char *, IOSystem *, const aiScene *, const ExportProperties *) {
+    ++s_exportCalls;
+}
+
+class CancellingExportProgressHandler : public ProgressHandler {
+public:
+    explicit CancellingExportProgressHandler(size_t cancelOnUpdate) :
+            cancelOnUpdate(cancelOnUpdate) {}
+
+    bool Update(float percentage = -1.f) override {
+        updates.push_back(percentage);
+        return !cancel;
+    }
+
+    void UpdateFileWrite(int currentStep, int) override {
+        fileWriteSteps.push_back(currentStep);
+        cancel = cancelOnUpdate != 0 && fileWriteSteps.size() == cancelOnUpdate;
+    }
+
+    size_t cancelOnUpdate;
+    bool cancel = false;
+    std::vector<float> updates;
+    std::vector<int> fileWriteSteps;
+};
+
+class ExportProgressCancellationTest : public ::testing::Test {
+protected:
+    void ExpectCancellationAndRecovery(size_t cancelOnUpdate, int exportsBeforeRecovery) {
+        aiScene scene;
+        scene.mRootNode = new aiNode;
+        Exporter exporter;
+        ASSERT_EQ(AI_SUCCESS, exporter.RegisterExporter(
+                                      Exporter::ExportFormatEntry(
+                                              "progress", "Progress test", "progress", CountedExport)));
+        CancellingExportProgressHandler *progress = new CancellingExportProgressHandler(cancelOnUpdate);
+        exporter.SetProgressHandler(progress);
+        s_exportCalls = 0;
+
+        EXPECT_EQ(AI_FAILURE, exporter.Export(&scene, "progress", "ignored"));
+        EXPECT_STREQ("Export cancelled by progress handler", exporter.GetErrorString());
+        EXPECT_EQ(exportsBeforeRecovery, s_exportCalls);
+        EXPECT_EQ(cancelOnUpdate, progress->fileWriteSteps.size());
+        EXPECT_EQ(progress->fileWriteSteps.size(), progress->updates.size());
+
+        progress->cancelOnUpdate = 0;
+        progress->cancel = false;
+        progress->updates.clear();
+        progress->fileWriteSteps.clear();
+        EXPECT_EQ(AI_SUCCESS, exporter.Export(&scene, "progress", "ignored"));
+        EXPECT_STREQ("", exporter.GetErrorString());
+        EXPECT_EQ(exportsBeforeRecovery + 1, s_exportCalls);
+        ASSERT_EQ(5u, progress->fileWriteSteps.size());
+        EXPECT_EQ(progress->fileWriteSteps.size(), progress->updates.size());
+        for (size_t i = 0; i < progress->fileWriteSteps.size(); ++i) {
+            EXPECT_EQ(static_cast<int>(i), progress->fileWriteSteps[i]);
+        }
+    }
+};
+
+} // namespace
+
+TEST_F(ExportProgressCancellationTest, defaultProgressHandlerContinues) {
+    aiScene scene;
+    scene.mRootNode = new aiNode;
+    Exporter exporter;
+    ASSERT_EQ(AI_SUCCESS, exporter.RegisterExporter(
+                                  Exporter::ExportFormatEntry(
+                                          "progress", "Progress test", "progress", CountedExport)));
+    s_exportCalls = 0;
+
+    EXPECT_EQ(AI_SUCCESS, exporter.Export(&scene, "progress", "ignored"));
+    EXPECT_STREQ("", exporter.GetErrorString());
+    EXPECT_EQ(1, s_exportCalls);
+}
+
+TEST_F(ExportProgressCancellationTest, beforeSceneCopy) {
+    ExpectCancellationAndRecovery(1, 0);
+}
+
+TEST_F(ExportProgressCancellationTest, afterSceneCopy) {
+    ExpectCancellationAndRecovery(2, 0);
+}
+
+TEST_F(ExportProgressCancellationTest, beforePostProcessing) {
+    ExpectCancellationAndRecovery(3, 0);
+}
+
+TEST_F(ExportProgressCancellationTest, beforeExport) {
+    ExpectCancellationAndRecovery(4, 0);
+}
+
+TEST_F(ExportProgressCancellationTest, afterExport) {
+    ExpectCancellationAndRecovery(5, 1);
 }
 
 // Make sure all the registered exporters have useful descriptions

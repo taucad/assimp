@@ -43,9 +43,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "../../include/assimp/postprocess.h"
 #include "../../include/assimp/scene.h"
 #include "TestIOSystem.h"
+#include "Common/BaseProcess.h"
+#include "Common/Importer.h"
 #include <assimp/BaseImporter.h>
 #include <assimp/DefaultIOSystem.h>
 #include <assimp/Importer.hpp>
+#include <assimp/ProgressHandler.hpp>
 
 using namespace ::std;
 using namespace ::Assimp;
@@ -168,6 +171,205 @@ public:
         throw DeadlyImportError(AIUT_DEF_ERROR_TEXT);
     }
 };
+
+namespace {
+
+const aiImporterDesc s_progressImporterDescription = {
+    "Progress importer",
+    "",
+    "",
+    "",
+    0,
+    1,
+    0,
+    1,
+    0,
+    "cancel"
+};
+
+class ProgressImporter : public BaseImporter {
+public:
+    int reads = 0;
+
+    bool CanRead(const std::string &, IOSystem *, bool) const override {
+        return true;
+    }
+
+protected:
+    const aiImporterDesc *GetInfo() const override {
+        return &s_progressImporterDescription;
+    }
+
+    void InternReadFile(const std::string &, aiScene *scene, IOSystem *) override {
+        ++reads;
+        scene->mRootNode = new aiNode;
+    }
+};
+
+class CancellingImportProgressHandler : public ProgressHandler {
+public:
+    explicit CancellingImportProgressHandler(size_t cancelOnUpdate) :
+            cancelOnUpdate(cancelOnUpdate) {}
+
+    bool Update(float percentage = -1.f) override {
+        updates.push_back(percentage);
+        return !cancel;
+    }
+
+    void UpdateFileRead(int currentStep, int) override {
+        fileReadSteps.push_back(currentStep);
+        cancel = cancelOnUpdate != 0 && fileReadSteps.size() == cancelOnUpdate;
+    }
+
+    void UpdatePostProcess(int currentStep, int) override {
+        postProcessSteps.push_back(currentStep);
+    }
+
+    size_t cancelOnUpdate;
+    bool cancel = false;
+    std::vector<float> updates;
+    std::vector<int> fileReadSteps;
+    std::vector<int> postProcessSteps;
+};
+
+class CancellingProcess : public BaseProcess {
+public:
+    CancellingProcess(int &executions, bool &cancel, bool requestCancellation) :
+            executions(executions),
+            cancel(cancel),
+            requestCancellation(requestCancellation) {}
+
+    bool IsActive(unsigned int flags) const override {
+        return (flags & aiProcess_GenBoundingBoxes) != 0;
+    }
+
+    void Execute(aiScene *) override {
+        ++executions;
+        cancel = requestCancellation;
+    }
+
+private:
+    int &executions;
+    bool &cancel;
+    bool requestCancellation;
+};
+
+class ProcessProgressHandler : public ProgressHandler {
+public:
+    explicit ProcessProgressHandler(bool &cancel) : cancel(cancel) {}
+
+    bool Update(float = -1.f) override {
+        ++updates;
+        return !cancel;
+    }
+
+    void UpdateFileRead(int, int) override {
+        ++fileReadUpdates;
+    }
+
+    void UpdatePostProcess(int, int) override {
+        ++postProcessUpdates;
+    }
+
+    bool &cancel;
+    int updates = 0;
+    int fileReadUpdates = 0;
+    int postProcessUpdates = 0;
+};
+
+class DestructionProbe {
+public:
+    explicit DestructionProbe(int &destructions) : destructions(destructions) {}
+    ~DestructionProbe() {
+        ++destructions;
+    }
+
+private:
+    int &destructions;
+};
+
+} // namespace
+
+TEST_F(ImporterTest, progressCancellationBeforeParsing) {
+    ProgressImporter *reader = new ProgressImporter;
+    ASSERT_EQ(AI_SUCCESS, pImp->RegisterLoader(reader));
+    pImp->SetIOHandler(new TestIOSystem);
+    CancellingImportProgressHandler *progress = new CancellingImportProgressHandler(1);
+    pImp->SetProgressHandler(progress);
+
+    EXPECT_EQ(nullptr, pImp->ReadFile("before.cancel", 0));
+    EXPECT_STREQ("Import cancelled by progress handler", pImp->GetErrorString());
+    EXPECT_EQ(nullptr, pImp->GetScene());
+    EXPECT_EQ(0, reader->reads);
+    EXPECT_EQ(1u, progress->fileReadSteps.size());
+    EXPECT_EQ(progress->fileReadSteps.size(), progress->updates.size());
+
+    progress->cancelOnUpdate = 0;
+    progress->cancel = false;
+    progress->updates.clear();
+    progress->fileReadSteps.clear();
+    EXPECT_NE(nullptr, pImp->ReadFile("recovery.cancel", 0));
+    EXPECT_STREQ("", pImp->GetErrorString());
+    EXPECT_EQ(1, reader->reads);
+    EXPECT_EQ(2u, progress->fileReadSteps.size());
+    EXPECT_EQ(progress->fileReadSteps.size(), progress->updates.size());
+}
+
+TEST_F(ImporterTest, progressCancellationAfterParsing) {
+    ProgressImporter *reader = new ProgressImporter;
+    ASSERT_EQ(AI_SUCCESS, pImp->RegisterLoader(reader));
+    pImp->SetIOHandler(new TestIOSystem);
+    CancellingImportProgressHandler *progress = new CancellingImportProgressHandler(2);
+    pImp->SetProgressHandler(progress);
+
+    EXPECT_EQ(nullptr, pImp->ReadFile("after.cancel", 0));
+    EXPECT_STREQ("Import cancelled by progress handler", pImp->GetErrorString());
+    EXPECT_EQ(nullptr, pImp->GetScene());
+    EXPECT_EQ(1, reader->reads);
+    EXPECT_EQ(2u, progress->fileReadSteps.size());
+    EXPECT_EQ(progress->fileReadSteps.size(), progress->updates.size());
+
+    progress->cancelOnUpdate = 0;
+    progress->cancel = false;
+    progress->updates.clear();
+    progress->fileReadSteps.clear();
+    EXPECT_NE(nullptr, pImp->ReadFile("recovery.cancel", 0));
+    EXPECT_STREQ("", pImp->GetErrorString());
+    EXPECT_EQ(2, reader->reads);
+    EXPECT_EQ(2u, progress->fileReadSteps.size());
+    EXPECT_EQ(progress->fileReadSteps.size(), progress->updates.size());
+}
+
+TEST_F(ImporterTest, progressCancellationBetweenPostProcessPhases) {
+    ProgressImporter *reader = new ProgressImporter;
+    ASSERT_EQ(AI_SUCCESS, pImp->RegisterLoader(reader));
+    pImp->SetIOHandler(new TestIOSystem);
+    ASSERT_NE(nullptr, pImp->ReadFile("postprocess.cancel", 0));
+
+    bool cancel = false;
+    int firstExecutions = 0;
+    int secondExecutions = 0;
+    int sharedStateDestructions = 0;
+    pImp->Pimpl()->mPPShared->AddProperty("progress cancellation test", new DestructionProbe(sharedStateDestructions));
+    ASSERT_EQ(AI_SUCCESS, pImp->RegisterPPStep(new CancellingProcess(firstExecutions, cancel, true)));
+    ASSERT_EQ(AI_SUCCESS, pImp->RegisterPPStep(new CancellingProcess(secondExecutions, cancel, false)));
+    ProcessProgressHandler *progress = new ProcessProgressHandler(cancel);
+    pImp->SetProgressHandler(progress);
+
+    EXPECT_EQ(nullptr, pImp->ApplyPostProcessing(aiProcess_GenBoundingBoxes));
+    EXPECT_STREQ("Import cancelled by progress handler", pImp->GetErrorString());
+    EXPECT_EQ(nullptr, pImp->GetScene());
+    EXPECT_EQ(1, firstExecutions);
+    EXPECT_EQ(0, secondExecutions);
+    EXPECT_EQ(1, sharedStateDestructions);
+    EXPECT_GT(progress->postProcessUpdates, 0);
+    EXPECT_EQ(progress->postProcessUpdates, progress->updates);
+
+    cancel = false;
+    EXPECT_NE(nullptr, pImp->ReadFile("recovery.cancel", 0));
+    EXPECT_STREQ("", pImp->GetErrorString());
+    EXPECT_EQ(2, reader->reads);
+}
 
 // ------------------------------------------------------------------------------------------------
 TEST_F(ImporterTest, testMemoryRead) {

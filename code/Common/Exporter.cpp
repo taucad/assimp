@@ -406,9 +406,19 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
     // meshes upfront.
     const bool is_verbose_format = !(pScene->mFlags & AI_SCENE_FLAGS_NON_VERBOSE_FORMAT) || MakeVerboseFormatProcess::IsVerboseFormat(pScene);
 
-    pimpl->mProgressHandler->UpdateFileWrite(0, 4);
-
     pimpl->mError = "";
+    const auto updateProgress = [this](int step) {
+        pimpl->mProgressHandler->UpdateFileWrite(step, 4);
+        if (!pimpl->mIsDefaultProgressHandler && !pimpl->mProgressHandler->Update(step / 4.0f * 0.5f)) {
+            pimpl->mError = "Export cancelled by progress handler";
+            return false;
+        }
+        return true;
+    };
+    if (!updateProgress(0)) {
+        return AI_FAILURE;
+    }
+
     for (size_t i = 0; i < pimpl->mExporters.size(); ++i) {
         const Exporter::ExportFormatEntry& exp = pimpl->mExporters[i];
         if (!strcmp(exp.mDescription.id,pFormatId)) {
@@ -418,9 +428,10 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                 aiScene* scenecopy_tmp = nullptr;
                 SceneCombiner::CopyScene(&scenecopy_tmp,pScene);
 
-                pimpl->mProgressHandler->UpdateFileWrite(1, 4);
-
                 std::unique_ptr<aiScene> scenecopy(scenecopy_tmp);
+                if (!updateProgress(1)) {
+                    return AI_FAILURE;
+                }
                 const ScenePrivateData* const priv = ScenePriv(pScene);
 
                 if (!strcmp(pFormatId, "3mf") && priv && !priv->mManifoldMeshes.empty()) {
@@ -492,7 +503,9 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                     }
                 }
 
-                pimpl->mProgressHandler->UpdateFileWrite(2, 4);
+                if (!updateProgress(2)) {
+                    return AI_FAILURE;
+                }
 
                 if (pp) {
                     // the three 'conversion' steps need to be executed first because all other steps rely on the standard data layout
@@ -542,7 +555,9 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                     privOut->mPPStepsApplied |= pp;
                 }
 
-                pimpl->mProgressHandler->UpdateFileWrite(3, 4);
+                if (!updateProgress(3)) {
+                    return AI_FAILURE;
+                }
 
                 if(must_join_again) {
                     JoinVerticesProcess proc;
@@ -554,7 +569,9 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         		pProp->SetPropertyBool("bJoinIdenticalVertices", pp & aiProcess_JoinIdenticalVertices);
                 exp.mExportFunction(pPath,pimpl->mIOSystem.get(),scenecopy.get(), pProp);
 
-                pimpl->mProgressHandler->UpdateFileWrite(4, 4);
+                if (!updateProgress(4)) {
+                    return AI_FAILURE;
+                }
             } catch (DeadlyExportError& err) {
                 pimpl->mError = err.what();
                 return AI_FAILURE;
