@@ -576,6 +576,7 @@ struct Accessor : public Object {
     inline uint8_t *GetPointer();
     inline size_t GetStride();
     inline size_t GetMaxByteSize();
+    inline bool IsDataRangeValid(size_t index, size_t elementSize);
 
     template <class T>
     size_t ExtractData(T *&outData, const std::vector<unsigned int> *remappingIndices = nullptr);
@@ -602,10 +603,10 @@ struct Accessor : public Object {
     public:
         //! Accesses the i-th value as defined by the accessor
         template <class T>
-        T GetValue(int i);
+        T GetValue(size_t i);
 
         //! Accesses the i-th value as defined by the accessor
-        inline unsigned int GetUInt(int i) {
+        inline unsigned int GetUInt(size_t i) {
             return GetValue<unsigned int>(i);
         }
 
