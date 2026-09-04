@@ -1924,7 +1924,8 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "WindowsStore")
 endif()
 
 SET_TARGET_PROPERTIES( assimp PROPERTIES
-  VERSION ${ASSIMP_VERSION}
+  # Keep the real filename distinct from ABI 6 as well as the SONAME link.
+  VERSION ${ASSIMP_SOVERSION}.${ASSIMP_VERSION_MINOR}.${ASSIMP_VERSION_PATCH}
   SOVERSION ${ASSIMP_SOVERSION} # use full version
   OUTPUT_NAME assimp${LIBRARY_SUFFIX}
 )

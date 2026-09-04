@@ -64,6 +64,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <string>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -191,6 +192,7 @@ aiVector3D meshExtent(const aiMesh *mesh) {
     return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 bool findGlobalTransformForMesh(const aiNode *node, unsigned int meshIndex,
         const aiMatrix4x4 &parent, aiMatrix4x4 &result) {
     const aiMatrix4x4 global = parent * node->mTransformation;
@@ -207,6 +209,7 @@ bool findGlobalTransformForMesh(const aiNode *node, unsigned int meshIndex,
     }
     return false;
 }
+#endif
 
 void addManifoldTopologyForMesh(aiScene *scene, unsigned int meshIndex) {
     const aiMesh *mesh = scene->mMeshes[meshIndex];
