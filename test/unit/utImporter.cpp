@@ -401,7 +401,7 @@ TEST_F(ImporterTest, progressCancellationBetweenPostProcessPhases) {
     ProcessProgressHandler *progress = new ProcessProgressHandler(cancel);
     pImp->SetProgressHandler(progress);
 
-    EXPECT_EQ(nullptr, pImp->ApplyPostProcessing(aiProcess_GenBoundingBoxes));
+    EXPECT_EQ(nullptr, pImp->ApplyPostProcessing(static_cast<unsigned int>(aiProcess_GenBoundingBoxes)));
     EXPECT_STREQ("Import cancelled by progress handler", pImp->GetErrorString());
     EXPECT_EQ(nullptr, pImp->GetScene());
     EXPECT_EQ(1, firstExecutions);
@@ -415,7 +415,7 @@ TEST_F(ImporterTest, progressCancellationBetweenPostProcessPhases) {
     EXPECT_NE(nullptr, pImp->ReadFile("recovery.cancel", 0));
     EXPECT_STREQ("", pImp->GetErrorString());
     EXPECT_EQ(2, reader->reads);
-    EXPECT_NE(nullptr, pImp->ApplyPostProcessing(aiProcess_GenBoundingBoxes));
+    EXPECT_NE(nullptr, pImp->ApplyPostProcessing(static_cast<unsigned int>(aiProcess_GenBoundingBoxes)));
     EXPECT_EQ(2, firstExecutions);
     EXPECT_EQ(1, secondExecutions);
 }
