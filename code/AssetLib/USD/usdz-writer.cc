@@ -183,6 +183,11 @@ bool SaveAsUSDZToMemory(const std::string &usdContent,
     if (!addToProjectedSize(22)) {
         return false;
     }
+    if (!detail::FitsClassicZipArchive(projectedSize)) {
+        if (err) (*err) = "USDZ archive is " + std::to_string(projectedSize) +
+                " bytes; classic ZIP limit is 4294967295 bytes\n";
+        return false;
+    }
     if (projectedSize > outData.max_size()) {
         if (err) (*err) = "USDZ archive layout exceeds byte-vector capacity\n";
         return false;

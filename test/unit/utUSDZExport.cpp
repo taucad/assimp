@@ -3108,4 +3108,14 @@ TEST(utUSDZWriter, zip64SentinelEntryCountIsRejected) {
     EXPECT_EQ("USDZ archive has 65535 members; classic ZIP reserves 65535 for ZIP64\n", err);
 }
 
+TEST(utUSDZWriter, classicZipTotalArchiveSizeIsBounded) {
+    constexpr uint64_t classicZipMaximum = std::numeric_limits<uint32_t>::max();
+    EXPECT_TRUE(tinyusdz::usdz::detail::FitsClassicZipArchive(classicZipMaximum));
+    EXPECT_FALSE(tinyusdz::usdz::detail::FitsClassicZipArchive(classicZipMaximum + 1));
+
+    constexpr uint64_t syntheticMemberSize = classicZipMaximum - 65;
+    EXPECT_FALSE(tinyusdz::usdz::detail::FitsClassicZipArchive(
+            64 + syntheticMemberSize + 46 + sizeof("model.usda") - 1 + 22));
+}
+
 #endif // ASSIMP_BUILD_NO_USD_EXPORTER

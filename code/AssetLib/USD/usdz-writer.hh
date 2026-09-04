@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <vector>
 #include <string>
@@ -8,6 +9,12 @@
 
 namespace tinyusdz {
 namespace usdz {
+
+namespace detail {
+static constexpr bool FitsClassicZipArchive(std::uint64_t size) {
+    return size <= UINT32_MAX;
+}
+}
 
 ///
 /// Save scene as USDZ(ZIP)
