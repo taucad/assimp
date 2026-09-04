@@ -116,10 +116,9 @@ TEST_F(utX3DImportExport, importX3DBHelloWorld) {
     // X3DB (binary X3D) format is not currently supported by assimp X3D importer
     // The file is recognized but fails to parse due to lack of binary X3D decoder
     ASSERT_EQ(nullptr, scene);
-    
+
     // Verify the importer recognizes the file extension but fails parsing
-    std::string error = importer.GetErrorString();
-    ASSERT_FALSE(error.empty());
+    EXPECT_STREQ("X3D: no scene graph was parsed.", importer.GetErrorString());
 }
 
 // X3DV format tests (Classic VRML)
@@ -184,6 +183,8 @@ constexpr const char *kX3dWithoutUnit =
         "  </Scene>"
         "</X3D>";
 
+constexpr const char *kEmptyX3dScene = "<X3D><Scene/></X3D>";
+
 double readUnitScale(const aiScene *scene) {
     double value = 0.0;
     EXPECT_NE(nullptr, scene);
@@ -201,6 +202,21 @@ int32_t readUpAxis(const aiScene *scene) {
 }
 
 } // namespace
+
+TEST_F(utX3DImportExport, rejectsInvalidDocumentsAndRecoversForEmptyScene) {
+    Assimp::Importer importer;
+    constexpr const char *malformed = "<X3D><Scene>";
+    constexpr const char *missingRoot = "<Scene/>";
+
+    EXPECT_EQ(nullptr, importer.ReadFileFromMemory(malformed, strlen(malformed), 0, "x3d"));
+    EXPECT_STREQ("X3D: no scene graph was parsed.", importer.GetErrorString());
+    EXPECT_EQ(nullptr, importer.ReadFileFromMemory(missingRoot, strlen(missingRoot), 0, "x3d"));
+    EXPECT_STREQ("X3D: no scene graph was parsed.", importer.GetErrorString());
+
+    const aiScene *scene = importer.ReadFileFromMemory(kEmptyX3dScene, strlen(kEmptyX3dScene), 0, "x3d");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    EXPECT_STREQ("", importer.GetErrorString());
+}
 
 TEST_F(utX3DImportExport, contractDefaultsAreMetersAndYUpWhenUnitAbsent) {
     Assimp::Importer importer;

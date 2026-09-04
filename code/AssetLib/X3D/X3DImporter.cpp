@@ -304,6 +304,10 @@ void X3DImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
         pIOHandler->PopDirectory();
     }
 
+    if (NodeElement_List.empty()) {
+        throw DeadlyImportError("X3D: no scene graph was parsed.");
+    }
+
     //search for root node element
 
     mNodeElementCur = NodeElement_List.front();
