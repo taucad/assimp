@@ -123,6 +123,10 @@ void MD5Importer::InternReadFile(const std::string &pFile, aiScene *_pScene, IOS
     mScene = _pScene;
     mHadMD5Mesh = mHadMD5Anim = mHadMD5Camera = false;
 
+    // Validate caller overrides before loading any importer-owned data.
+    const ContractDefaults md5Defaults{ 1.0, 1 };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "MD5", md5Defaults);
+
     // remove the file extension
     const std::string::size_type pos = pFile.find_last_of('.');
     mFile = (std::string::npos == pos ? pFile : pFile.substr(0, pos + 1));
@@ -149,6 +153,7 @@ void MD5Importer::InternReadFile(const std::string &pFile, aiScene *_pScene, IOS
         UnloadFileFromMemory();
         throw;
     }
+    UnloadFileFromMemory();
 
     // make sure we have at least one file
     if (!mHadMD5Mesh && !mHadMD5Anim && !mHadMD5Camera) {
@@ -168,12 +173,7 @@ void MD5Importer::InternReadFile(const std::string &pFile, aiScene *_pScene, IOS
     // re-expresses the scene as Y-up, so we declare UpAxis=1
     // post-rotation. MD5 has no spec-level distance unit, so we default
     // to 1.0 (one unit per metre) and let consumers override.
-    const ContractDefaults md5Defaults{ 1.0, 1 };
-    const ContractDefaults resolved = resolveImporterContract(mImporter, "MD5", md5Defaults);
     writeContractMetadata(mScene, resolved.unit, resolved.upAxis, "MD5");
-
-    // clean the instance -- the BaseImporter instance may be reused later.
-    UnloadFileFromMemory();
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -187,23 +187,22 @@ void MD5Importer::LoadFileIntoMemory(IOStream *file) {
     ai_assert(mFileSize);
 
     // allocate storage and copy the contents of the file to a memory buffer
-    mBuffer = new char[mFileSize + 1];
-    file->Read((void *)mBuffer, 1, mFileSize);
+    mBuffer.reset(new char[mFileSize + 1]);
+    file->Read((void *)mBuffer.get(), 1, mFileSize);
     mLineNumber = 1;
 
     // append a terminal 0
     mBuffer[mFileSize] = '\0';
 
     // now remove all line comments from the file
-    CommentRemover::RemoveLineComments("//", mBuffer, ' ');
+    CommentRemover::RemoveLineComments("//", mBuffer.get(), ' ');
 }
 
 // ------------------------------------------------------------------------------------------------
 // Unload the current memory buffer
 void MD5Importer::UnloadFileFromMemory() {
     // delete the file buffer
-    delete[] mBuffer;
-    mBuffer = nullptr;
+    mBuffer.reset();
     mFileSize = 0;
 }
 
@@ -347,7 +346,7 @@ void MD5Importer::LoadMD5MeshFile() {
     LoadFileIntoMemory(file.get());
 
     // now construct a parser and parse the file
-    MD5::MD5Parser parser(mBuffer, mFileSize);
+    MD5::MD5Parser parser(mBuffer.get(), mFileSize);
 
     // load the mesh information from it
     MD5::MD5MeshParser meshParser(parser.mSections);
@@ -569,7 +568,7 @@ void MD5Importer::LoadMD5AnimFile() {
     LoadFileIntoMemory(file.get());
 
     // parse the basic file structure
-    MD5::MD5Parser parser(mBuffer, mFileSize);
+    MD5::MD5Parser parser(mBuffer.get(), mFileSize);
 
     // load the animation information from the parse tree
     MD5::MD5AnimParser animParser(parser.mSections);
@@ -676,7 +675,7 @@ void MD5Importer::LoadMD5CameraFile() {
     LoadFileIntoMemory(file.get());
 
     // parse the basic file structure
-    MD5::MD5Parser parser(mBuffer, mFileSize);
+    MD5::MD5Parser parser(mBuffer.get(), mFileSize);
 
     // load the camera animation data from the parse tree
     MD5::MD5CameraParser cameraParser(parser.mSections);

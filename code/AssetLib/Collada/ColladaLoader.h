@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ColladaParser.h"
 #include <assimp/BaseImporter.h>
+#include <memory>
 
 struct aiNode;
 struct aiCamera;
@@ -88,7 +89,7 @@ public:
     ColladaLoader();
 
     /// The class destructor.
-    ~ColladaLoader() override = default;
+    ~ColladaLoader() override;
 
     /// Returns whether the class can handle the format of the given file.
     /// @see BaseImporter::CanRead() for more details.
@@ -105,7 +106,7 @@ protected:
     void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) override;
 
     /// Recursively constructs a scene node for the given parser node and returns it.
-    aiNode *BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode);
+    std::unique_ptr<aiNode> BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode);
 
     /// Resolve node instances
     void ResolveNodeInstances(const ColladaParser &pParser, const Collada::Node *pNode,
@@ -119,7 +120,7 @@ protected:
     aiMesh *findMesh(const std::string &meshid);
 
     /// Creates a mesh for the given ColladaMesh face subset and returns the newly created mesh
-    aiMesh *CreateMesh(const ColladaParser &pParser, const Collada::Mesh *pSrcMesh, const Collada::SubMesh &pSubMesh,
+    std::unique_ptr<aiMesh> CreateMesh(const ColladaParser &pParser, const Collada::Mesh *pSrcMesh, const Collada::SubMesh &pSubMesh,
             const Collada::Controller *pSrcController, size_t pStartVertex, size_t pStartFace);
 
     /// Builds cameras for the given node and references them
@@ -196,6 +197,8 @@ protected:
     std::string FindNameForNode(const Collada::Node *pNode);
 
 private:
+    void Clear();
+
     /** Filename, for a verbose error message */
     std::string mFileName;
 
@@ -206,25 +209,25 @@ private:
     std::map<std::string, size_t> mMaterialIndexByName;
 
     /** Accumulated meshes for the target scene */
-    MeshArray mMeshes;
+    std::vector<std::unique_ptr<aiMesh>> mMeshes;
 
     /** Accumulated morph target meshes */
-    MeshArray mTargetMeshes;
+    std::vector<std::unique_ptr<aiMesh>> mTargetMeshes;
 
     /** Temporary material list */
-    std::vector<std::pair<Collada::Effect *, aiMaterial *>> newMats;
+    std::vector<std::pair<Collada::Effect *, std::unique_ptr<aiMaterial>>> newMats;
 
     /** Temporary camera list */
-    std::vector<aiCamera *> mCameras;
+    std::vector<std::unique_ptr<aiCamera>> mCameras;
 
     /** Temporary light list */
-    std::vector<aiLight *> mLights;
+    std::vector<std::unique_ptr<aiLight>> mLights;
 
     /** Temporary texture list */
-    std::vector<aiTexture *> mTextures;
+    std::vector<std::unique_ptr<aiTexture>> mTextures;
 
     /** Accumulated animations for the target scene */
-    std::vector<aiAnimation *> mAnims;
+    std::vector<std::unique_ptr<aiAnimation>> mAnims;
 
     bool noSkeletonMesh;
     bool removeEmptyBones;

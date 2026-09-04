@@ -489,10 +489,18 @@ TEST_F(utColladaImportExport, contractUpAxisOverrideRespected) {
 TEST_F(utColladaImportExport, contractInvalidUpAxisOverrideFailsImport) {
     Assimp::Importer importer;
     importer.SetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_UP_AXIS, 7);
+    for (unsigned int i = 0; i < 3; ++i) {
+        EXPECT_EQ(nullptr, importer.ReadFile(kFixture, 0));
+        EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("IMPORT_COLLADA_UP_AXIS"));
+    }
+
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_UP_AXIS, 1);
     const aiScene *scene = importer.ReadFile(kFixture, 0);
-    EXPECT_EQ(nullptr, scene);
-    const std::string errorString = importer.GetErrorString();
-    EXPECT_NE(std::string::npos, errorString.find("IMPORT_COLLADA_UP_AXIS"));
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    ASSERT_NE(nullptr, scene->mMeshes[0]);
+    EXPECT_EQ(8500u, scene->mMeshes[0]->mNumVertices);
+    EXPECT_EQ(2144u, scene->mMeshes[0]->mNumFaces);
 }
 
 #ifndef ASSIMP_BUILD_NO_EXPORT

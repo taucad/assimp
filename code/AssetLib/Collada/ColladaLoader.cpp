@@ -112,6 +112,21 @@ ColladaLoader::ColladaLoader() :
     // empty
 }
 
+ColladaLoader::~ColladaLoader() = default;
+
+void ColladaLoader::Clear() {
+    mMeshIndexByID.clear();
+    mMaterialIndexByName.clear();
+    mMeshes.clear();
+    mTargetMeshes.clear();
+    newMats.clear();
+    mLights.clear();
+    mCameras.clear();
+    mTextures.clear();
+    mAnims.clear();
+    mNodeNameCounter = 0;
+}
+
 // ------------------------------------------------------------------------------------------------
 // Returns whether the class can handle the format of the given file.
 bool ColladaLoader::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /*checkSig*/) const {
@@ -143,19 +158,10 @@ const aiImporterDesc *ColladaLoader::GetInfo() const {
 
 // ------------------------------------------------------------------------------------------------
 // Imports the given file into the given scene structure.
-void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
+void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) try {
     mFileName = pFile;
 
-    // clean all member arrays - just for safety, it should work even if we did not
-    mMeshIndexByID.clear();
-    mMaterialIndexByName.clear();
-    mMeshes.clear();
-    mTargetMeshes.clear();
-    newMats.clear();
-    mLights.clear();
-    mCameras.clear();
-    mTextures.clear();
-    mAnims.clear();
+    Clear();
 
     // parse the input file
     ColladaParser parser(pIOHandler, pFile);
@@ -163,6 +169,18 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     if (!parser.mRootNode) {
         throw DeadlyImportError("Collada: File came out empty. Something is wrong here.");
     }
+
+    double colladaUnit = ignoreUnitSize ? static_cast<double>(parser.mUnitSize) : 1.0;
+    int32_t colladaUpAxis = 1; // post-normalisation default = Y-up
+    if (ignoreUpDirection) {
+        switch (parser.mUpDirection) {
+            case ColladaParser::UP_X: colladaUpAxis = 0; break;
+            case ColladaParser::UP_Y: colladaUpAxis = 1; break;
+            case ColladaParser::UP_Z: colladaUpAxis = 2; break;
+        }
+    }
+    const ContractDefaults colladaDefaults{ colladaUnit, colladaUpAxis };
+    const ContractDefaults resolved = resolveImporterContract(mImporter, "COLLADA", colladaDefaults);
 
     // reserve some storage to avoid unnecessary reallocates
     newMats.reserve(parser.mMaterialLibrary.size() * 2u);
@@ -175,7 +193,7 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     BuildMaterials(parser, pScene);
 
     // build the node hierarchy from it
-    pScene->mRootNode = BuildHierarchy(parser, parser.mRootNode);
+    pScene->mRootNode = BuildHierarchy(parser, parser.mRootNode).release();
 
     // ... then fill the materials with the now adjusted settings
     FillMaterials(parser, pScene);
@@ -220,20 +238,7 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     // post-import normalisation into the root node, so the canonical scene
     // is metres + Y-up unless the caller has explicitly opted out via
     // AI_CONFIG_IMPORT_COLLADA_IGNORE_*.
-    {
-        double colladaUnit = ignoreUnitSize ? static_cast<double>(parser.mUnitSize) : 1.0;
-        int32_t colladaUpAxis = 1; // post-normalisation default = Y-up
-        if (ignoreUpDirection) {
-            switch (parser.mUpDirection) {
-                case ColladaParser::UP_X: colladaUpAxis = 0; break;
-                case ColladaParser::UP_Y: colladaUpAxis = 1; break;
-                case ColladaParser::UP_Z: colladaUpAxis = 2; break;
-            }
-        }
-        const ContractDefaults colladaDefaults{ colladaUnit, colladaUpAxis };
-        const ContractDefaults resolved = resolveImporterContract(mImporter, "COLLADA", colladaDefaults);
-        writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "Collada");
-    }
+    writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "Collada");
 
     StoreSceneMeshes(pScene);
     StoreSceneMaterials(pScene);
@@ -249,23 +254,28 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
         }
         pScene->mFlags |= AI_SCENE_FLAGS_INCOMPLETE;
     }
+
+    Clear();
+} catch (...) {
+    Clear();
+    throw;
 }
 
 // ------------------------------------------------------------------------------------------------
 // Recursively constructs a scene node for the given parser node and returns it.
-aiNode *ColladaLoader::BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode) {
+std::unique_ptr<aiNode> ColladaLoader::BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode) {
     // create a node for it
-    auto *node = new aiNode();
+    auto node = std::make_unique<aiNode>();
 
     // find a name for the new node. It's more complicated than you might think
     node->mName.Set(FindNameForNode(pNode));
     // if we're not using the unique IDs, hold onto them for reference and export
     if (useColladaName) {
         if (!pNode->mID.empty()) {
-            AddNodeMetaData(node, AI_METADATA_COLLADA_ID, aiString(pNode->mID));
+            AddNodeMetaData(node.get(), AI_METADATA_COLLADA_ID, aiString(pNode->mID));
         }
         if (!pNode->mSID.empty()) {
-            AddNodeMetaData(node, AI_METADATA_COLLADA_SID, aiString(pNode->mSID));
+            AddNodeMetaData(node.get(), AI_METADATA_COLLADA_SID, aiString(pNode->mSID));
         }
     }
 
@@ -279,23 +289,25 @@ aiNode *ColladaLoader::BuildHierarchy(const ColladaParser &pParser, const Collad
     // add children. first the *real* ones
     node->mNumChildren = static_cast<unsigned int>(pNode->mChildren.size() + instances.size());
     if (node->mNumChildren != 0) {
-        node->mChildren = new aiNode * [node->mNumChildren];
+        node->mChildren = new aiNode * [node->mNumChildren]();
     }
 
     for (size_t a = 0; a < pNode->mChildren.size(); ++a) {
-        node->mChildren[a] = BuildHierarchy(pParser, pNode->mChildren[a]);
-        node->mChildren[a]->mParent = node;
+        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, pNode->mChildren[a]);
+        child->mParent = node.get();
+        node->mChildren[a] = child.release();
     }
 
     // ... and finally the resolved node instances
     for (size_t a = 0; a < instances.size(); ++a) {
-        node->mChildren[pNode->mChildren.size() + a] = BuildHierarchy(pParser, instances[a]);
-        node->mChildren[pNode->mChildren.size() + a]->mParent = node;
+        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, instances[a]);
+        child->mParent = node.get();
+        node->mChildren[pNode->mChildren.size() + a] = child.release();
     }
 
-    BuildMeshesForNode(pParser, pNode, node);
-    BuildCamerasForNode(pParser, pNode, node);
-    BuildLightsForNode(pParser, pNode, node);
+    BuildMeshesForNode(pParser, pNode, node.get());
+    BuildCamerasForNode(pParser, pNode, node.get());
+    BuildLightsForNode(pParser, pNode, node.get());
 
     return node;
 }
@@ -356,7 +368,7 @@ void ColladaLoader::BuildLightsForNode(const ColladaParser &pParser, const Node 
         const Collada::Light *srcLight = &srcLightIt->second;
 
         // now fill our ai data structure
-        auto out = new aiLight();
+        auto out = std::make_unique<aiLight>();
         out->mName = pTarget->mName;
         out->mType = (aiLightSourceType)srcLight->mType;
 
@@ -404,7 +416,7 @@ void ColladaLoader::BuildLightsForNode(const ColladaParser &pParser, const Node 
         }
 
         // add to light list
-        mLights.push_back(out);
+        mLights.push_back(std::move(out));
     }
 }
 
@@ -426,7 +438,7 @@ void ColladaLoader::BuildCamerasForNode(const ColladaParser &pParser, const Node
         }
 
         // now fill our ai data structure
-        auto *out = new aiCamera();
+        auto out = std::make_unique<aiCamera>();
         out->mName = pTarget->mName;
 
         // collada cameras point in -Z by default, rest is specified in node transform
@@ -459,7 +471,7 @@ void ColladaLoader::BuildCamerasForNode(const ColladaParser &pParser, const Node
         out->mHorizontalFOV = AI_DEG_TO_RAD(out->mHorizontalFOV);
 
         // add to camera list
-        mCameras.push_back(out);
+        mCameras.push_back(std::move(out));
     }
 }
 
@@ -530,16 +542,16 @@ void ColladaLoader::BuildMeshesForNode(const ColladaParser &pParser, const Node 
             }
 
             if (table && !table->mMap.empty()) {
-                std::pair<Collada::Effect *, aiMaterial *> &mat = newMats[matIdx];
+                Collada::Effect *effect = newMats[matIdx].first;
 
                 // Iterate through all texture channels assigned to the effect and
                 // check whether we have mapping information for it.
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexDiffuse, *table);
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexAmbient, *table);
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexSpecular, *table);
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexEmissive, *table);
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexTransparent, *table);
-                ApplyVertexToEffectSemanticMapping(mat.first->mTexBump, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexDiffuse, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexAmbient, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexSpecular, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexEmissive, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexTransparent, *table);
+                ApplyVertexToEffectSemanticMapping(effect->mTexBump, *table);
             }
 
             // built lookup index of the Mesh-Submesh-Material combination
@@ -551,12 +563,11 @@ void ColladaLoader::BuildMeshesForNode(const ColladaParser &pParser, const Node 
                 newMeshRefs.push_back(dstMeshIt->second);
             } else {
                 // else we have to add the mesh to the collection and store its newly assigned index at the node
-                aiMesh *dstMesh = CreateMesh(pParser, srcMesh, submesh, srcController, vertexStart, faceStart);
+                std::unique_ptr<aiMesh> dstMesh = CreateMesh(pParser, srcMesh, submesh, srcController, vertexStart, faceStart);
 
                 // store the mesh, and store its new index in the node
                 newMeshRefs.push_back(mMeshes.size());
                 mMeshIndexByID[index] = mMeshes.size();
-                mMeshes.push_back(dstMesh);
                 vertexStart += dstMesh->mNumVertices;
                 faceStart += submesh.mNumFaces;
 
@@ -570,6 +581,7 @@ void ColladaLoader::BuildMeshesForNode(const ColladaParser &pParser, const Node 
                 if (dstMesh->mName.length == 0) {
                     dstMesh->mName = mid.mMeshOrController;
                 }
+                mMeshes.push_back(std::move(dstMesh));
             }
         }
     }
@@ -597,13 +609,13 @@ aiMesh *ColladaLoader::findMesh(const std::string &meshid) {
 
     for (auto & mMeshe : mMeshes) {
         if (std::string(mMeshe->mName.data) == meshid) {
-            return mMeshe;
+            return mMeshe.get();
         }
     }
 
     for (auto & mTargetMeshe : mTargetMeshes) {
         if (std::string(mTargetMeshe->mName.data) == meshid) {
-            return mTargetMeshe;
+            return mTargetMeshe.get();
         }
     }
 
@@ -612,7 +624,7 @@ aiMesh *ColladaLoader::findMesh(const std::string &meshid) {
 
 // ------------------------------------------------------------------------------------------------
 // Creates a mesh for the given ColladaMesh face subset and returns the newly created mesh
-aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrcMesh, const SubMesh &pSubMesh,
+std::unique_ptr<aiMesh> ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrcMesh, const SubMesh &pSubMesh,
         const Controller *pSrcController, size_t pStartVertex, size_t pStartFace) {
     std::unique_ptr<aiMesh> dstMesh(new aiMesh);
 
@@ -623,7 +635,7 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
     }
 
     if (pSrcMesh->mPositions.empty()) {
-        return dstMesh.release();
+        return dstMesh;
     }
 
     // count the vertices addressed by its faces
@@ -734,8 +746,9 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
                     if (targetMesh->mSubMeshes.size() > 1) {
                         throw DeadlyImportError("Morphing target mesh must be a single");
                     }
-                    aimesh = CreateMesh(pParser, targetMesh, targetMesh->mSubMeshes.at(0), nullptr, 0, 0);
-                    mTargetMeshes.push_back(aimesh);
+                    std::unique_ptr<aiMesh> target = CreateMesh(pParser, targetMesh, targetMesh->mSubMeshes.at(0), nullptr, 0, 0);
+                    aimesh = target.get();
+                    mTargetMeshes.push_back(std::move(target));
                 }
                 targetMeshes.push_back(aimesh);
             }
@@ -745,20 +758,20 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
         }
     }
     if (!targetMeshes.empty() && targetWeights.size() == targetMeshes.size()) {
-        std::vector<aiAnimMesh *> animMeshes;
+        std::vector<std::unique_ptr<aiAnimMesh>> animMeshes;
         for (unsigned int i = 0; i < targetMeshes.size(); ++i) {
             aiMesh *targetMesh = targetMeshes.at(i);
-            aiAnimMesh *animMesh = aiCreateAnimMesh(targetMesh);
+            std::unique_ptr<aiAnimMesh> animMesh(aiCreateAnimMesh(targetMesh));
             float weight = targetWeights[i];
             animMesh->mWeight = weight == 0 ? 1.0f : weight;
             animMesh->mName = targetMesh->mName;
-            animMeshes.push_back(animMesh);
+            animMeshes.push_back(std::move(animMesh));
         }
         dstMesh->mMethod = (method == Relative) ? aiMorphingMethod_MORPH_RELATIVE : aiMorphingMethod_MORPH_NORMALIZED;
         dstMesh->mAnimMeshes = new aiAnimMesh *[animMeshes.size()];
         dstMesh->mNumAnimMeshes = static_cast<unsigned int>(animMeshes.size());
         for (unsigned int i = 0; i < animMeshes.size(); ++i) {
-            dstMesh->mAnimMeshes[i] = animMeshes.at(i);
+            dstMesh->mAnimMeshes[i] = animMeshes[i].release();
         }
     }
 
@@ -839,7 +852,7 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
 
         // create bone array and copy bone weights one by one
         dstMesh->mNumBones = static_cast<unsigned int>(numRemainingBones);
-        dstMesh->mBones = new aiBone *[numRemainingBones];
+        dstMesh->mBones = new aiBone *[numRemainingBones]();
         size_t boneCount = 0;
         for (size_t a = 0; a < numBones; ++a) {
             // omit bones without weights
@@ -848,7 +861,7 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
             }
 
             // create bone with its weights
-            auto bone = new aiBone;
+            auto bone = std::make_unique<aiBone>();
             bone->mName = ReadString(jointNamesAcc, jointNames, a);
             bone->mOffsetMatrix.a1 = ReadFloat(jointMatrixAcc, jointMatrices, a, 0);
             bone->mOffsetMatrix.a2 = ReadFloat(jointMatrixAcc, jointMatrices, a, 1);
@@ -903,11 +916,11 @@ aiMesh *ColladaLoader::CreateMesh(const ColladaParser &pParser, const Mesh *pSrc
             }
 
             // and insert bone
-            dstMesh->mBones[boneCount++] = bone;
+            dstMesh->mBones[boneCount++] = bone.release();
         }
     }
 
-    return dstMesh.release();
+    return dstMesh;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -918,7 +931,9 @@ void ColladaLoader::StoreSceneMeshes(aiScene *pScene) {
         return;
     }
     pScene->mMeshes = new aiMesh *[mMeshes.size()];
-    std::copy(mMeshes.begin(), mMeshes.end(), pScene->mMeshes);
+    for (size_t i = 0; i < mMeshes.size(); ++i) {
+        pScene->mMeshes[i] = mMeshes[i].release();
+    }
     mMeshes.clear();
 }
 
@@ -930,7 +945,9 @@ void ColladaLoader::StoreSceneCameras(aiScene *pScene) {
         return;
     }
     pScene->mCameras = new aiCamera *[mCameras.size()];
-    std::copy(mCameras.begin(), mCameras.end(), pScene->mCameras);
+    for (size_t i = 0; i < mCameras.size(); ++i) {
+        pScene->mCameras[i] = mCameras[i].release();
+    }
     mCameras.clear();
 }
 
@@ -942,7 +959,9 @@ void ColladaLoader::StoreSceneLights(aiScene *pScene) {
         return;
     }
     pScene->mLights = new aiLight *[mLights.size()];
-    std::copy(mLights.begin(), mLights.end(), pScene->mLights);
+    for (size_t i = 0; i < mLights.size(); ++i) {
+        pScene->mLights[i] = mLights[i].release();
+    }
     mLights.clear();
 }
 
@@ -954,7 +973,9 @@ void ColladaLoader::StoreSceneTextures(aiScene *pScene) {
         return;
     }
     pScene->mTextures = new aiTexture *[mTextures.size()];
-    std::copy(mTextures.begin(), mTextures.end(), pScene->mTextures);
+    for (size_t i = 0; i < mTextures.size(); ++i) {
+        pScene->mTextures[i] = mTextures[i].release();
+    }
     mTextures.clear();
 }
 
@@ -967,7 +988,7 @@ void ColladaLoader::StoreSceneMaterials(aiScene *pScene) {
     }
     pScene->mMaterials = new aiMaterial *[newMats.size()];
     for (unsigned int i = 0; i < newMats.size(); ++i) {
-        pScene->mMaterials[i] = newMats[i].second;
+        pScene->mMaterials[i] = newMats[i].second.release();
     }
     newMats.clear();
 }
@@ -981,13 +1002,13 @@ void ColladaLoader::StoreAnimations(aiScene *pScene, const ColladaParser &pParse
     // catch special case: many animations with the same length, each affecting only a single node.
     // we need to unite all those single-node-anims to a proper combined animation
     for (size_t a = 0; a < mAnims.size(); ++a) {
-        aiAnimation *templateAnim = mAnims[a];
+        aiAnimation *templateAnim = mAnims[a].get();
 
         if (templateAnim->mNumChannels == 1) {
             // search for other single-channel-anims with the same duration
             std::vector<size_t> collectedAnimIndices;
             for (size_t b = a + 1; b < mAnims.size(); ++b) {
-                aiAnimation *other = mAnims[b];
+                aiAnimation *other = mAnims[b].get();
                 if (other->mNumChannels == 1 && other->mDuration == templateAnim->mDuration &&
                         other->mTicksPerSecond == templateAnim->mTicksPerSecond)
                     collectedAnimIndices.push_back(b);
@@ -998,7 +1019,7 @@ void ColladaLoader::StoreAnimations(aiScene *pScene, const ColladaParser &pParse
             animTargets.insert(templateAnim->mChannels[0]->mNodeName.C_Str());
             bool collectedAnimationsHaveDifferentChannels = true;
             for (unsigned long long collectedAnimIndice : collectedAnimIndices) {
-                aiAnimation *srcAnimation = mAnims[(int)collectedAnimIndice];
+                aiAnimation *srcAnimation = mAnims[(int)collectedAnimIndice].get();
                 std::string channelName = std::string(srcAnimation->mChannels[0]->mNodeName.C_Str());
                 if (animTargets.find(channelName) == animTargets.end()) {
                     animTargets.insert(channelName);
@@ -1014,7 +1035,7 @@ void ColladaLoader::StoreAnimations(aiScene *pScene, const ColladaParser &pParse
 
             // if there are other animations which fit the template anim, combine all channels into a single anim
             if (!collectedAnimIndices.empty()) {
-                auto *combinedAnim = new aiAnimation();
+                auto combinedAnim = std::make_unique<aiAnimation>();
                 combinedAnim->mName = aiString(std::string("combinedAnim_") + char('0' + a));
                 combinedAnim->mDuration = templateAnim->mDuration;
                 combinedAnim->mTicksPerSecond = templateAnim->mTicksPerSecond;
@@ -1023,16 +1044,15 @@ void ColladaLoader::StoreAnimations(aiScene *pScene, const ColladaParser &pParse
                 // add the template anim as first channel by moving its aiNodeAnim to the combined animation
                 combinedAnim->mChannels[0] = templateAnim->mChannels[0];
                 templateAnim->mChannels[0] = nullptr;
-                delete templateAnim;
                 // combined animation replaces template animation in the anim array
-                mAnims[a] = combinedAnim;
+                mAnims[a] = std::move(combinedAnim);
+                aiAnimation *storedCombinedAnim = mAnims[a].get();
 
                 // move the memory of all other anims to the combined anim and erase them from the source anims
                 for (size_t b = 0; b < collectedAnimIndices.size(); ++b) {
-                    aiAnimation *srcAnimation = mAnims[collectedAnimIndices[b]];
-                    combinedAnim->mChannels[1 + b] = srcAnimation->mChannels[0];
+                    aiAnimation *srcAnimation = mAnims[collectedAnimIndices[b]].get();
+                    storedCombinedAnim->mChannels[1 + b] = srcAnimation->mChannels[0];
                     srcAnimation->mChannels[0] = nullptr;
-                    delete srcAnimation;
                 }
 
                 // in a second go, delete all the single-channel-anims that we've stripped from their channels
@@ -1049,7 +1069,9 @@ void ColladaLoader::StoreAnimations(aiScene *pScene, const ColladaParser &pParse
     if (!mAnims.empty()) {
         pScene->mNumAnimations = static_cast<unsigned int>(mAnims.size());
         pScene->mAnimations = new aiAnimation *[mAnims.size()];
-        std::copy(mAnims.begin(), mAnims.end(), pScene->mAnimations);
+        for (size_t i = 0; i < mAnims.size(); ++i) {
+            pScene->mAnimations[i] = mAnims[i].release();
+        }
     }
 
     mAnims.clear();
@@ -1131,8 +1153,8 @@ void ColladaLoader::CreateAnimation(aiScene *pScene, const ColladaParser &pParse
     std::vector<const aiNode *> nodes;
     CollectNodes(pScene->mRootNode, nodes);
 
-    std::vector<aiNodeAnim *> anims;
-    std::vector<aiMeshMorphAnim *> morphAnims;
+    std::vector<std::unique_ptr<aiNodeAnim>> anims;
+    std::vector<std::unique_ptr<aiMeshMorphAnim>> morphAnims;
 
     for (auto node : nodes) {
         // find all the collada anim channels which refer to the current node
@@ -1390,7 +1412,7 @@ void ColladaLoader::CreateAnimation(aiScene *pScene, const ColladaParser &pParse
 
         // build an animation channel for the given node out of these trafo keys
         if (!resultTrafos.empty()) {
-            auto *dstAnim = new aiNodeAnim;
+            auto dstAnim = std::make_unique<aiNodeAnim>();
             dstAnim->mNodeName = nodeName;
             dstAnim->mNumPositionKeys = static_cast<unsigned int>(resultTrafos.size());
             dstAnim->mNumRotationKeys = static_cast<unsigned int>(resultTrafos.size());
@@ -1410,7 +1432,7 @@ void ColladaLoader::CreateAnimation(aiScene *pScene, const ColladaParser &pParse
                 mat.Decompose(dstAnim->mScalingKeys[a].mValue, dstAnim->mRotationKeys[a].mValue, dstAnim->mPositionKeys[a].mValue);
             }
 
-            anims.push_back(dstAnim);
+            anims.push_back(std::move(dstAnim));
         } else {
             ASSIMP_LOG_WARN("Collada loader: found empty animation channel, ignored. Please check your exporter.");
         }
@@ -1432,7 +1454,7 @@ void ColladaLoader::CreateAnimation(aiScene *pScene, const ColladaParser &pParse
                 // or     2) one channel with morph target count arrays
                 // assume first
 
-                auto *morphAnim = new aiMeshMorphAnim;
+                auto morphAnim = std::make_unique<aiMeshMorphAnim>();
                 morphAnim->mName.Set(nodeName);
 
                 std::vector<MorphTimeValues> morphTimeValues;
@@ -1469,35 +1491,39 @@ void ColladaLoader::CreateAnimation(aiScene *pScene, const ColladaParser &pParse
                     }
                 }
 
-                morphAnims.push_back(morphAnim);
+                morphAnims.push_back(std::move(morphAnim));
             }
         }
     }
 
     if (!anims.empty() || !morphAnims.empty()) {
-        auto anim = new aiAnimation;
+        auto anim = std::make_unique<aiAnimation>();
         anim->mName.Set(pName);
         anim->mNumChannels = static_cast<unsigned int>(anims.size());
-        if (anim->mNumChannels > 0) {
-            anim->mChannels = new aiNodeAnim *[anims.size()];
-            std::copy(anims.begin(), anims.end(), anim->mChannels);
-        }
         anim->mNumMorphMeshChannels = static_cast<unsigned int>(morphAnims.size());
-        if (anim->mNumMorphMeshChannels > 0) {
-            anim->mMorphMeshChannels = new aiMeshMorphAnim *[anim->mNumMorphMeshChannels];
-            std::copy(morphAnims.begin(), morphAnims.end(), anim->mMorphMeshChannels);
-        }
         anim->mDuration = 0.0f;
-        for (auto & a : anims) {
+        for (const auto &a : anims) {
             anim->mDuration = std::max(anim->mDuration, a->mPositionKeys[a->mNumPositionKeys - 1].mTime);
             anim->mDuration = std::max(anim->mDuration, a->mRotationKeys[a->mNumRotationKeys - 1].mTime);
             anim->mDuration = std::max(anim->mDuration, a->mScalingKeys[a->mNumScalingKeys - 1].mTime);
         }
-        for (auto & morphAnim : morphAnims) {
+        for (const auto &morphAnim : morphAnims) {
             anim->mDuration = std::max(anim->mDuration, morphAnim->mKeys[morphAnim->mNumKeys - 1].mTime);
         }
         anim->mTicksPerSecond = 1000.0;
-        mAnims.push_back(anim);
+        if (anim->mNumChannels > 0) {
+            anim->mChannels = new aiNodeAnim *[anims.size()];
+            for (size_t i = 0; i < anims.size(); ++i) {
+                anim->mChannels[i] = anims[i].release();
+            }
+        }
+        if (anim->mNumMorphMeshChannels > 0) {
+            anim->mMorphMeshChannels = new aiMeshMorphAnim *[anim->mNumMorphMeshChannels];
+            for (size_t i = 0; i < morphAnims.size(); ++i) {
+                anim->mMorphMeshChannels[i] = morphAnims[i].release();
+            }
+        }
+        mAnims.push_back(std::move(anim));
     }
 }
 
@@ -1693,13 +1719,13 @@ void ColladaLoader::BuildMaterials(ColladaParser &pParser, aiScene * /*pScene*/)
         Effect &effect = effIt->second;
 
         // create material
-        auto *mat = new aiMaterial;
+        auto mat = std::make_unique<aiMaterial>();
         aiString name(material.mName.empty() ? matIt->first : material.mName);
         mat->AddProperty(&name, AI_MATKEY_NAME);
 
         // store the material
         mMaterialIndexByName[matIt->first] = newMats.size();
-        newMats.emplace_back(&effect, mat);
+        newMats.emplace_back(&effect, std::move(mat));
     }
     // ScenePreprocessor generates a default material automatically if none is there.
     // All further code here in this loader works well without a valid material so
@@ -1738,7 +1764,7 @@ aiString ColladaLoader::FindFilenameForEffectTexture(const ColladaParser &pParse
 
     // if this is an embedded texture image setup an aiTexture for it
     if (!imIt->second.mImageData.empty()) {
-        auto *tex = new aiTexture();
+        auto tex = std::make_unique<aiTexture>();
 
         // Store embedded texture name reference
         tex->mFilename.Set(imIt->second.mFileName.c_str());
@@ -1757,7 +1783,7 @@ aiString ColladaLoader::FindFilenameForEffectTexture(const ColladaParser &pParse
         memcpy(tex->pcData, &imIt->second.mImageData[0], tex->mWidth);
 
         // and add this texture to the list
-        mTextures.push_back(tex);
+        mTextures.push_back(std::move(tex));
         return result;
     }
 
