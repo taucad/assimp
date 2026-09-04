@@ -2,7 +2,7 @@ name: C/C++ Sanitizer
 
 on:
   push:
-    branches: [ master, codex/ext-mesh-manifold-3mf ]
+    branches: [ master, codex/ext-mesh-manifold-3mf, codex/progress-cancellation ]
   pull_request:
     branches: [ master, codex/ext-mesh-manifold-3mf ]
 
