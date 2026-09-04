@@ -126,7 +126,9 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
         if (lastFilePos < filePos) {
             processed = static_cast<unsigned int>(filePos);
             lastFilePos = filePos;
-            m_progress->UpdateFileRead(processed, progressTotal);
+            if (!m_progress->UpdateFileReadAndCheck(processed, progressTotal)) {
+                throw DeadlyImportError("OBJ import cancelled by progress handler");
+            }
         }
 
         // handle c-stype section end (http://paulbourke.net/dataformats/obj/)

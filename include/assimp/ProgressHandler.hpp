@@ -86,10 +86,55 @@ public:
      *  @return Return false to abort loading at the next possible
      *   occasion (loaders and Assimp are generally allowed to perform
      *   all needed cleanup tasks prior to returning control to the
-     *   caller). If the loading is aborted, #Importer::ReadFile()
+     *   caller). A false result is latched until the current operation ends.
+     *   If the loading is aborted, #Importer::ReadFile()
      *   returns always nullptr.
      *   */
     virtual bool Update(float percentage = -1.f) = 0;
+
+    /** @brief Dispatch a file-read update and return the latched result.
+     *  Falls back to this class's implementation when a legacy specialized
+     *  override does not call it. */
+    bool UpdateFileReadAndCheck(int currentStep, int numberOfSteps) {
+        mUpdateHandled = false;
+        UpdateFileRead(currentStep, numberOfSteps);
+        if (!mUpdateHandled) {
+            ProgressHandler::UpdateFileRead(currentStep, numberOfSteps);
+        }
+        return !mCancelled;
+    }
+
+    /** @brief Dispatch a post-process update and return the latched result.
+     *  Falls back to this class's implementation when a legacy specialized
+     *  override does not call it. */
+    bool UpdatePostProcessAndCheck(int currentStep, int numberOfSteps) {
+        mUpdateHandled = false;
+        UpdatePostProcess(currentStep, numberOfSteps);
+        if (!mUpdateHandled) {
+            ProgressHandler::UpdatePostProcess(currentStep, numberOfSteps);
+        }
+        return !mCancelled;
+    }
+
+    /** @brief Dispatch a file-write update and return the latched result.
+     *  Falls back to this class's implementation when a legacy specialized
+     *  override does not call it. */
+    bool UpdateFileWriteAndCheck(int currentStep, int numberOfSteps) {
+        mUpdateHandled = false;
+        UpdateFileWrite(currentStep, numberOfSteps);
+        if (!mUpdateHandled) {
+            ProgressHandler::UpdateFileWrite(currentStep, numberOfSteps);
+        }
+        return !mCancelled;
+    }
+
+    /** @brief Reset the cancellation latch before a new operation.
+     *  @param enabled Whether a false update should request cancellation. */
+    void ResetCancellation(bool enabled = true) AI_NO_EXCEPT {
+        mCancelled = false;
+        mCancellationEnabled = enabled;
+        mUpdateHandled = false;
+    }
 
     // -------------------------------------------------------------------
     /** @brief Progress callback for file loading steps
@@ -100,12 +145,12 @@ public:
      *   them has finished. This number is always strictly monotone
      *   increasing, although not necessarily linearly.
      *
-     *  @note This is currently only used at the start and the end
-     *   of the file parsing.
+     *  @note Importers may report intermediate parser checkpoints in addition
+     *   to the start and end of file parsing.
      *   */
     virtual void UpdateFileRead(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update( f * 0.5f );
+        UpdateAndLatch(f * 0.5f);
     }
 
     // -------------------------------------------------------------------
@@ -119,7 +164,7 @@ public:
      *   */
     virtual void UpdatePostProcess(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update( f * 0.5f + 0.5f );
+        UpdateAndLatch(f * 0.5f + 0.5f);
     }
 
 
@@ -134,8 +179,20 @@ public:
      *   */
     virtual void UpdateFileWrite(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update(f * 0.5f);
+        UpdateAndLatch(f * 0.5f);
     }
+
+private:
+    void UpdateAndLatch(float percentage) {
+        mUpdateHandled = true;
+        if (!Update(percentage) && mCancellationEnabled) {
+            mCancelled = true;
+        }
+    }
+
+    bool mCancelled = false;
+    bool mCancellationEnabled = true;
+    bool mUpdateHandled = false;
 }; // !class ProgressHandler
 
 // ------------------------------------------------------------------------------------

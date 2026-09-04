@@ -394,6 +394,7 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         unsigned int pPreprocessing, const ExportProperties* pProperties) {
     ASSIMP_BEGIN_EXCEPTION_REGION();
 	ai_assert(nullptr != pimpl);
+	pimpl->mProgressHandler->ResetCancellation(!pimpl->mIsDefaultProgressHandler);
     
     if (!pScene) {
         pimpl->mError = "Export failed: Scene is null";
@@ -408,8 +409,7 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
 
     pimpl->mError = "";
     const auto updateProgress = [this](int step) {
-        pimpl->mProgressHandler->UpdateFileWrite(step, 4);
-        if (!pimpl->mIsDefaultProgressHandler && !pimpl->mProgressHandler->Update(step / 4.0f * 0.5f)) {
+        if (!pimpl->mProgressHandler->UpdateFileWriteAndCheck(step, 4)) {
             pimpl->mError = "Export cancelled by progress handler";
             return false;
         }
@@ -569,9 +569,8 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         		pProp->SetPropertyBool("bJoinIdenticalVertices", pp & aiProcess_JoinIdenticalVertices);
                 exp.mExportFunction(pPath,pimpl->mIOSystem.get(),scenecopy.get(), pProp);
 
-                if (!updateProgress(4)) {
-                    return AI_FAILURE;
-                }
+                // The writer may already have committed output; this is notification only.
+                pimpl->mProgressHandler->UpdateFileWriteAndCheck(4, 4);
             } catch (DeadlyExportError& err) {
                 pimpl->mError = err.what();
                 return AI_FAILURE;
