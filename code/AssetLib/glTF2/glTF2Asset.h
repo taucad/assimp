@@ -576,7 +576,7 @@ struct Accessor : public Object {
     inline uint8_t *GetPointer();
     inline size_t GetStride();
     inline size_t GetMaxByteSize();
-    inline bool IsDataRangeValid(size_t index, size_t elementSize);
+    inline bool IsDataRangeValid(size_t elementIndex, size_t elementSize);
 
     template <class T>
     size_t ExtractData(T *&outData, const std::vector<unsigned int> *remappingIndices = nullptr);

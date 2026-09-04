@@ -1008,10 +1008,10 @@ inline size_t Accessor::GetMaxByteSize() {
     return std::min(bufferView->byteLength - byteOffset, tailSize);
 }
 
-inline bool Accessor::IsDataRangeValid(size_t index, size_t elementSize) {
+inline bool Accessor::IsDataRangeValid(size_t elementIndex, size_t elementSize) {
     const size_t stride = GetStride();
     const size_t maxSize = GetMaxByteSize();
-    return stride >= elementSize && elementSize <= maxSize && index <= (maxSize - elementSize) / stride;
+    return stride >= elementSize && elementSize <= maxSize && elementIndex <= (maxSize - elementSize) / stride;
 }
 
 template <class T>
