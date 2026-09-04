@@ -123,6 +123,7 @@ TEST_F(utX3DImportExport, importX3DBHelloWorld) {
 }
 
 // X3DV format tests (Classic VRML)
+#if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
 TEST_F(utX3DImportExport, importX3DVHelloWorld) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/X3DV/HelloWorld.x3dv", aiProcess_ValidateDataStructure);
@@ -151,6 +152,7 @@ TEST_F(utX3DImportExport, importWRLWuson) {
     ASSERT_NE(nullptr, scene);
     ASSERT_EQ(1u, scene->mNumMeshes);
 }
+#endif
 
 // -----------------------------------------------------------------------------
 // Unit / axis contract tests

@@ -211,6 +211,7 @@ bool findGlobalTransformForMesh(const aiNode *node, unsigned int meshIndex,
 }
 #endif
 
+#ifdef ASSIMP_USE_LIB3MF
 void addManifoldTopologyForMesh(aiScene *scene, unsigned int meshIndex) {
     const aiMesh *mesh = scene->mMeshes[meshIndex];
     Assimp::ManifoldMeshTopology topology;
@@ -236,6 +237,7 @@ std::vector<uint8_t> readBytes(const char *path) {
             std::istreambuf_iterator<char>(stream),
             std::istreambuf_iterator<char>());
 }
+#endif
 
 } // namespace
 
@@ -340,6 +342,7 @@ TEST_F(utD3MFImporterExporter, export3MFWithMaterials) {
     std::remove("ut_3mf_mat_test.3mf");
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFPreservesExtMeshManifoldAsOneClosedObject) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(
@@ -361,7 +364,6 @@ TEST_F(utD3MFImporterExporter, export3MFPreservesExtMeshManifoldAsOneClosedObjec
     ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, "3mf", outPath))
             << exporter.GetErrorString();
 
-#ifdef ASSIMP_USE_LIB3MF
     Lib3MF_Model model = nullptr;
     Lib3MF_Reader reader = nullptr;
     Lib3MF_MeshObjectIterator iterator = nullptr;
@@ -443,8 +445,6 @@ TEST_F(utD3MFImporterExporter, export3MFPreservesExtMeshManifoldAsOneClosedObjec
     lib3mf_release(iterator);
     lib3mf_release(reader);
     lib3mf_release(model);
-#endif
-
     Assimp::Importer reimporter;
     const aiScene *roundtrip = reimporter.ReadFile(outPath, 0);
     ASSERT_NE(nullptr, roundtrip) << reimporter.GetErrorString();
@@ -456,6 +456,7 @@ TEST_F(utD3MFImporterExporter, export3MFPreservesExtMeshManifoldAsOneClosedObjec
 
     std::remove(outPath);
 }
+#endif
 
 TEST_F(utD3MFImporterExporter, importExtMeshManifoldRejectsInvalidContracts) {
     struct InvalidCase {
@@ -573,6 +574,7 @@ TEST_F(utD3MFImporterExporter, export3MFRejectsTopologyChangingPostProcessForMan
     std::remove("ut_3mf_unsafe_postprocess.3mf");
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFExactPathSupportsCanonicalRenderIndices) {
     std::unique_ptr<aiScene> scene(makeBoxScene(aiVector3D(1.0f)));
     addManifoldTopologyForMesh(scene.get(), 0);
@@ -794,6 +796,7 @@ TEST_F(utD3MFImporterExporter, export3MFExactPathIsByteDeterministic) {
     std::remove(firstPath);
     std::remove(secondPath);
 }
+#endif
 
 // ===== ROUNDTRIP TESTS =====
 
@@ -875,6 +878,7 @@ TEST_F(utD3MFImporterExporter, roundtrip3MFWithMaterial) {
 
 // ===== R8' — UNIT, AXIS, WELD, PROPERTY-RESOLVER TESTS =====
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFRescalesToMillimeterWhenSceneUnitScaleToMetersIsOne) {
     // 0.5m half-extent → 1m cube, declared as meters via the contract metadata.
     aiScene *scene = makeBoxScene(aiVector3D(0.5f, 0.5f, 0.5f));
@@ -1015,6 +1019,7 @@ TEST_F(utD3MFImporterExporter, export3MFCollapsesPositionDuplicatesFromPerFaceNo
     EXPECT_EQ(12u, roundtrip->mMeshes[0]->mNumFaces);
     std::remove("ut_3mf_weld.3mf");
 }
+#endif
 
 // ===== R10' — IMPORTER METADATA TESTS =====
 
@@ -1073,6 +1078,7 @@ TEST_F(utD3MFImporterExporter, importContractInvalidUpAxisOverrideFailsImport) {
     EXPECT_NE(std::string::npos, std::string(importer.GetErrorString()).find("IMPORT_3MF_UP_AXIS"));
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFReadsUnitScaleToMetersMetadataWhenPropertyAbsent) {
     // 1-unit cube authored as centimeters via the contract; export with no properties.
     aiScene *scene = makeBoxScene(aiVector3D(1.0f, 1.0f, 1.0f));
@@ -1095,6 +1101,7 @@ TEST_F(utD3MFImporterExporter, export3MFReadsUnitScaleToMetersMetadataWhenProper
     EXPECT_NEAR(20.0f, extent.z, 1e-2f);
     std::remove("ut_3mf_unit_meta.3mf");
 }
+#endif
 
 TEST_F(utD3MFImporterExporter, roundtrip3MFPreservesUnitsAndAxisAcrossExportImport) {
     aiScene *scene = makeBoxScene(aiVector3D(5.0f, 5.0f, 5.0f));
@@ -1130,6 +1137,7 @@ TEST_F(utD3MFImporterExporter, roundtrip3MFPreservesUnitsAndAxisAcrossExportImpo
     std::remove("ut_3mf_roundtrip_units.3mf");
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFRespectsExportUnitProperty) {
     aiScene *scene = makeBoxScene(aiVector3D(1.0f, 1.0f, 1.0f));
     scene->mMetaData = new aiMetadata();
@@ -1160,6 +1168,7 @@ TEST_F(utD3MFImporterExporter, export3MFRespectsExportUnitProperty) {
     EXPECT_NEAR(200.0f, extent.z, 1e-2f);
     std::remove("ut_3mf_unit_prop.3mf");
 }
+#endif
 
 TEST_F(utD3MFImporterExporter, export3MFDeclaresMillimeterUnitWhenNoPropertiesPassed) {
     aiScene *scene = makeBoxScene(aiVector3D(1.0f, 1.0f, 1.0f));
@@ -1180,6 +1189,7 @@ TEST_F(utD3MFImporterExporter, export3MFDeclaresMillimeterUnitWhenNoPropertiesPa
 
 // ===== R9' — DEFAULT POST-PROCESSING FLAGS TEST =====
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utD3MFImporterExporter, export3MFViaTopLevelExporterFlattensSceneGraph) {
     // Author a scene where a child node has a translation transform.
     // Without aiProcess_PreTransformVertices in the exporter's enforced PP flags,
@@ -1257,6 +1267,7 @@ TEST_F(utD3MFImporterExporter, glbToThreeMfRoundtripPreservesPhysicalDimensions)
     EXPECT_NEAR(gltfExtent.y * 1000.0f, threeMfExtent.z, 1.0f);
     std::remove("ut_3mf_glb_roundtrip.3mf");
 }
+#endif
 
 
 // ===== R1: lib3mf decimal precision (3MF_EXPORT_DECIMAL_PRECISION) =====
@@ -1270,6 +1281,7 @@ TEST_F(utD3MFImporterExporter, glbToThreeMfRoundtripPreservesPhysicalDimensions)
 //
 // See docs/research/3mf-export-rendering-artifacts.md (R1).
 
+#ifdef ASSIMP_USE_LIB3MF
 namespace {
 
 // Build a closed tetrahedron where the first vertex carries enough
@@ -1388,6 +1400,7 @@ TEST_F(utD3MFImporterExporter, export3MFRejectsOutOfRangePrecision) {
         std::remove(outPath);
     }
 }
+#endif
 
 // ===== R2: 3MF exporter mEnforcePP — multi-mesh structure preserved =====
 //

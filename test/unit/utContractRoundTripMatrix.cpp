@@ -450,9 +450,15 @@ namespace ContractRoundTripTests {
 
 std::vector<MatrixCase> buildMatrix() {
     std::vector<MatrixCase> out;
+    Assimp::Exporter exporter;
     for (const auto &source : sourceFrames()) {
         for (const auto &target : exporterTargets()) {
-            out.push_back({ source, target });
+            for (size_t i = 0; i < exporter.GetExportFormatCount(); ++i) {
+                if (target.exporterId == std::string(exporter.GetExportFormatDescription(i)->id)) {
+                    out.push_back({ source, target });
+                    break;
+                }
+            }
         }
     }
     return out;
