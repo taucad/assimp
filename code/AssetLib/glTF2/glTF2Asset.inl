@@ -810,7 +810,7 @@ inline uint8_t *BufferView::GetPointerAndTailSize(size_t accOffset, size_t& outT
         const size_t length = buffer->EncodedRegion_Current->DecodedData_Length;
         if (offset >= begin && offset - begin < length) {
             const size_t decodedOffset = offset - begin;
-            outTailSize = length - decodedOffset;
+            outTailSize = std::min(length - decodedOffset, byteLength - accOffset);
             return &buffer->EncodedRegion_Current->DecodedData[decodedOffset];
         }
     }
@@ -819,7 +819,8 @@ inline uint8_t *BufferView::GetPointerAndTailSize(size_t accOffset, size_t& outT
         return nullptr;
     }
 
-    outTailSize = buffer->byteLength - offset;
+    // Never hand out bytes past this view, even when the backing buffer continues.
+    outTailSize = std::min(buffer->byteLength - offset, byteLength - accOffset);
     return basePtr + offset;
 }
 
@@ -944,10 +945,15 @@ inline void Accessor::Read(Value &obj, Asset &r) {
         if (bufferView) {
             size_t bufferViewTailSize;
             const uint8_t* bufferViewPointer = bufferView->GetPointerAndTailSize(byteOffset, bufferViewTailSize);
-            if (dataSize > bufferViewTailSize) {
+            // The base view may be interleaved; pack it so sparse->data is always count * elementSize.
+            const size_t srcStride = bufferView->byteStride ? bufferView->byteStride : elementSize;
+            if (count > 0 && (srcStride < elementSize || elementSize > bufferViewTailSize || count - 1 > (bufferViewTailSize - elementSize) / srcStride)) {
                 throw DeadlyImportError("Invalid buffer when reading ", id.c_str(), name.empty() ? "" : " (" + name + ")");
             }
-            sparse->PopulateData(dataSize, bufferViewPointer);
+            sparse->data.resize(dataSize);
+            for (size_t i = 0; i < count; ++i) {
+                std::memcpy(sparse->data.data() + i * elementSize, bufferViewPointer + i * srcStride, elementSize);
+            }
         }
         else {
             sparse->PopulateData(dataSize, nullptr);
@@ -983,8 +989,8 @@ inline uint8_t *Accessor::GetPointer() {
 }
 
 inline size_t Accessor::GetStride() {
-    // Decoded buffer is always packed
-    if (decodedBuffer)
+    // Decoded and sparse buffers are always packed
+    if (decodedBuffer || sparse)
         return GetElementSize();
 
     // Sparse and normal bufferView

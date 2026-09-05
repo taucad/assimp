@@ -359,6 +359,51 @@ TEST(glTF2AccessorExtractData, RejectsLogicalCountAndOffsetOverflow) {
     EXPECT_EQ(nullptr, accessor.GetPointer());
 }
 
+TEST(glTF2BufferView, TailNeverExceedsView) {
+    glTF2::Buffer buffer;
+    buffer.Grow(16);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteOffset = 2;
+    view.byteLength = 8;
+
+    size_t tail = 99;
+    EXPECT_NE(nullptr, view.GetPointerAndTailSize(3, tail));
+    EXPECT_EQ(5u, tail);
+    EXPECT_NE(nullptr, view.GetPointerAndTailSize(8, tail));
+    EXPECT_EQ(0u, tail);
+    EXPECT_EQ(nullptr, view.GetPointerAndTailSize(9, tail));
+}
+
+TEST(glTF2AccessorExtractData, SparseDataIsPackedRegardlessOfBaseStride) {
+    glTF2::Buffer buffer;
+    buffer.Grow(24);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteLength = 24;
+    view.byteStride = 8;
+    std::vector<glTF2::BufferView *> views = { &view };
+
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = 3;
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.bufferView = glTF2::Ref<glTF2::BufferView>(views, 0);
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0 };
+
+    EXPECT_EQ(4u, accessor.GetStride());
+    uint32_t *values = nullptr;
+    ASSERT_NO_THROW(accessor.ExtractData(values));
+    ASSERT_NE(nullptr, values);
+    EXPECT_EQ(1u, values[0]);
+    EXPECT_EQ(2u, values[1]);
+    EXPECT_EQ(3u, values[2]);
+    delete[] values;
+}
+
 class utglTF2ImportExport : public AbstractImportExportBase {
 public:
     virtual bool importerMatTest(const char *file, bool spec, bool gloss, std::array<aiTextureMapMode, 2> exp_modes = { aiTextureMapMode_Wrap, aiTextureMapMode_Wrap }) {
@@ -453,6 +498,30 @@ TEST_F(utglTF2ImportExport, importglTF2FromFileTest) {
 
 TEST_F(utglTF2ImportExport, importBinaryglTF2FromFileTest) {
     EXPECT_TRUE(binaryImporterTest());
+}
+
+TEST_F(utglTF2ImportExport, importSparseAccessorOverInterleavedView) {
+    // Three VEC3 positions at byteStride 16 (12 bytes + 4 pad), then one uint16 sparse index
+    // (padded to 4) and one VEC3 replacement value: 64 bytes total.
+    const std::string gltf = R"({"asset":{"version":"2.0"},
+"buffers":[{"byteLength":64,"uri":"data:application/octet-stream;base64,AACAPwAAAEAAAEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBAAACgQAAAwEAAAAAAAQAAAAAA4EAAAABBAAAQQQ=="}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48,"byteStride":16},
+{"buffer":0,"byteOffset":48,"byteLength":2},
+{"buffer":0,"byteOffset":52,"byteLength":12}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
+"sparse":{"count":1,"indices":{"bufferView":1,"componentType":5123},"values":{"bufferView":2}}}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})";
+
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFileFromMemory(gltf.data(), gltf.size(), 0, "gltf");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    ASSERT_EQ(3u, mesh->mNumVertices);
+    EXPECT_EQ(aiVector3D(1, 2, 3), mesh->mVertices[0]);
+    EXPECT_EQ(aiVector3D(7, 8, 9), mesh->mVertices[1]);
+    EXPECT_EQ(aiVector3D(4, 5, 6), mesh->mVertices[2]);
 }
 
 TEST_F(utglTF2ImportExport, importGLBPopulatesUnitScaleToMetersAndUpAxisInSceneMetadata) {
