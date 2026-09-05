@@ -55,6 +55,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -197,6 +199,52 @@ TEST_F(utSTLImporterExporter, test_with_two_solids) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/STL/triangle_with_two_solids.stl", aiProcess_ValidateDataStructure);
     EXPECT_NE(nullptr, scene);
+}
+
+TEST_F(utSTLImporterExporter, importBinarySTLWithMisalignedSecondFacet) {
+    std::array<unsigned char, 84 + 2 * 50> data{};
+
+    const uint32_t faceCount = 2;
+    std::memcpy(data.data() + 80, &faceCount, sizeof(faceCount));
+
+    const std::array<std::array<float, 12>, 2> facets = { {
+        { 0.0f, 0.0f, 1.0f, 1.25f, 2.5f, 3.75f, -4.0f, -5.5f, -6.75f, 7.0f, 8.25f, 9.5f },
+        { 0.0f, 1.0f, 0.0f, -1.0f, -2.25f, -3.5f, 4.75f, 5.0f, 6.25f, -7.5f, -8.75f, -9.0f }
+    } };
+    const std::array<uint16_t, 2> attributes = { 0xfc00u, 0x83e0u }; // red, green
+    for (size_t i = 0; i < facets.size(); ++i) {
+        const size_t offset = 84 + i * 50;
+        std::memcpy(data.data() + offset, facets[i].data(), 48);
+        std::memcpy(data.data() + offset + 48, &attributes[i], sizeof(attributes[i]));
+    }
+
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFileFromMemory(data.data(), data.size(), 0, "stl");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    ASSERT_EQ(2u, mesh->mNumFaces);
+    ASSERT_EQ(6u, mesh->mNumVertices);
+    ASSERT_TRUE(mesh->HasNormals());
+    ASSERT_TRUE(mesh->HasVertexColors(0));
+
+    for (size_t face = 0; face < facets.size(); ++face) {
+        for (size_t vertex = 0; vertex < 3; ++vertex) {
+            const size_t output = face * 3 + vertex;
+            const size_t input = 3 + vertex * 3;
+            EXPECT_EQ(facets[face][input], mesh->mVertices[output].x);
+            EXPECT_EQ(facets[face][input + 1], mesh->mVertices[output].y);
+            EXPECT_EQ(facets[face][input + 2], mesh->mVertices[output].z);
+            EXPECT_EQ(facets[face][0], mesh->mNormals[output].x);
+            EXPECT_EQ(facets[face][1], mesh->mNormals[output].y);
+            EXPECT_EQ(facets[face][2], mesh->mNormals[output].z);
+        }
+    }
+
+    for (size_t vertex = 0; vertex < 3; ++vertex) {
+        EXPECT_EQ(aiColor4D(1, 0, 0, 1), mesh->mColors[0][vertex]);
+        EXPECT_EQ(aiColor4D(0, 1, 0, 1), mesh->mColors[0][vertex + 3]);
+    }
 }
 
 // -----------------------------------------------------------------------------
