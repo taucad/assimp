@@ -203,9 +203,19 @@ TEST_F(utSTLImporterExporter, test_with_two_solids) {
 
 TEST_F(utSTLImporterExporter, importBinarySTLWithMisalignedSecondFacet) {
     std::array<unsigned char, 84 + 2 * 50> data{};
+    // Binary STL is little-endian on disk; serialize explicitly so the fixture is valid on any host.
+    const auto putLE = [&data](size_t offset, uint64_t value, size_t bytes) {
+        for (size_t b = 0; b < bytes; ++b) {
+            data[offset + b] = static_cast<unsigned char>(value >> (8 * b));
+        }
+    };
+    const auto putFloatLE = [&putLE](size_t offset, float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        putLE(offset, bits, sizeof(bits));
+    };
 
-    const uint32_t faceCount = 2;
-    std::memcpy(data.data() + 80, &faceCount, sizeof(faceCount));
+    putLE(80, 2, sizeof(uint32_t)); // face count
 
     const std::array<std::array<float, 12>, 2> facets = { {
         { 0.0f, 0.0f, 1.0f, 1.25f, 2.5f, 3.75f, -4.0f, -5.5f, -6.75f, 7.0f, 8.25f, 9.5f },
@@ -214,8 +224,10 @@ TEST_F(utSTLImporterExporter, importBinarySTLWithMisalignedSecondFacet) {
     const std::array<uint16_t, 2> attributes = { 0xfc00u, 0x83e0u }; // red, green
     for (size_t i = 0; i < facets.size(); ++i) {
         const size_t offset = 84 + i * 50;
-        std::memcpy(data.data() + offset, facets[i].data(), 48);
-        std::memcpy(data.data() + offset + 48, &attributes[i], sizeof(attributes[i]));
+        for (size_t f = 0; f < facets[i].size(); ++f) {
+            putFloatLE(offset + f * sizeof(float), facets[i][f]);
+        }
+        putLE(offset + 48, attributes[i], sizeof(uint16_t));
     }
 
     Assimp::Importer importer;
