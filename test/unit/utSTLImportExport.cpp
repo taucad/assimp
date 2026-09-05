@@ -55,6 +55,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -152,6 +154,28 @@ TEST_F(utSTLImporterExporter, importSTLFromFileTest) {
     EXPECT_TRUE(importerTest());
 }
 
+TEST_F(utSTLImporterExporter, importBinarySTLFromFileTest) {
+    // Regression test for issue #5509: binary STL was rejected on big-endian
+    // hosts because the little-endian on-disk facet count and geometry were
+    // read without byte-swapping. Checking concrete counts and coordinates
+    // covers both the facet count and the per-float geometry, so a byte-swap
+    // regression cannot pass silently.
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(
+            ASSIMP_TEST_MODELS_DIR "/STL/Spider_binary.stl", aiProcess_ValidateDataStructure);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    EXPECT_EQ(1368u, mesh->mNumFaces);
+    EXPECT_EQ(4104u, mesh->mNumVertices);
+    EXPECT_NEAR(0.90712798f, mesh->mVertices[0].x, 1e-4f);
+    EXPECT_NEAR(0.64616501f, mesh->mVertices[0].y, 1e-4f);
+    EXPECT_NEAR(0.79519337f, mesh->mVertices[0].z, 1e-4f);
+    EXPECT_NEAR(0.46828195f, mesh->mNormals[0].x, 1e-4f);
+    EXPECT_NEAR(-0.86349779f, mesh->mNormals[0].y, 1e-4f);
+    EXPECT_NEAR(-0.18730624f, mesh->mNormals[0].z, 1e-4f);
+}
+
 TEST_F(utSTLImporterExporter, test_multiple) {
     // import same file twice, each with its own importer
     // must work both times and not crash
@@ -175,6 +199,64 @@ TEST_F(utSTLImporterExporter, test_with_two_solids) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/STL/triangle_with_two_solids.stl", aiProcess_ValidateDataStructure);
     EXPECT_NE(nullptr, scene);
+}
+
+TEST_F(utSTLImporterExporter, importBinarySTLWithMisalignedSecondFacet) {
+    std::array<unsigned char, 84 + 2 * 50> data{};
+    // Binary STL is little-endian on disk; serialize explicitly so the fixture is valid on any host.
+    const auto putLE = [&data](size_t offset, uint64_t value, size_t bytes) {
+        for (size_t b = 0; b < bytes; ++b) {
+            data[offset + b] = static_cast<unsigned char>(value >> (8 * b));
+        }
+    };
+    const auto putFloatLE = [&putLE](size_t offset, float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        putLE(offset, bits, sizeof(bits));
+    };
+
+    putLE(80, 2, sizeof(uint32_t)); // face count
+
+    const std::array<std::array<float, 12>, 2> facets = { {
+        { 0.0f, 0.0f, 1.0f, 1.25f, 2.5f, 3.75f, -4.0f, -5.5f, -6.75f, 7.0f, 8.25f, 9.5f },
+        { 0.0f, 1.0f, 0.0f, -1.0f, -2.25f, -3.5f, 4.75f, 5.0f, 6.25f, -7.5f, -8.75f, -9.0f }
+    } };
+    const std::array<uint16_t, 2> attributes = { 0xfc00u, 0x83e0u }; // red, green
+    for (size_t i = 0; i < facets.size(); ++i) {
+        const size_t offset = 84 + i * 50;
+        for (size_t f = 0; f < facets[i].size(); ++f) {
+            putFloatLE(offset + f * sizeof(float), facets[i][f]);
+        }
+        putLE(offset + 48, attributes[i], sizeof(uint16_t));
+    }
+
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFileFromMemory(data.data(), data.size(), 0, "stl");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    ASSERT_EQ(2u, mesh->mNumFaces);
+    ASSERT_EQ(6u, mesh->mNumVertices);
+    ASSERT_TRUE(mesh->HasNormals());
+    ASSERT_TRUE(mesh->HasVertexColors(0));
+
+    for (size_t face = 0; face < facets.size(); ++face) {
+        for (size_t vertex = 0; vertex < 3; ++vertex) {
+            const size_t output = face * 3 + vertex;
+            const size_t input = 3 + vertex * 3;
+            EXPECT_EQ(facets[face][input], mesh->mVertices[output].x);
+            EXPECT_EQ(facets[face][input + 1], mesh->mVertices[output].y);
+            EXPECT_EQ(facets[face][input + 2], mesh->mVertices[output].z);
+            EXPECT_EQ(facets[face][0], mesh->mNormals[output].x);
+            EXPECT_EQ(facets[face][1], mesh->mNormals[output].y);
+            EXPECT_EQ(facets[face][2], mesh->mNormals[output].z);
+        }
+    }
+
+    for (size_t vertex = 0; vertex < 3; ++vertex) {
+        EXPECT_EQ(aiColor4D(1, 0, 0, 1), mesh->mColors[0][vertex]);
+        EXPECT_EQ(aiColor4D(0, 1, 0, 1), mesh->mColors[0][vertex + 3]);
+    }
 }
 
 // -----------------------------------------------------------------------------

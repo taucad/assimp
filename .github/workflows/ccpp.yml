@@ -1,10 +1,11 @@
 name: C/C++ CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ master ]
+    branches: [ master, codex/ext-mesh-manifold-3mf, codex/progress-cancellation ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, codex/ext-mesh-manifold-3mf ]
 
 permissions:
   contents: write # to fetch code (actions/checkout),and release

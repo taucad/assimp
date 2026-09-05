@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "MD5Parser.h"
 #include <assimp/BaseImporter.h>
 #include <assimp/types.h>
+#include <memory>
 
 struct aiNode;
 struct aiNodeAnim;
@@ -152,7 +153,7 @@ protected:
     std::string mFile;
 
     /** Buffer to hold the loaded file */
-    char *mBuffer;
+    std::unique_ptr<char[]> mBuffer;
 
     /** Size of the file */
     unsigned int mFileSize;

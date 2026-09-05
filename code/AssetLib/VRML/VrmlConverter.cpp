@@ -87,7 +87,7 @@ static VrmlTranslator::Scanner createScanner(const std::string &fileContent) {
 }
 #endif // #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)
 
-std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile, IOSystem *pIOHandler) {
+std::stringstream ConvertVrmlFileToX3dXmlFile(const std::string &pFile, [[maybe_unused]] IOSystem *pIOHandler) {
     std::stringstream ss;
     if (isFileWrlVrml97Ext(pFile) || isFileX3dvClassicVrmlExt(pFile)) {
 #if !defined(ASSIMP_BUILD_NO_VRML_IMPORTER)

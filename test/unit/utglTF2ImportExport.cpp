@@ -41,6 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AbstractImportExportBase.h"
 #include "UnitTestPCH.h"
 #include "Tools/TestTools.h"
+#include "AssetLib/glTF2/glTF2Asset.h"
 #include <assimp/commonMetaData.h>
 #include <assimp/postprocess.h>
 #include <assimp/config.h>
@@ -56,7 +57,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <queue>
@@ -178,7 +182,227 @@ aiVector3D meshExtentGltf(const aiMesh *mesh) {
     return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
 }
 
+void expectEmbeddedTextureMatchesFile(const aiScene *scene, const aiString &path,
+        const char *filename, const char *sourcePath) {
+    ASSERT_STREQ("*0", path.C_Str());
+    ASSERT_TRUE(scene->HasTextures());
+    const aiTexture *texture = scene->GetEmbeddedTexture(path.C_Str());
+    ASSERT_NE(nullptr, texture);
+    ASSERT_EQ(scene->mTextures[0], texture);
+    EXPECT_STREQ(filename, texture->mFilename.C_Str());
+    EXPECT_EQ(0u, texture->mHeight);
+    ASSERT_NE(nullptr, texture->pcData);
+
+    std::ifstream source(sourcePath, std::ios::binary);
+    ASSERT_TRUE(source.is_open());
+    const std::vector<char> sourceBytes{ std::istreambuf_iterator<char>(source), std::istreambuf_iterator<char>() };
+    ASSERT_FALSE(sourceBytes.empty());
+    ASSERT_EQ(sourceBytes.size(), static_cast<size_t>(texture->mWidth));
+    EXPECT_EQ(0, std::memcmp(sourceBytes.data(), texture->pcData, sourceBytes.size()));
+}
+
 } // namespace
+
+TEST(glTF2AccessorIndexer, ReadsOrdinaryIndicesExactly) {
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_BYTE;
+    accessor.count = 2;
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 7, 42 };
+
+    glTF2::Accessor::Indexer indexer = accessor.GetIndexer();
+    EXPECT_EQ(7u, indexer.GetUInt(0));
+    EXPECT_EQ(42u, indexer.GetUInt(1));
+}
+
+TEST(glTF2AccessorIndexer, RejectsIndexAboveIntRange) {
+    if (std::numeric_limits<size_t>::max() <= std::numeric_limits<unsigned int>::max()) {
+        GTEST_SKIP() << "size_t has no values above the unsigned int range";
+    }
+
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_BYTE;
+    accessor.count = 1;
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 7 };
+    size_t index = std::numeric_limits<unsigned int>::max();
+    ++index;
+
+    glTF2::Accessor::Indexer indexer = accessor.GetIndexer();
+    EXPECT_THROW(indexer.GetUInt(index), DeadlyImportError);
+}
+
+TEST(glTF2AccessorIndexer, RejectsOverflowingByteOffset) {
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = std::numeric_limits<size_t>::max();
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 1, 0, 0, 0 };
+    const size_t index = std::numeric_limits<size_t>::max() / accessor.GetStride() + 1;
+
+    glTF2::Accessor::Indexer indexer = accessor.GetIndexer();
+    EXPECT_THROW(indexer.GetUInt(index), DeadlyImportError);
+}
+
+TEST(glTF2AccessorIndexer, RejectsElementPastLogicalBufferEnd) {
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = 2;
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.decodedBuffer.reset(new glTF2::Buffer);
+    accessor.decodedBuffer->Grow(8);
+    accessor.decodedBuffer->byteLength = 5;
+
+    glTF2::Accessor::Indexer indexer = accessor.GetIndexer();
+    EXPECT_THROW(indexer.GetUInt(1), DeadlyImportError);
+}
+
+TEST(glTF2AccessorIndexer, RejectsElementPastAccessorViewEnd) {
+    glTF2::Buffer buffer;
+    buffer.Grow(12);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteOffset = 0;
+    view.byteLength = 8;
+    view.byteStride = 0;
+    std::vector<glTF2::BufferView *> views = { &view };
+
+    glTF2::Accessor accessor;
+    accessor.bufferView = glTF2::Ref<glTF2::BufferView>(views, 0);
+    accessor.byteOffset = 4;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = 2;
+    accessor.type = glTF2::AttribType::SCALAR;
+
+    glTF2::Accessor::Indexer indexer = accessor.GetIndexer();
+    EXPECT_THROW(indexer.GetUInt(1), DeadlyImportError);
+}
+
+TEST(glTF2AccessorExtractData, UsesElementSizeForInterleavedBounds) {
+    glTF2::Buffer buffer;
+    buffer.Grow(20);
+    const std::array<uint32_t, 3> expected = { 11, 22, 33 };
+    for (size_t i = 0; i < expected.size(); ++i) {
+        std::memcpy(buffer.GetPointer() + i * 8, &expected[i], sizeof(expected[i]));
+    }
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteOffset = 0;
+    view.byteLength = 20;
+    view.byteStride = 8;
+    std::vector<glTF2::BufferView *> views = { &view };
+
+    glTF2::Accessor accessor;
+    accessor.bufferView = glTF2::Ref<glTF2::BufferView>(views, 0);
+    accessor.byteOffset = 0;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = expected.size();
+    accessor.type = glTF2::AttribType::SCALAR;
+
+    uint32_t *values = nullptr;
+    ASSERT_EQ(expected.size(), accessor.ExtractData(values));
+    EXPECT_EQ(expected, (std::array<uint32_t, 3>{ values[0], values[1], values[2] }));
+    delete[] values;
+
+    const std::vector<unsigned int> remapping = { 2 };
+    values = nullptr;
+    ASSERT_EQ(1u, accessor.ExtractData(values, &remapping));
+    EXPECT_EQ(expected[2], values[0]);
+    delete[] values;
+
+    buffer.Grow(16);
+    view.byteLength = 36;
+    const std::vector<unsigned int> outOfRangeRemapping = { 3 };
+    values = nullptr;
+    EXPECT_THROW(accessor.ExtractData(values, &outOfRangeRemapping), DeadlyImportError);
+    EXPECT_EQ(nullptr, values);
+
+    view.byteLength = 19;
+    values = nullptr;
+    EXPECT_THROW(accessor.ExtractData(values), DeadlyImportError);
+    delete[] values;
+    values = nullptr;
+    EXPECT_THROW(accessor.ExtractData(values, &remapping), DeadlyImportError);
+    delete[] values;
+}
+
+TEST(glTF2AccessorExtractData, RejectsLogicalCountAndOffsetOverflow) {
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = std::numeric_limits<size_t>::max();
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 1, 0, 0, 0 };
+
+    uint32_t *values = nullptr;
+    EXPECT_THROW(accessor.ExtractData(values), DeadlyImportError);
+    EXPECT_EQ(nullptr, values);
+
+    glTF2::Buffer buffer;
+    buffer.Grow(8);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteOffset = 1;
+    view.byteLength = 7;
+    std::vector<glTF2::BufferView *> views = { &view };
+    accessor.sparse.reset();
+    accessor.bufferView = glTF2::Ref<glTF2::BufferView>(views, 0);
+    accessor.byteOffset = std::numeric_limits<size_t>::max();
+    EXPECT_EQ(nullptr, accessor.GetPointer());
+}
+
+TEST(glTF2BufferView, TailNeverExceedsView) {
+    glTF2::Buffer buffer;
+    buffer.Grow(16);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteOffset = 2;
+    view.byteLength = 8;
+
+    size_t tail = 99;
+    EXPECT_NE(nullptr, view.GetPointerAndTailSize(3, tail));
+    EXPECT_EQ(5u, tail);
+    EXPECT_NE(nullptr, view.GetPointerAndTailSize(8, tail));
+    EXPECT_EQ(0u, tail);
+    EXPECT_EQ(nullptr, view.GetPointerAndTailSize(9, tail));
+}
+
+TEST(glTF2AccessorExtractData, SparseDataIsPackedRegardlessOfBaseStride) {
+    glTF2::Buffer buffer;
+    buffer.Grow(24);
+    std::vector<glTF2::Buffer *> buffers = { &buffer };
+    glTF2::BufferView view;
+    view.buffer = glTF2::Ref<glTF2::Buffer>(buffers, 0);
+    view.byteLength = 24;
+    view.byteStride = 8;
+    std::vector<glTF2::BufferView *> views = { &view };
+
+    glTF2::Accessor accessor;
+    accessor.componentType = glTF2::ComponentType_UNSIGNED_INT;
+    accessor.count = 3;
+    accessor.type = glTF2::AttribType::SCALAR;
+    accessor.bufferView = glTF2::Ref<glTF2::BufferView>(views, 0);
+    accessor.sparse.reset(new glTF2::Accessor::Sparse);
+    accessor.sparse->data = { 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0 };
+
+    EXPECT_EQ(4u, accessor.GetStride());
+    uint32_t *values = nullptr;
+    ASSERT_NO_THROW(accessor.ExtractData(values));
+    ASSERT_NE(nullptr, values);
+    EXPECT_EQ(1u, values[0]);
+    EXPECT_EQ(2u, values[1]);
+    EXPECT_EQ(3u, values[2]);
+    delete[] values;
+}
 
 class utglTF2ImportExport : public AbstractImportExportBase {
 public:
@@ -206,13 +430,14 @@ public:
         std::array<aiTextureMapMode,2> modes;
         EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(aiTextureType_DIFFUSE, 0, &path, nullptr, nullptr,
                                             nullptr, nullptr, modes.data()));
-        EXPECT_STREQ(path.C_Str(), "CesiumLogoFlat.png");
+        EXPECT_STREQ(path.C_Str(), "*0");
         EXPECT_EQ(exp_modes, modes);
 
         // Also as Base Color
         EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(aiTextureType_BASE_COLOR, 0, &path, nullptr, nullptr,
                                             nullptr, nullptr, modes.data()));
-        EXPECT_STREQ(path.C_Str(), "CesiumLogoFlat.png");
+        expectEmbeddedTextureMatchesFile(scene, path, "CesiumLogoFlat.png",
+                ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTextured-glTF/CesiumLogoFlat.png");
         EXPECT_EQ(exp_modes, modes);
 
         // Should have a MetallicFactor (default is 1.0)
@@ -273,6 +498,30 @@ TEST_F(utglTF2ImportExport, importglTF2FromFileTest) {
 
 TEST_F(utglTF2ImportExport, importBinaryglTF2FromFileTest) {
     EXPECT_TRUE(binaryImporterTest());
+}
+
+TEST_F(utglTF2ImportExport, importSparseAccessorOverInterleavedView) {
+    // Three VEC3 positions at byteStride 16 (12 bytes + 4 pad), then one uint16 sparse index
+    // (padded to 4) and one VEC3 replacement value: 64 bytes total.
+    const std::string gltf = R"({"asset":{"version":"2.0"},
+"buffers":[{"byteLength":64,"uri":"data:application/octet-stream;base64,AACAPwAAAEAAAEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBAAACgQAAAwEAAAAAAAQAAAAAA4EAAAABBAAAQQQ=="}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48,"byteStride":16},
+{"buffer":0,"byteOffset":48,"byteLength":2},
+{"buffer":0,"byteOffset":52,"byteLength":12}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
+"sparse":{"count":1,"indices":{"bufferView":1,"componentType":5123},"values":{"bufferView":2}}}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})";
+
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFileFromMemory(gltf.data(), gltf.size(), 0, "gltf");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    ASSERT_EQ(3u, mesh->mNumVertices);
+    EXPECT_EQ(aiVector3D(1, 2, 3), mesh->mVertices[0]);
+    EXPECT_EQ(aiVector3D(7, 8, 9), mesh->mVertices[1]);
+    EXPECT_EQ(aiVector3D(4, 5, 6), mesh->mVertices[2]);
 }
 
 TEST_F(utglTF2ImportExport, importGLBPopulatesUnitScaleToMetersAndUpAxisInSceneMetadata) {
@@ -518,6 +767,7 @@ TEST_F(utglTF2ImportExport, exportGLBSkipsTransformWhenOnlyLegacyUpAxisIsPresent
     std::remove("ut_glb_legacy_upaxis.glb");
 }
 
+#ifdef ASSIMP_USE_LIB3MF
 TEST_F(utglTF2ImportExport, roundtripGLTF2To3MFToGLTF2PreservesPhysicalSize) {
     // Full integration: GLB → 3MF → GLB. Each exporter normalises to its target spec
     // coords using the contract metadata written by the partner importer. The final
@@ -553,6 +803,7 @@ TEST_F(utglTF2ImportExport, roundtripGLTF2To3MFToGLTF2PreservesPhysicalSize) {
     std::remove("ut_glb_roundtrip_intermediate.3mf");
     std::remove("ut_glb_roundtrip_final.glb");
 }
+#endif
 
 #endif // ASSIMP_BUILD_NO_EXPORT
 
@@ -588,7 +839,8 @@ void VerifyClearCoatScene(const aiScene *scene) {
             static const std::array<aiTextureMapMode, 2> exp_modes = { aiTextureMapMode_Wrap, aiTextureMapMode_Wrap };
             EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(AI_MATKEY_CLEARCOAT_TEXTURE, &path, nullptr, nullptr,
                                                 nullptr, nullptr, modes.data()));
-            EXPECT_STREQ(path.C_Str(), "PartialCoating.png");
+            expectEmbeddedTextureMatchesFile(scene, path, "PartialCoating.png",
+                    ASSIMP_TEST_MODELS_DIR "/glTF2/ClearCoat-glTF/PartialCoating.png");
             EXPECT_EQ(exp_modes, modes);
         }
     }
@@ -1170,12 +1422,13 @@ TEST_F(utglTF2ImportExport, texcoords) {
     unsigned int uvIndex = 255;
     aiTextureMapMode modes[2];
     EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(AI_MATKEY_BASE_COLOR_TEXTURE, &path, nullptr, &uvIndex, nullptr, nullptr, modes));
-    EXPECT_STREQ(path.C_Str(), "texture.png");
+    EXPECT_STREQ(path.C_Str(), "*0");
     EXPECT_EQ(uvIndex, 0u);
 
     uvIndex = 255;
     EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE, &path, nullptr, &uvIndex, nullptr, nullptr, modes));
-    EXPECT_STREQ(path.C_Str(), "texture.png");
+    expectEmbeddedTextureMatchesFile(scene, path, "texture.png",
+            ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTexcoords-glTF/texture.png");
     EXPECT_EQ(uvIndex, 1u);
 }
 
@@ -1201,12 +1454,13 @@ TEST_F(utglTF2ImportExport, texcoords_export) {
     unsigned int uvIndex = 255;
     aiTextureMapMode modes[2];
     EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(AI_MATKEY_BASE_COLOR_TEXTURE, &path, nullptr, &uvIndex, nullptr, nullptr, modes));
-    EXPECT_STREQ(path.C_Str(), "texture.png");
+    EXPECT_STREQ(path.C_Str(), "*0");
     EXPECT_EQ(uvIndex, 0u);
 
     uvIndex = 255;
     EXPECT_EQ(aiReturn_SUCCESS, material->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE, &path, nullptr, &uvIndex, nullptr, nullptr, modes));
-    EXPECT_STREQ(path.C_Str(), "texture.png");
+    expectEmbeddedTextureMatchesFile(scene, path, "texture.png",
+            ASSIMP_TEST_MODELS_DIR "/glTF2/BoxTexcoords-glTF/texture.png");
     EXPECT_EQ(uvIndex, 1u);
 }
 

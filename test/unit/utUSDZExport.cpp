@@ -54,6 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <fstream>
 #include <array>
+#include <limits>
 #include <sys/stat.h>
 #include <cerrno>
 #include <regex>
@@ -70,6 +71,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace Assimp;
 
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
+
+#include "../../code/AssetLib/USD/usdz-writer.hh"
 
 // Helper function to create directories recursively
 bool createDirectoryRecursive(const std::string& path) {
@@ -2932,6 +2935,187 @@ TEST_F(utUSDZExport, exportUSDAIsIdentityWhenContractMetadataAbsent) {
     EXPECT_NEAR(6.0f, extent.y, 1e-4f);
     EXPECT_NEAR(6.0f, extent.z, 1e-4f);
     std::remove("usd/contract/no_meta.usda");
+}
+
+namespace {
+
+uint16_t readZipLE16(const std::vector<uint8_t> &data, size_t offset) {
+    return static_cast<uint16_t>(data[offset]) |
+            (static_cast<uint16_t>(data[offset + 1]) << 8);
+}
+
+uint32_t readZipLE32(const std::vector<uint8_t> &data, size_t offset) {
+    return static_cast<uint32_t>(data[offset]) |
+            (static_cast<uint32_t>(data[offset + 1]) << 8) |
+            (static_cast<uint32_t>(data[offset + 2]) << 16) |
+            (static_cast<uint32_t>(data[offset + 3]) << 24);
+}
+
+struct StoredZipMember {
+    std::string name;
+    size_t dataOffset;
+    std::vector<uint8_t> data;
+};
+
+bool parseStoredZipMembers(const std::vector<uint8_t> &archive,
+        std::vector<StoredZipMember> &members, std::string &error) {
+    members.clear();
+    size_t offset = 0;
+    while (true) {
+        if (offset > archive.size() || archive.size() - offset < 4) {
+            error = "ZIP ended before the central directory";
+            return false;
+        }
+
+        const uint32_t signature = readZipLE32(archive, offset);
+        if (signature == 0x02014b50) {
+            return !members.empty();
+        }
+        if (signature != 0x04034b50 || archive.size() - offset < 30) {
+            error = "Invalid or truncated ZIP local header";
+            return false;
+        }
+        if (readZipLE16(archive, offset + 6) != 0 || readZipLE16(archive, offset + 8) != 0) {
+            error = "USDZ member is not stored without flags";
+            return false;
+        }
+
+        const size_t dataSize = readZipLE32(archive, offset + 18);
+        const size_t nameSize = readZipLE16(archive, offset + 26);
+        const size_t extraSize = readZipLE16(archive, offset + 28);
+        const size_t remainingHeader = archive.size() - offset - 30;
+        if (nameSize > remainingHeader || extraSize > remainingHeader - nameSize) {
+            error = "ZIP member name or extra field is truncated";
+            return false;
+        }
+
+        const size_t nameOffset = offset + 30;
+        const size_t dataOffset = nameOffset + nameSize + extraSize;
+        if (dataSize > archive.size() - dataOffset) {
+            error = "ZIP member data is truncated";
+            return false;
+        }
+
+        members.push_back({
+                std::string(archive.begin() + nameOffset, archive.begin() + nameOffset + nameSize),
+                dataOffset,
+                std::vector<uint8_t>(archive.begin() + dataOffset, archive.begin() + dataOffset + dataSize)
+        });
+        offset = dataOffset + dataSize;
+    }
+}
+
+} // namespace
+
+TEST(utUSDZWriter, diskArchiveMatchesMemoryArchive) {
+    const std::string usdContent = "#usda 1.0\ndef Xform \"Root\" {}\n";
+    const std::map<std::string, std::vector<uint8_t>> textures = {
+            { "textures/albedo.bin", { 0x00, 0x7f, 0x80, 0xff } },
+            { "textures/empty.bin", {} },
+            { "textures/normal.bin", { 0x10, 0x20, 0x30 } }
+    };
+    std::vector<uint8_t> memoryArchive;
+    std::string memoryWarn, memoryErr;
+    ASSERT_TRUE(tinyusdz::usdz::SaveAsUSDZToMemory(
+            usdContent, textures, memoryArchive, &memoryWarn, &memoryErr)) << memoryErr;
+    EXPECT_TRUE(memoryErr.empty());
+    EXPECT_EQ("Texture data is empty: textures/empty.bin\n", memoryWarn);
+
+    const std::filesystem::path outputPath =
+            std::filesystem::path(::testing::TempDir()) / "assimp-usdz-disk-writer.usdz";
+    std::error_code removeError;
+    std::filesystem::remove(outputPath, removeError);
+
+    std::string diskWarn, diskErr;
+    ASSERT_TRUE(tinyusdz::usdz::SaveAsUSDZWithTextures(
+            outputPath.string(), usdContent, textures, &diskWarn, &diskErr)) << diskErr;
+    EXPECT_TRUE(diskErr.empty());
+    EXPECT_EQ(memoryWarn, diskWarn);
+
+    std::ifstream input(outputPath, std::ios::binary);
+    ASSERT_TRUE(input.is_open());
+    const std::vector<uint8_t> diskArchive{
+            std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+    EXPECT_EQ(memoryArchive, diskArchive);
+
+    std::vector<StoredZipMember> members;
+    std::string parseError;
+    ASSERT_TRUE(parseStoredZipMembers(diskArchive, members, parseError)) << parseError;
+    ASSERT_EQ(3u, members.size());
+    EXPECT_EQ("model.usda", members[0].name);
+    EXPECT_EQ(std::vector<uint8_t>(usdContent.begin(), usdContent.end()), members[0].data);
+    EXPECT_EQ("textures/albedo.bin", members[1].name);
+    EXPECT_EQ(textures.at("textures/albedo.bin"), members[1].data);
+    EXPECT_EQ("textures/normal.bin", members[2].name);
+    EXPECT_EQ(textures.at("textures/normal.bin"), members[2].data);
+    for (const StoredZipMember &member : members) {
+        EXPECT_EQ(0u, member.dataOffset % 64) << member.name;
+    }
+
+    input.close();
+    ASSERT_FALSE(input.fail());
+    ASSERT_TRUE(std::filesystem::remove(outputPath, removeError)) << removeError.message();
+}
+
+TEST(utUSDZWriter, diskWriteFailureIsReported) {
+    std::string warn, err;
+    EXPECT_FALSE(tinyusdz::usdz::SaveAsUSDZWithTextures(
+            ::testing::TempDir(), "#usda 1.0\n", {}, &warn, &err));
+    EXPECT_TRUE(warn.empty());
+    EXPECT_FALSE(err.empty());
+}
+
+TEST(utUSDZWriter, emptyInputDoesNotCreateDiskArchive) {
+    const std::filesystem::path outputPath =
+            std::filesystem::path(::testing::TempDir()) / "assimp-usdz-empty-input.usdz";
+    std::error_code removeError;
+    std::filesystem::remove(outputPath, removeError);
+
+    std::string warn, err;
+    EXPECT_FALSE(tinyusdz::usdz::SaveAsUSDZWithTextures(
+            outputPath.string(), "", {}, &warn, &err));
+    EXPECT_TRUE(warn.empty());
+    EXPECT_EQ("Generated USD content is empty\n", err);
+    EXPECT_FALSE(std::filesystem::exists(outputPath));
+}
+
+TEST(utUSDZWriter, oversizedFilenameIsRejected) {
+    const std::map<std::string, std::vector<uint8_t>> textures = {
+            { std::string(static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1, 'x'), { 0 } }
+    };
+    std::vector<uint8_t> archive{ 0xff };
+    std::string warn, err;
+
+    EXPECT_FALSE(tinyusdz::usdz::SaveAsUSDZToMemory(
+            "#usda 1.0\n", textures, archive, &warn, &err));
+    EXPECT_TRUE(archive.empty());
+    EXPECT_TRUE(warn.empty());
+    EXPECT_EQ("USDZ member filename is 65536 bytes; classic ZIP limit is 65535 bytes\n", err);
+}
+
+TEST(utUSDZWriter, zip64SentinelEntryCountIsRejected) {
+    std::map<std::string, std::vector<uint8_t>> textures;
+    for (size_t i = 0; i < static_cast<size_t>(std::numeric_limits<uint16_t>::max()) - 1; ++i) {
+        textures.emplace("texture-" + std::to_string(i), std::vector<uint8_t>{ 0 });
+    }
+    std::vector<uint8_t> archive{ 0xff };
+    std::string warn, err;
+
+    EXPECT_FALSE(tinyusdz::usdz::SaveAsUSDZToMemory(
+            "#usda 1.0\n", textures, archive, &warn, &err));
+    EXPECT_TRUE(archive.empty());
+    EXPECT_TRUE(warn.empty());
+    EXPECT_EQ("USDZ archive has 65535 members; classic ZIP reserves 65535 for ZIP64\n", err);
+}
+
+TEST(utUSDZWriter, classicZipTotalArchiveSizeIsBounded) {
+    constexpr uint64_t classicZipMaximum = std::numeric_limits<uint32_t>::max();
+    EXPECT_TRUE(tinyusdz::usdz::detail::FitsClassicZipArchive(classicZipMaximum));
+    EXPECT_FALSE(tinyusdz::usdz::detail::FitsClassicZipArchive(classicZipMaximum + 1));
+
+    constexpr uint64_t syntheticMemberSize = classicZipMaximum - 65;
+    EXPECT_FALSE(tinyusdz::usdz::detail::FitsClassicZipArchive(
+            64 + syntheticMemberSize + 46 + sizeof("model.usda") - 1 + 22));
 }
 
 #endif // ASSIMP_BUILD_NO_USD_EXPORTER

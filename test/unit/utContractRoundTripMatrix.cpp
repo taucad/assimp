@@ -93,7 +93,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 using namespace Assimp;
 
-namespace {
+namespace ContractRoundTripTests {
 
 struct Frame {
     const char *label;
@@ -415,7 +415,9 @@ aiVector3D readBackExtent(const ExporterTarget &target, const std::string &path)
     return extentFromScene(scene);
 }
 
-} // namespace
+} // namespace ContractRoundTripTests
+
+using namespace ContractRoundTripTests;
 
 TEST_P(ContractRoundTrip, BakeMatchesAnalyticalExtent) {
     const MatrixCase &gp = GetParam();
@@ -444,13 +446,19 @@ TEST_P(ContractRoundTrip, BakeMatchesAnalyticalExtent) {
     std::remove(filename.c_str());
 }
 
-namespace {
+namespace ContractRoundTripTests {
 
 std::vector<MatrixCase> buildMatrix() {
     std::vector<MatrixCase> out;
+    Assimp::Exporter exporter;
     for (const auto &source : sourceFrames()) {
         for (const auto &target : exporterTargets()) {
-            out.push_back({ source, target });
+            for (size_t i = 0; i < exporter.GetExportFormatCount(); ++i) {
+                if (target.exporterId == std::string(exporter.GetExportFormatDescription(i)->id)) {
+                    out.push_back({ source, target });
+                    break;
+                }
+            }
         }
     }
     return out;
@@ -460,7 +468,7 @@ std::string caseName(const ::testing::TestParamInfo<MatrixCase> &info) {
     return std::string(info.param.source.label) + "_to_" + info.param.target.exporterId;
 }
 
-} // namespace
+} // namespace ContractRoundTripTests
 
 INSTANTIATE_TEST_SUITE_P(AllFrames, ContractRoundTrip,
                           ::testing::ValuesIn(buildMatrix()),

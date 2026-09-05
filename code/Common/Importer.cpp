@@ -105,6 +105,20 @@ namespace Assimp {
 using namespace Assimp;
 using namespace Assimp::Intern;
 
+namespace {
+
+bool ProgressCancelled(Importer *importer, bool keepGoing) {
+    if (keepGoing) {
+        return false;
+    }
+    importer->Pimpl()->mPPShared->Clean();
+    importer->FreeScene();
+    importer->Pimpl()->mErrorString = "Import cancelled by progress handler";
+    return true;
+}
+
+} // namespace
+
 // ------------------------------------------------------------------------------------------------
 // Intern::AllocateFromAssimpHeap serves as abstract base class. It overrides
 // new and delete (and their array counterparts) of public API classes (e.g. Logger) to
@@ -607,8 +621,8 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
         if (pimpl->mScene)  {
 
             ASSIMP_LOG_DEBUG("(Deleting previous scene)");
-            FreeScene();
         }
+        FreeScene();
 
         // First check if the file is accessible at all
         if( !pimpl->mIOHandler->Exists( pFile)) {
@@ -700,17 +714,22 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
             ext = desc->mName;
         }
         ASSIMP_LOG_INFO("Found a matching importer for this file format: ", ext, "." );
-        pimpl->mProgressHandler->UpdateFileRead( 0, fileSize );
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileRead( 0, fileSize ))) {
+            return nullptr;
+        }
 
         if (profiler) {
             profiler->BeginRegion("import");
         }
 
         pimpl->mScene = imp->ReadFile( this, pFile, pimpl->mIOHandler);
-        pimpl->mProgressHandler->UpdateFileRead( fileSize, fileSize );
 
         if (profiler) {
             profiler->EndRegion("import");
+        }
+
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdateFileRead( fileSize, fileSize ))) {
+            return nullptr;
         }
 
         SetPropertyString("sourceFilePath", pFile);
@@ -833,7 +852,10 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
     std::unique_ptr<Profiler> profiler(GetPropertyInteger(AI_CONFIG_GLOB_MEASURE_TIME, 0) ? new Profiler() : nullptr);
     for( unsigned int a = 0; a < pimpl->mPostProcessingSteps.size(); a++)   {
         BaseProcess* process = pimpl->mPostProcessingSteps[a];
-        pimpl->mProgressHandler->UpdatePostProcess(static_cast<int>(a), static_cast<int>(pimpl->mPostProcessingSteps.size()) );
+        if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcess(
+                static_cast<int>(a), static_cast<int>(pimpl->mPostProcessingSteps.size()) ))) {
+            return nullptr;
+        }
         if( process->IsActive( pFlags)) {
             if (profiler) {
                 profiler->BeginRegion("postprocess");
@@ -864,8 +886,11 @@ const aiScene* Importer::ApplyPostProcessing(unsigned int pFlags) {
 #endif  // no validation
 #endif // ! DEBUG
     }
-    pimpl->mProgressHandler->UpdatePostProcess( static_cast<int>(pimpl->mPostProcessingSteps.size()),
-        static_cast<int>(pimpl->mPostProcessingSteps.size()) );
+    if (ProgressCancelled(this, pimpl->mProgressHandler->UpdatePostProcess(
+            static_cast<int>(pimpl->mPostProcessingSteps.size()),
+            static_cast<int>(pimpl->mPostProcessingSteps.size()) ))) {
+        return nullptr;
+    }
 
     // update private scene flags
     if( pimpl->mScene ) {

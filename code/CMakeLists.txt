@@ -1905,7 +1905,7 @@ if( MSVC )
       set(MSVC_PREFIX "vc150")
     endif()
   endif()
-  set(LIBRARY_SUFFIX "${ASSIMP_LIBRARY_SUFFIX}-${MSVC_PREFIX}-mt" CACHE STRING "the suffix for the assimp windows library")
+  set(LIBRARY_SUFFIX "${ASSIMP_LIBRARY_SUFFIX}-${ASSIMP_SOVERSION}-${MSVC_PREFIX}-mt" CACHE STRING "the suffix for the assimp windows library")
 endif()
 
 if (MINGW)
@@ -1924,7 +1924,8 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "WindowsStore")
 endif()
 
 SET_TARGET_PROPERTIES( assimp PROPERTIES
-  VERSION ${ASSIMP_VERSION}
+  # Keep the real filename distinct from ABI 6 as well as the SONAME link.
+  VERSION ${ASSIMP_SOVERSION}.${ASSIMP_VERSION_MINOR}.${ASSIMP_VERSION_PATCH}
   SOVERSION ${ASSIMP_SOVERSION} # use full version
   OUTPUT_NAME assimp${LIBRARY_SUFFIX}
 )

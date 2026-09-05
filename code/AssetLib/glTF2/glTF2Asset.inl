@@ -785,39 +785,42 @@ inline void BufferView::Read(Value &obj, Asset &r) {
     byteStride = MemberOrDefault(obj, "byteStride", 0u);
 
     // Check length
-    if ((byteOffset + byteLength) > buffer->byteLength) {
+    if (byteOffset > buffer->byteLength || byteLength > buffer->byteLength - byteOffset) {
         throw DeadlyImportError("GLTF: Buffer view with offset/length (", byteOffset, "/", byteLength, ") is out of range.");
     }
 }
 
 inline uint8_t *BufferView::GetPointerAndTailSize(size_t accOffset, size_t& outTailSize) {
+    outTailSize = 0;
     if (!buffer) {
-        outTailSize = 0;
         return nullptr;
     }
     uint8_t * const basePtr = buffer->GetPointer();
     if (!basePtr) {
-        outTailSize = 0;
         return nullptr;
     }
 
-    size_t offset = accOffset + byteOffset;
+    if (accOffset > byteLength || byteOffset > buffer->byteLength || accOffset > buffer->byteLength - byteOffset) {
+        return nullptr;
+    }
+
+    const size_t offset = accOffset + byteOffset;
     if (buffer->EncodedRegion_Current != nullptr) {
         const size_t begin = buffer->EncodedRegion_Current->Offset;
-        const size_t end = begin + buffer->EncodedRegion_Current->DecodedData_Length;
-        if ((offset >= begin) && (offset < end)) {
-            outTailSize = end - offset;
-            return &buffer->EncodedRegion_Current->DecodedData[offset - begin];
+        const size_t length = buffer->EncodedRegion_Current->DecodedData_Length;
+        if (offset >= begin && offset - begin < length) {
+            const size_t decodedOffset = offset - begin;
+            outTailSize = std::min(length - decodedOffset, byteLength - accOffset);
+            return &buffer->EncodedRegion_Current->DecodedData[decodedOffset];
         }
     }
 
-    if (offset >= buffer->byteLength)
-    {
-        outTailSize = 0;
+    if (offset >= buffer->byteLength) {
         return nullptr;
     }
 
-    outTailSize = buffer->byteLength - offset;
+    // Never hand out bytes past this view, even when the backing buffer continues.
+    outTailSize = std::min(buffer->byteLength - offset, byteLength - accOffset);
     return basePtr + offset;
 }
 
@@ -896,18 +899,8 @@ inline void Accessor::Read(Value &obj, Asset &r) {
     const char *typestr;
     type = ReadMember(obj, "type", typestr) ? AttribType::FromString(typestr) : AttribType::SCALAR;
 
-    if (bufferView) {
-        // Check length
-        unsigned long long byteLength = (unsigned long long)GetBytesPerComponent() * (unsigned long long)count;
-
-        // handle integer overflow
-        if (byteLength < count) {
-            throw DeadlyImportError("GLTF: Accessor with offset/count (", byteOffset, "/", count, ") is out of range.");
-        }
-
-        if ((byteOffset + byteLength) > bufferView->byteLength || (bufferView->byteOffset + byteOffset + byteLength) > bufferView->buffer->byteLength) {
-            throw DeadlyImportError("GLTF: Accessor with offset/length (", byteOffset, "/", byteLength, ") is out of range.");
-        }
+    if (bufferView && count > 0 && !IsDataRangeValid(count - 1, GetElementSize())) {
+        throw DeadlyImportError("GLTF: Accessor with offset/count (", byteOffset, "/", count, ") is out of range.");
     }
 
     if (Value *sparseValue = FindObject(obj, "sparse")) {
@@ -952,10 +945,15 @@ inline void Accessor::Read(Value &obj, Asset &r) {
         if (bufferView) {
             size_t bufferViewTailSize;
             const uint8_t* bufferViewPointer = bufferView->GetPointerAndTailSize(byteOffset, bufferViewTailSize);
-            if (dataSize > bufferViewTailSize) {
+            // The base view may be interleaved; pack it so sparse->data is always count * elementSize.
+            const size_t srcStride = bufferView->byteStride ? bufferView->byteStride : elementSize;
+            if (count > 0 && (srcStride < elementSize || elementSize > bufferViewTailSize || count - 1 > (bufferViewTailSize - elementSize) / srcStride)) {
                 throw DeadlyImportError("Invalid buffer when reading ", id.c_str(), name.empty() ? "" : " (" + name + ")");
             }
-            sparse->PopulateData(dataSize, bufferViewPointer);
+            sparse->data.resize(dataSize);
+            for (size_t i = 0; i < count; ++i) {
+                std::memcpy(sparse->data.data() + i * elementSize, bufferViewPointer + i * srcStride, elementSize);
+            }
         }
         else {
             sparse->PopulateData(dataSize, nullptr);
@@ -983,27 +981,16 @@ inline uint8_t *Accessor::GetPointer() {
     if (sparse)
         return sparse->data.data();
 
-    if (!bufferView || !bufferView->buffer) return nullptr;
-    uint8_t *basePtr = bufferView->buffer->GetPointer();
-    if (!basePtr) return nullptr;
+    if (!bufferView)
+        return nullptr;
 
-    size_t offset = byteOffset + bufferView->byteOffset;
-
-    // Check if region is encoded.
-    if (bufferView->buffer->EncodedRegion_Current != nullptr) {
-        const size_t begin = bufferView->buffer->EncodedRegion_Current->Offset;
-        const size_t end = begin + bufferView->buffer->EncodedRegion_Current->DecodedData_Length;
-
-        if ((offset >= begin) && (offset < end))
-            return &bufferView->buffer->EncodedRegion_Current->DecodedData[offset - begin];
-    }
-
-    return basePtr + offset;
+    size_t tailSize;
+    return bufferView->GetPointerAndTailSize(byteOffset, tailSize);
 }
 
 inline size_t Accessor::GetStride() {
-    // Decoded buffer is always packed
-    if (decodedBuffer)
+    // Decoded and sparse buffers are always packed
+    if (decodedBuffer || sparse)
         return GetElementSize();
 
     // Sparse and normal bufferView
@@ -1014,7 +1001,23 @@ inline size_t Accessor::GetMaxByteSize() {
     if (decodedBuffer)
         return decodedBuffer->byteLength;
 
-    return (bufferView ? bufferView->byteLength : sparse->data.size());
+    if (sparse)
+        return sparse->data.size();
+
+    if (!bufferView || byteOffset > bufferView->byteLength)
+        return 0;
+
+    size_t tailSize;
+    if (!bufferView->GetPointerAndTailSize(byteOffset, tailSize))
+        return 0;
+
+    return std::min(bufferView->byteLength - byteOffset, tailSize);
+}
+
+inline bool Accessor::IsDataRangeValid(size_t elementIndex, size_t elementSize) {
+    const size_t stride = GetStride();
+    const size_t maxSize = GetMaxByteSize();
+    return stride >= elementSize && elementSize <= maxSize && elementIndex <= (maxSize - elementSize) / stride;
 }
 
 template <class T>
@@ -1026,8 +1029,6 @@ size_t Accessor::ExtractData(T *&outData, const std::vector<unsigned int> *remap
 
     const size_t usedCount = (remappingIndices != nullptr) ? remappingIndices->size() : count;
     const size_t elemSize = GetElementSize();
-    const size_t totalSize = elemSize * usedCount;
-
     const size_t stride = GetStride();
 
     const size_t targetElemSize = sizeof(T);
@@ -1036,25 +1037,28 @@ size_t Accessor::ExtractData(T *&outData, const std::vector<unsigned int> *remap
         throw DeadlyImportError("GLTF: elemSize ", elemSize, " > targetElemSize ", targetElemSize, " in ", getContextForErrorMessages(id, name));
     }
 
-    const size_t maxSize = GetMaxByteSize();
+    if (remappingIndices != nullptr) {
+        for (size_t i = 0; i < usedCount; ++i) {
+            const size_t srcIdx = (*remappingIndices)[i];
+            if (srcIdx >= count || !IsDataRangeValid(srcIdx, elemSize)) {
+                throw DeadlyImportError("GLTF: source index ", srcIdx, " is out of range in ", getContextForErrorMessages(id, name));
+            }
+        }
+    } else if (usedCount > 0 && !IsDataRangeValid(usedCount - 1, elemSize)) {
+        throw DeadlyImportError("GLTF: count ", usedCount, " is out of range for stride ", stride,
+                " and size ", GetMaxByteSize(), " in ", getContextForErrorMessages(id, name));
+    }
 
     outData = new T[usedCount];
 
     if (remappingIndices != nullptr) {
-        const unsigned int maxIndexCount = static_cast<unsigned int>(maxSize / stride);
         for (size_t i = 0; i < usedCount; ++i) {
-            size_t srcIdx = (*remappingIndices)[i];
-            if (srcIdx >= maxIndexCount) {
-                throw DeadlyImportError("GLTF: index*stride ", (srcIdx * stride), " > maxSize ", maxSize, " in ", getContextForErrorMessages(id, name));
-            }
+            const size_t srcIdx = (*remappingIndices)[i];
             memcpy(outData + i, data + srcIdx * stride, elemSize);
         }
     } else { // non-indexed cases
-        if (usedCount * stride > maxSize) {
-            throw DeadlyImportError("GLTF: count*stride ", (usedCount * stride), " > maxSize ", maxSize, " in ", getContextForErrorMessages(id, name));
-        }
         if (stride == elemSize && targetElemSize == elemSize) {
-            memcpy(outData, data, totalSize);
+            memcpy(outData, data, elemSize * usedCount);
         } else {
             for (size_t i = 0; i < usedCount; ++i) {
                 memcpy(outData + i, data + i * stride, elemSize);
@@ -1114,16 +1118,18 @@ inline Accessor::Indexer::Indexer(Accessor &acc) :
 
 //! Accesses the i-th value as defined by the accessor
 template <class T>
-T Accessor::Indexer::GetValue(int i) {
+T Accessor::Indexer::GetValue(size_t i) {
     ai_assert(data);
-    if (i * stride >= accessor.GetMaxByteSize()) {
-        throw DeadlyImportError("GLTF: Invalid index ", i, ", count out of range for buffer with stride ", stride, " and size ", accessor.GetMaxByteSize(), ".");
-    }
     // Ensure that the memcpy doesn't overwrite the local.
     const size_t sizeToCopy = std::min(elemSize, sizeof(T));
+    if (i >= accessor.count || !accessor.IsDataRangeValid(i, sizeToCopy)) {
+        throw DeadlyImportError("GLTF: Invalid index ", i, ", count out of range for buffer with stride ", stride,
+                " and size ", accessor.GetMaxByteSize(), ".");
+    }
+    const size_t offset = i * stride;
     T value = T();
     // Assume platform endianness matches GLTF binary data (which is little-endian).
-    memcpy(&value, data + i * stride, sizeToCopy);
+    memcpy(&value, data + offset, sizeToCopy);
     return value;
 }
 

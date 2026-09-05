@@ -58,7 +58,10 @@ namespace Assimp {
 /** @brief CPP-API: Abstract interface for custom progress report receivers.
  *
  *  Each #Importer instance maintains its own #ProgressHandler. The default
- *  implementation provided by Assimp doesn't do anything at all. */
+ *  implementation provided by Assimp doesn't do anything at all.
+ *
+ *  @note This fork changes the specialized callbacks from void to bool. This
+ *  is a source and ABI change: consumers and overrides must be rebuilt. */
 class ASSIMP_API ProgressHandler
 #ifndef SWIG
     : public Intern::AllocateFromAssimpHeap
@@ -100,12 +103,14 @@ public:
      *   them has finished. This number is always strictly monotone
      *   increasing, although not necessarily linearly.
      *
-     *  @note This is currently only used at the start and the end
-     *   of the file parsing.
+     *  @note Importers may report intermediate parser checkpoints in addition
+     *   to the start and end of file parsing.
+     *  @return The result of #Update(). Overrides must return their cancellation
+     *   decision directly.
      *   */
-    virtual void UpdateFileRead(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
+    virtual bool UpdateFileRead(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update( f * 0.5f );
+        return Update(f * 0.5f);
     }
 
     // -------------------------------------------------------------------
@@ -116,10 +121,12 @@ public:
      *   step that will run, or equal to numberOfSteps if all of
      *   them has finished. This number is always strictly monotone
      *   increasing, although not necessarily linearly.
+     *  @return The result of #Update(). Overrides must return their cancellation
+     *   decision directly.
      *   */
-    virtual void UpdatePostProcess(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
+    virtual bool UpdatePostProcess(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update( f * 0.5f + 0.5f );
+        return Update(f * 0.5f + 0.5f);
     }
 
 
@@ -131,10 +138,12 @@ public:
      *   step that will run, or equal to numberOfSteps if all of
      *   them has finished. This number is always strictly monotone
      *   increasing, although not necessarily linearly.
+     *  @return The result of #Update(). Overrides must return their cancellation
+     *   decision directly.
      *   */
-    virtual void UpdateFileWrite(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
+    virtual bool UpdateFileWrite(int currentStep /*= 0*/, int numberOfSteps /*= 0*/) {
         float f = numberOfSteps ? currentStep / (float)numberOfSteps : 1.0f;
-        Update(f * 0.5f);
+        return Update(f * 0.5f);
     }
 }; // !class ProgressHandler
 
