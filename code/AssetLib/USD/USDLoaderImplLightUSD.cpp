@@ -516,22 +516,6 @@ void ComposeLayer(lusd::Layer &layer, lusd::AssetResolutionResolver &resolver, u
         Diagnostics &diag) {
     const std::string layerDir = layer.get_current_working_path();
 
-    // LightUSD treats a missing subLayer as fatal even with
-    // error_when_asset_not_found = false; drop missing ones up front.
-    {
-        auto &subLayers = layer.metas().subLayers;
-        for (auto it = subLayers.begin(); it != subLayers.end();) {
-            const std::string assetPath = it->assetPath.GetAssetPath();
-            resolver.set_current_working_path(layerDir);
-            if (resolver.resolve(assetPath).empty()) {
-                diag.warn("Sublayer not found, skipped: " + assetPath);
-                it = subLayers.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
     std::string warn, err;
     if (!layer.metas().subLayers.empty()) {
         lusd::SublayersCompositionOptions options;
@@ -635,15 +619,6 @@ struct PhysicsData {
     aiVector3D gravityDirection;
     bool hasGravityMagnitude = false;
     float gravityMagnitude = 0.0f;
-    /// Material, Shader and NodeGraph prims; they do not become aiNodes.
-    std::set<std::string> shadingPrims;
-    /// Dense BlendShapes (no pointIndices): Tydra drops their offsets, so they
-    /// are taken from the stage. Keyed by prim path.
-    struct DenseShape {
-        std::vector<aiVector3D> offsets;
-        std::vector<aiVector3D> normalOffsets;
-    };
-    std::unordered_map<std::string, DenseShape> denseBlendShapes;
 };
 
 void AddBool(std::vector<MetaEntry> &m, const char *key, bool b) {
@@ -780,37 +755,8 @@ private:
         }
     }
 
-    void collectDenseBlendShape(const lusd::BlendShape &shape, const std::string &path) {
-        std::vector<int> indices;
-        if (shape.pointIndices.get_value(&indices) && !indices.empty()) {
-            return;
-        }
-        std::vector<lusd::value::vector3f> offsets;
-        if (!shape.offsets.get_value(&offsets) || offsets.empty()) {
-            return;
-        }
-        PhysicsData::DenseShape dense;
-        dense.offsets.reserve(offsets.size());
-        for (const auto &o : offsets) {
-            dense.offsets.emplace_back(o.x, o.y, o.z);
-        }
-        std::vector<lusd::value::vector3f> normals;
-        if (shape.normalOffsets.get_value(&normals) && normals.size() == offsets.size()) {
-            dense.normalOffsets.reserve(normals.size());
-            for (const auto &n : normals) {
-                dense.normalOffsets.emplace_back(n.x, n.y, n.z);
-            }
-        }
-        mOut.denseBlendShapes.emplace(path, std::move(dense));
-    }
-
     void collect(const lusd::Prim &prim, const std::string &path) {
         if (prim.as<lusd::Material>() || prim.as<lusd::Shader>() || prim.as<lusd::NodeGraph>()) {
-            mOut.shadingPrims.insert(path);
-            return;
-        }
-        if (const auto *shape = prim.as<lusd::BlendShape>()) {
-            collectDenseBlendShape(*shape, path);
             return;
         }
         if (const auto *scene = prim.as<lusd::PhysicsScene>()) {
@@ -1879,34 +1825,6 @@ private:
         }
     }
 
-    /// Tydra's ShapeTarget::abs_path holds only the target name, so the
-    /// stage path is looked up under the mesh first, then by unique leaf name.
-    const PhysicsData::DenseShape *findDenseShape(const tydra::RenderMesh &rm, const tydra::ShapeTarget &target) const {
-        const auto &shapes = mPhysics.denseBlendShapes;
-        if (shapes.empty()) {
-            return nullptr;
-        }
-        const std::string &id = target.abs_path.empty() ? target.prim_name : target.abs_path;
-        if (!id.empty() && id[0] == '/') {
-            auto it = shapes.find(id);
-            return it == shapes.end() ? nullptr : &it->second;
-        }
-        auto it = shapes.find(rm.abs_path + "/" + id);
-        if (it != shapes.end()) {
-            return &it->second;
-        }
-        const PhysicsData::DenseShape *match = nullptr;
-        for (const auto &entry : shapes) {
-            if (LeafName(entry.first) == id) {
-                if (match != nullptr) {
-                    return nullptr; // ambiguous
-                }
-                match = &entry.second;
-            }
-        }
-        return match;
-    }
-
     template <typename PointOf, typename CornerOf, typename FaceOf>
     void buildBlendShapes(const tydra::RenderMesh &rm, aiMesh *mesh, size_t numPoints, PointOf pointOf,
             CornerOf cornerOf, FaceOf faceOf, const AttributeView &normals) {
@@ -1923,41 +1841,23 @@ private:
         for (const auto &entry : rm.targets) {
             const tydra::ShapeTarget &target = entry.second;
             inbetweens = inbetweens || !target.inbetweens.empty();
-            const bool dense = target.pointIndices.empty();
-            // Tydra drops the offsets of dense shapes (no pointIndices); use
-            // the ones read from the stage when they still match the points.
-            const PhysicsData::DenseShape *stageShape = nullptr;
-            if (dense && target.pointOffsets.empty()) {
-                stageShape = findDenseShape(rm, target);
-            }
-            const size_t count = stageShape ? stageShape->offsets.size() : target.pointOffsets.size();
-            const size_t normalCount = stageShape ? stageShape->normalOffsets.size() : target.normalOffsets.size();
-            if (dense && count != numPoints) {
-                mDiag.warn("Blend shape " + entry.first + " of mesh " + rm.prim_name + " has no pointIndices and " +
-                           std::to_string(count) + " offsets for " + std::to_string(numPoints) + " points; skipped.");
-                continue;
-            }
-            if (!dense && target.pointIndices.size() != count) {
+            // Tydra gives dense shapes (no authored pointIndices) the indices
+            // 0..N-1 and drops shapes whose offsets do not fit the points.
+            const size_t count = target.pointOffsets.size();
+            if (target.pointIndices.size() != count) {
                 mDiag.warn("Blend shape " + entry.first + " of mesh " + rm.prim_name + " has mismatching pointIndices and offsets; skipped.");
                 continue;
             }
-            const bool hasNormals = mesh->HasNormals() && normalCount == count;
+            const bool hasNormals = mesh->HasNormals() && target.normalOffsets.size() == count;
             offsets.assign(numPoints, aiVector3D(0.0f, 0.0f, 0.0f));
             if (hasNormals) {
                 normalOffsets.assign(numPoints, aiVector3D(0.0f, 0.0f, 0.0f));
             }
             size_t bad = 0;
             for (size_t i = 0; i < count; ++i) {
-                const size_t p = dense ? i : target.pointIndices[i];
+                const size_t p = target.pointIndices[i];
                 if (p >= numPoints) {
                     ++bad;
-                    continue;
-                }
-                if (stageShape) {
-                    offsets[p] = stageShape->offsets[i];
-                    if (hasNormals) {
-                        normalOffsets[p] = stageShape->normalOffsets[i];
-                    }
                     continue;
                 }
                 const auto &o = target.pointOffsets[i];
@@ -2192,13 +2092,8 @@ private:
 
     /// Material, Shader and NodeGraph prims are not scene objects; their
     /// content is already in mMaterials.
-    /// Tydra never assigns NodeCategory::Material (Material and Shader prims
-    /// arrive as Xform nodes), so the paths seen on the stage are used.
-    bool isShadingNode(const tydra::Node &n) const {
-        if (n.category == tydra::NodeCategory::Material) {
-            return true;
-        }
-        return n.nodeType == tydra::NodeType::Xform && mPhysics.shadingPrims.count(n.abs_path) != 0;
+    static bool isShadingNode(const tydra::Node &n) {
+        return n.category == tydra::NodeCategory::Material;
     }
 
     /// Keeps the pre-order numbering (animation targets) for a skipped subtree.

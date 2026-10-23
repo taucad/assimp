@@ -615,7 +615,15 @@ TEST_F(utUSDImport, degenerateAndOutOfRangeFacesAreSkipped) {
     EXPECT_FALSE(mesh->HasTextureCoords(0));
 }
 
-TEST_F(utUSDImport, outOfRangeFaceIndexFailsCleanly) {
+TEST_F(utUSDImport, outOfRangeFaceIndexSkipsTheMesh) {
+    const char *good = R"(
+def Mesh "good"
+{
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+}
+)";
     const char *mesh = R"(#usda 1.0
 def Mesh "bad"
 {
@@ -634,21 +642,15 @@ def Mesh "bad"
 )";
     for (const char *text : { mesh, counts }) {
         Assimp::Importer importer;
-        const aiScene *scene = ReadFromMap(importer, { { "bad.usda", text } }, "bad.usda");
-        // LightUSD rejects the mesh (and with it the conversion); assimp
-        // reports a DeadlyImportError instead of reading out of bounds (D1).
-        if (scene == nullptr) {
-            EXPECT_FALSE(std::string(importer.GetErrorString()).empty());
-        } else {
-            for (unsigned m = 0; m < scene->mNumMeshes; ++m) {
-                const aiMesh *am = scene->mMeshes[m];
-                for (unsigned f = 0; f < am->mNumFaces; ++f) {
-                    for (unsigned k = 0; k < am->mFaces[f].mNumIndices; ++k) {
-                        EXPECT_LT(am->mFaces[f].mIndices[k], am->mNumVertices);
-                    }
-                }
-            }
-        }
+        const aiScene *scene = ReadFromMap(importer, { { "bad.usda", std::string(text) + good } }, "bad.usda");
+        // LightUSD's Tydra drops the invalid mesh with a warning (D1); the
+        // rest of the scene still imports, never reading out of bounds.
+        ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+        ASSERT_EQ(1u, scene->mNumMeshes);
+        EXPECT_STREQ("good", scene->mMeshes[0]->mName.C_Str());
+        // The prim keeps its node (children and transforms stay), without a mesh.
+        const aiNode *bad = scene->mRootNode->FindNode("bad");
+        EXPECT_TRUE(bad == nullptr || bad->mNumMeshes == 0);
     }
 }
 
@@ -701,17 +703,14 @@ TEST_F(utUSDImport, malformedBlendShapesAreRejected) {
     for (const char *variant : variants) {
         Assimp::Importer importer;
         const aiScene *scene = ReadFromMap(importer, { { "bs.usda", BlendShapeScene(variant) } }, "bs.usda");
-        // Either LightUSD rejects the file, or the bad shape is dropped (D5);
-        // never an out-of-bounds read.
-        if (scene == nullptr) {
-            EXPECT_FALSE(std::string(importer.GetErrorString()).empty()) << variant;
-            continue;
-        }
+        // The bad shape is dropped with a warning (D5); the mesh and its
+        // valid dense shape survive, never an out-of-bounds read.
+        ASSERT_NE(nullptr, scene) << variant << ": " << importer.GetErrorString();
         ASSERT_EQ(1u, scene->mNumMeshes) << variant;
         const aiMesh *mesh = scene->mMeshes[0];
-        for (unsigned a = 0; a < mesh->mNumAnimMeshes; ++a) {
-            EXPECT_EQ(mesh->mNumVertices, mesh->mAnimMeshes[a]->mNumVertices);
-        }
+        ASSERT_EQ(1u, mesh->mNumAnimMeshes) << variant;
+        EXPECT_STREQ("dense", mesh->mAnimMeshes[0]->mName.C_Str()) << variant;
+        EXPECT_EQ(mesh->mNumVertices, mesh->mAnimMeshes[0]->mNumVertices);
     }
 }
 
