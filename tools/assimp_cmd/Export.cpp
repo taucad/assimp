@@ -158,7 +158,7 @@ int Assimp_Export(const char *const *params, unsigned int num) {
     }
 
     // and call the export routine
-    if (!ExportModel(scene, import, out, e->id)) {
+    if (!ExportModel(scene, import, out, e->id, in)) {
         return AssimpCmdExportError::FailedToExportModel;
     }
     printf("assimp export: wrote output file: %s\n", out.c_str());
