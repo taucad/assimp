@@ -143,6 +143,7 @@ void ExportScenePbrt(const char*, IOSystem*, const aiScene*, const ExportPropert
 #endif
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
 void ExportSceneUSDA(const char*, IOSystem*, const aiScene*, const ExportProperties*);
+void ExportSceneUSDC(const char*, IOSystem*, const aiScene*, const ExportProperties*);
 void ExportSceneUSDZ(const char*, IOSystem*, const aiScene*, const ExportProperties*);
 #endif
 
@@ -257,6 +258,7 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 
 #ifndef ASSIMP_BUILD_NO_USD_EXPORTER
 	exporters.emplace_back("usda", "Universal Scene Description (ASCII)", "usda", &ExportSceneUSDA, 0);
+	exporters.emplace_back("usdc", "Universal Scene Description (Crate)", "usdc", &ExportSceneUSDC, 0);
 	exporters.emplace_back("usdz", "Universal Scene Description (USDZ)", "usdz", &ExportSceneUSDZ, 0);
 #endif
 }
