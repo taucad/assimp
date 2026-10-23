@@ -179,6 +179,13 @@ SET( IMPORTERS
 if(ASSIMP_BUILD_USD_IMPORTER)
   list( APPEND IMPORTERS
     unit/utUSDImport.cpp
+  )
+endif()
+
+# The exporter tests need only the exporter; round-trip checks that re-import
+# the output are compiled when the importer is built too.
+if(ASSIMP_USD_EXPORTER_ENABLED)
+  list( APPEND IMPORTERS
     unit/utUSDZExport.cpp
   )
 endif()
@@ -242,6 +249,11 @@ add_executable( unit
     ${POST_PROCESSES}
     ${TOOLS}
 )
+
+# code/ defines the ASSIMP_BUILD_NO_* switches for the library only.
+if(NOT ASSIMP_BUILD_USD_IMPORTER)
+  target_compile_definitions(unit PRIVATE ASSIMP_BUILD_NO_USD_IMPORTER)
+endif()
 
 if(ASSIMP_HUNTER_ENABLED)
     hunter_add_package(GTest)
