@@ -1020,7 +1020,7 @@ IF (ASSIMP_USD_ENABLED)
     if (ASSIMP_BUILD_USD_VERBOSE_LOGS)
         ADD_DEFINITIONS( -DASSIMP_USD_VERBOSE_LOGS)
     endif ()
-    set(LIGHTUSD_GIT_TAG "a959b89f0cf663b7f3d1816571c016a8fd982b7f")
+    set(LIGHTUSD_GIT_TAG "b390b1c8ee90aec715d609eba367ca6ff1062c15")
 
     include(FetchContent)
     # Earlier contrib blocks leave FETCHCONTENT_BASE_DIR pointing at their own

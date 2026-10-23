@@ -577,6 +577,21 @@ TEST_F(utUSDZExport, cesiumManSkeleton) {
     EXPECT_EQ(1u, RootPrims(usda).size());
 }
 
+TEST_F(utUSDZExport, siblingRootBonesGetOneRootJoint) {
+    // quad_skin's ten bones are siblings under an Armature node; the
+    // Armature becomes the single root joint so every joint path shares it.
+    Importer importer;
+    auto scene = ImportFile(importer, ASSIMP_TEST_MODELS_DIR "/glTF2/simple_skin/quad_skin.glb");
+    ASSERT_NE(nullptr, scene);
+    const std::string usda = ExportUsda(scene.get());
+    const std::string key = "uniform token[] joints = [";
+    const size_t at = usda.find(key);
+    ASSERT_NE(std::string::npos, at);
+    const std::string joints = usda.substr(at + key.size() - 1, usda.find(']', at + key.size()) - at - key.size() + 1);
+    EXPECT_NE(std::string::npos, joints.find("[\"Armature\", \"Armature/Bone_000\""));
+    EXPECT_EQ(11u, Count(joints, "\"Armature"));
+}
+
 TEST_F(utUSDZExport, cameraFocalLengthFromFov) {
     auto scene = MakeScene();
     AddChild(scene->mRootNode, "Cam");

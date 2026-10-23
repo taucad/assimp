@@ -1127,6 +1127,10 @@ TEST_F(utUSDImport, vertexColoredGltfExportedToUsdcReimports) {
     ASSERT_EQ(1u, scene->mNumMeshes);
     const aiMesh *mesh = scene->mMeshes[0];
     EXPECT_TRUE(mesh->HasVertexColors(0));
+    // The ten sibling root bones sit under the Armature node, which the
+    // exporter makes the single root joint, so the skin survives Tydra. The
+    // importer makes one bone per joint, so the Armature adds one.
+    EXPECT_EQ(gltf->mMeshes[0]->mNumBones + 1, mesh->mNumBones);
     const aiMaterial *mat = scene->mMaterials[mesh->mMaterialIndex];
     aiString name;
     ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_NAME, name));

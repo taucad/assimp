@@ -38,5 +38,9 @@ each a separate commit intended for upstream:
 - The USDC writer stores token, string and asset index arrays uncompressed,
   as OpenUSD does, and keeps attribute metadata (interpolation, elementSize)
   on Points and BasisCurves.
+- Tydra accepts a UsdPreviewSurface input connected to a
+  `UsdPrimvarReader_*` (keeping the input's value and recording the primvar
+  name), and warns instead of failing on other connections it cannot
+  interpret unless `strict_material_check` is set.
 
 When a fix lands upstream, rebase the branch and drop it here.

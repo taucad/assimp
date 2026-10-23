@@ -930,7 +930,14 @@ void UsdExporter::PlanSkeleton() {
     for (int b : boneNodes) {
         lca = Lca(lca, b);
     }
-    const int parent = boneNodes.count(lca) ? mNodes[lca].parent : lca;
+    // When the LCA is not itself a bone, the bones hang from two or more of
+    // its children (an armature node with sibling root bones). UsdSkel allows
+    // that forest, but LightUSD's Tydra and some AR runtimes need one root
+    // joint, so the LCA becomes the root joint and the skeleton moves up a level.
+    int parent = mNodes[lca].parent;
+    if (!boneNodes.count(lca) && parent < 0) {
+        parent = lca; // the LCA is the scene root, which cannot be a joint
+    }
     if (parent < 0) {
         ASSIMP_LOG_WARN("USD export: the skeleton is rooted at the scene root node; skinning is not exported");
         mSkinned.assign(mScene->mNumMeshes, false);
