@@ -39,54 +39,60 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ----------------------------------------------------------------------
 */
 
+/** @file  USDLoaderImplLightUSD.h
+ *  @brief USD (USDA/USDC/USDZ) to aiScene conversion on top of LightUSD.
+ *
+ *  LightUSD headers are deliberately not included here so that they stay
+ *  private to USDLoaderImplLightUSD.cpp.
+ */
 #pragma once
-#ifndef AI_USDLOADER_IMPL_TINYUSDZ_HELPER_H_INCLUDED
-#define AI_USDLOADER_IMPL_TINYUSDZ_HELPER_H_INCLUDED
+#ifndef AI_USDLOADER_IMPL_LIGHTUSD_H_INCLUDED
+#define AI_USDLOADER_IMPL_LIGHTUSD_H_INCLUDED
 
-#include <assimp/BaseImporter.h>
-#include <assimp/scene.h>
-#include <assimp/types.h>
-#include "tinyusdz.hh"
-#include "tydra/render-data.hh"
-#include <type_traits>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+struct aiScene;
 
 namespace Assimp {
 
-std::string tinyusdzAnimChannelTypeFor(
-        tinyusdz::tydra::AnimationChannel::ChannelType animChannel);
-std::string tinyusdzNodeTypeFor(tinyusdz::tydra::NodeType type);
+class IOSystem;
 
-template <typename T>
-aiMatrix4x4 tinyUsdzMat4ToAiMat4(const T matIn[4][4]) {
-    static_assert(std::is_floating_point_v<T>, "Only floating-point types are allowed.");
-    aiMatrix4x4 matOut;
-    matOut.a1 = ai_real(matIn[0][0]);
-    matOut.a2 = ai_real(matIn[1][0]);
-    matOut.a3 = ai_real(matIn[2][0]);
-    matOut.a4 = ai_real(matIn[3][0]);
-    matOut.b1 = ai_real(matIn[0][1]);
-    matOut.b2 = ai_real(matIn[1][1]);
-    matOut.b3 = ai_real(matIn[2][1]);
-    matOut.b4 = ai_real(matIn[3][1]);
-    matOut.c1 = ai_real(matIn[0][2]);
-    matOut.c2 = ai_real(matIn[1][2]);
-    matOut.c3 = ai_real(matIn[2][2]);
-    matOut.c4 = ai_real(matIn[3][2]);
-    matOut.d1 = ai_real(matIn[0][3]);
-    matOut.d2 = ai_real(matIn[1][3]);
-    matOut.d3 = ai_real(matIn[2][3]);
-    matOut.d4 = ai_real(matIn[3][3]);
-    return matOut;
-}
-aiVector3D tinyUsdzScaleOrPosToAssimp(const std::array<float, 3> &scaleOrPosIn);
+namespace USDImport {
 
-/**
- * Convert quaternion from tinyusdz "quat" to assimp "aiQuaternion" type
- *
- * @param quatIn tinyusdz float[4] in x,y,z,w order
- * @return assimp aiQuaternion converted from input
- */
-aiQuaternion tinyUsdzQuatToAiQuat(const std::array<float, 4> &quatIn);
+/// Detected container format of a USD byte stream.
+enum class SourceFormat {
+    Unknown,
+    USDA,
+    USDC,
+    USDZ
+};
 
+/// Classifies `data` by its magic bytes ("#usda", "PXR-USDC", "PK\3\4").
+/// A ZIP archive only counts as USDZ when its first member is a USD layer.
+SourceFormat DetectFormat(const uint8_t *data, size_t size);
+
+/// Per-read settings, taken from the importer properties.
+struct ImportConfig {
+    /// Memory budget (MiB) handed to LightUSD's parser, composition and Tydra.
+    uint32_t maxMemoryMB = 16384;
+};
+
+/// Stage metadata that the caller turns into the unit/axis contract.
+struct SourceFrame {
+    double metersPerUnit = 1.0;
+    int32_t upAxis = 1; ///< 0 = X, 1 = Y, 2 = Z
+};
+
+/// Reads `file` through `io`, composes it (sublayers, references, payloads,
+/// inherits, specializes, variants; sidecars and USDZ members go through `io`)
+/// and fills `scene`. Throws DeadlyImportError on failure. Holds no state
+/// between calls.
+void ReadScene(const std::string &file, aiScene *scene, IOSystem *io,
+        const ImportConfig &config, SourceFrame *frame);
+
+} // namespace USDImport
 } // namespace Assimp
-#endif // AI_USDLOADER_IMPL_TINYUSDZ_HELPER_H_INCLUDED
+
+#endif // AI_USDLOADER_IMPL_LIGHTUSD_H_INCLUDED

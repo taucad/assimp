@@ -47,36 +47,32 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <assimp/BaseImporter.h>
 #include <assimp/types.h>
-#include <vector>
+
 #include <cstdint>
 
-#include "USDLoaderImplTinyusdz.h"
-
 namespace Assimp {
-class Importer;
+
+/// USD importer (USDA, USDC and USDZ) built on LightUSD.
 class USDImporter : public BaseImporter {
 public:
-    USDImporter();
+    USDImporter() = default;
     ~USDImporter() override = default;
 
-    /// \brief  Returns whether the class can handle the format of the given file.
-    /// \remark See BaseImporter::CanRead() for details.
+    /// Accepts the usd/usda/usdc/usdz extensions, or USD content by magic bytes.
     bool CanRead(const std::string &pFile, IOSystem *pIOHandler, bool checkSig) const override;
 
     void SetupProperties(const Importer *pImp) override;
 
 protected:
-    //! \brief  Appends the supported extension.
     const aiImporterDesc *GetInfo() const override;
 
-    void InternReadFile(
-            const std::string &pFile,
-            aiScene *pScene,
-            IOSystem *pIOHandler) override;
+    void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) override;
+
 private:
-    USDImporterImplTinyusdz impl;
     const Importer *mImporter = nullptr;
+    uint32_t mMaxMemoryMB = 16384;
 };
 
 } // namespace Assimp
+
 #endif // AI_USDLOADER_H_INCLUDED

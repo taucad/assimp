@@ -1491,6 +1491,15 @@ enum aiComponent
  */
 #define AI_CONFIG_IMPORT_USD_UP_AXIS "IMPORT_USD_UP_AXIS"
 
+/** @brief USD memory budget in MiB.
+ *
+ *  Upper bound handed to LightUSD for parsing, composition and the
+ *  Tydra conversion of one USD file (including every composed layer).
+ *  Raise it for very large scenes; lower it to reject oversized input early.
+ *  Property type: Int. Default value: 16384.
+ */
+#define AI_CONFIG_IMPORT_USD_MAX_MEMORY_MB "IMPORT_USD_MAX_MEMORY_MB"
+
 // ---------- All the Export defines ------------
 
 /** @brief Specifies the xfile use double for real values of float

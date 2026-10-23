@@ -179,6 +179,20 @@ SET( IMPORTERS
 if(ASSIMP_BUILD_USD_IMPORTER)
   list( APPEND IMPORTERS
     unit/utUSDImport.cpp
+  )
+endif()
+
+# The USDZ export round-trip test needs the exporter, which has its own switch.
+set(_ASSIMP_USD_EXPORTER_ON OFF)
+if(NOT ASSIMP_NO_EXPORT)
+  if(DEFINED ASSIMP_BUILD_USD_EXPORTER)
+    set(_ASSIMP_USD_EXPORTER_ON ${ASSIMP_BUILD_USD_EXPORTER})
+  elseif(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT)
+    set(_ASSIMP_USD_EXPORTER_ON ON)
+  endif()
+endif()
+if(ASSIMP_BUILD_USD_IMPORTER AND _ASSIMP_USD_EXPORTER_ON)
+  list( APPEND IMPORTERS
     unit/utUSDZExport.cpp
   )
 endif()

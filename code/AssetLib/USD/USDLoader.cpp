@@ -39,36 +39,35 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 /** @file  USDLoader.cpp
- *  @brief Implementation of the USD importer class
+ *  @brief Implementation of the USD importer front end.
  */
 
 #ifndef ASSIMP_BUILD_NO_USD_IMPORTER
-#include <memory>
-
-// internal headers
-#include <assimp/ai_assert.h>
-#include <assimp/anim.h>
-#include <assimp/DefaultIOSystem.h>
-#include <assimp/DefaultLogger.hpp>
-#include <assimp/fast_atof.h>
-#include <assimp/Importer.hpp>
-#include <assimp/importerdesc.h>
-#include <assimp/IOStreamBuffer.h>
-#include <assimp/IOSystem.hpp>
-#include <assimp/scene.h>
-#include <assimp/StringUtils.h>
-#include <assimp/StreamReader.h>
 
 #include "USDLoader.h"
-#include "USDLoaderUtil.h"
-#include "USDPreprocessor.h"
+#include "USDLoaderImplLightUSD.h"
 #include "Common/UnitAxisContract.h"
 
-static constexpr aiImporterDesc desc = {
+#include <assimp/commonMetaData.h>
+#include <assimp/config.h>
+#include <assimp/importerdesc.h>
+#include <assimp/IOStream.hpp>
+#include <assimp/IOSystem.hpp>
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+
+#include <functional>
+#include <memory>
+
+namespace Assimp {
+
+namespace {
+
+constexpr aiImporterDesc kUsdImporterDesc = {
     "USD Object Importer",
     "",
     "",
-    "https://en.wikipedia.org/wiki/Universal_Scene_Description/",
+    "https://openusd.org/",
     aiImporterFlags_SupportTextFlavour | aiImporterFlags_SupportBinaryFlavour,
     0,
     0,
@@ -77,63 +76,68 @@ static constexpr aiImporterDesc desc = {
     "usd usda usdc usdz"
 };
 
-namespace Assimp {
-using namespace std;
+// Large enough for a ZIP local header plus a reasonable first member name.
+constexpr size_t kUsdSniffBytes = 512;
 
-// Constructor to be privately used by Importer
-USDImporter::USDImporter() :
-    impl(USDImporterImplTinyusdz()) {
-}
+} // namespace
 
-// ------------------------------------------------------------------------------------------------
-
-bool USDImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool) const {
-    // Based on token
-    static constexpr uint32_t usdcTokens[] = { AI_MAKE_MAGIC("PXR-USDC") };
-    bool canRead = CheckMagicToken(pIOHandler, pFile, usdcTokens, AI_COUNT_OF(usdcTokens));
-    if (canRead) {
-        return canRead;
+bool USDImporter::CanRead(const std::string &pFile, IOSystem *pIOHandler, bool /*checkSig*/) const {
+    if (SimpleExtensionCheck(pFile, "usd", "usda", "usdc", "usdz")) {
+        return true;
     }
-
-    // Based on extension
-    // TODO: confirm OK to replace this w/SimpleExtensionCheck() below
-    canRead = isUsd(pFile) || isUsda(pFile) || isUsdc(pFile) || isUsdz(pFile);
-    if (canRead) {
-        return canRead;
+    if (pIOHandler == nullptr) {
+        return false;
     }
-    canRead = SimpleExtensionCheck(pFile, "usd", "usda", "usdc", "usdz");
-    return canRead;
+    // Content sniffing, so that e.g. a USDC payload with a foreign extension
+    // is still recognised (and then dispatched on content, not extension).
+    std::unique_ptr<IOStream, std::function<void(IOStream *)>> stream(
+            pIOHandler->Open(pFile, "rb"), [pIOHandler](IOStream *s) { pIOHandler->Close(s); });
+    if (!stream) {
+        return false;
+    }
+    uint8_t head[kUsdSniffBytes];
+    const size_t got = stream->Read(head, 1, sizeof(head));
+    return USDImport::DetectFormat(head, got) != USDImport::SourceFormat::Unknown;
 }
 
 const aiImporterDesc *USDImporter::GetInfo() const {
-    return &desc;
+    return &kUsdImporterDesc;
 }
 
 void USDImporter::SetupProperties(const Importer *pImp) {
     mImporter = pImp;
+    const int maxMemory = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_USD_MAX_MEMORY_MB, 16384);
+    mMaxMemoryMB = maxMemory > 0 ? static_cast<uint32_t>(maxMemory) : 16384u;
 }
 
-void USDImporter::InternReadFile(
-        const std::string &pFile,
-        aiScene *pScene,
-        IOSystem *pIOHandler) {
-    impl.InternReadFile(
-            pFile,
-            pScene,
-            pIOHandler);
+void USDImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) {
+    USDImport::ImportConfig config;
+    config.maxMemoryMB = mMaxMemoryMB;
+    USDImport::SourceFrame frame;
+    USDImport::ReadScene(pFile, pScene, pIOHandler, config, &frame);
 
-    // Record the unit/up-axis contract using the stage metadata captured by
-    // the tinyusdz implementation. USD authors `metersPerUnit` (default 1.0
-    // metre per tinyusdz fallback) and `upAxis` (default Y) on the layer;
-    // the importer applies no axis conversion, so the contract reflects the
-    // source values verbatim and exposes overrides for layers that omit
-    // them.
-    const ContractDefaults defaults{ impl.sourceMetersPerUnit, impl.sourceUpAxis };
+    // Unit/up-axis contract. The importer applies no axis conversion: the
+    // metadata reflects the stage values (USD defaults: 1 metre, Y up) unless
+    // the caller overrides them through AI_CONFIG_IMPORT_USD_*.
+    const ContractDefaults defaults{ frame.metersPerUnit, frame.upAxis };
     const ContractDefaults resolved = resolveImporterContract(mImporter, "USD", defaults);
     writeContractMetadata(pScene, resolved.unit, resolved.upAxis, "USD");
+
+    // Shared USD contract: `UnitScaleFactor` carries metersPerUnit and
+    // `SourceAsset_Format` names the format family.
+    if (pScene->mMetaData->HasKey("UnitScaleFactor")) {
+        pScene->mMetaData->Set("UnitScaleFactor", resolved.unit);
+    } else {
+        pScene->mMetaData->Add("UnitScaleFactor", resolved.unit);
+    }
+    const aiString format("USD");
+    if (pScene->mMetaData->HasKey(AI_METADATA_SOURCE_FORMAT)) {
+        pScene->mMetaData->Set(AI_METADATA_SOURCE_FORMAT, format);
+    } else {
+        pScene->mMetaData->Add(AI_METADATA_SOURCE_FORMAT, format);
+    }
 }
 
 } // namespace Assimp
 
 #endif // !! ASSIMP_BUILD_NO_USD_IMPORTER
-
