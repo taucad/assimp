@@ -1023,6 +1023,9 @@ IF (ASSIMP_USD_ENABLED)
     set(LIGHTUSD_GIT_TAG "a959b89f0cf663b7f3d1816571c016a8fd982b7f")
 
     include(FetchContent)
+    # Earlier contrib blocks leave FETCHCONTENT_BASE_DIR pointing at their own
+    # autoclone directory; give LightUSD its own.
+    set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/lightusd/autoclone")
     FetchContent_Declare(
             lightusd
             GIT_REPOSITORY "https://github.com/taucad/tinyusdz"

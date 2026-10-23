@@ -1187,6 +1187,9 @@ private:
 
         if (rm.surfaceShader.has_value()) {
             const tydra::PreviewSurfaceShader &s = *rm.surfaceShader;
+            // An input fed by a UsdPrimvarReader_* (e.g. diffuseColor from
+            // displayColor) keeps its authored or fallback value here; the
+            // per-vertex data itself arrives as vertex colours.
             const aiColor4D base(s.diffuseColor.value[0], s.diffuseColor.value[1], s.diffuseColor.value[2], s.opacity.value);
             mat->AddProperty(&base, 1, AI_MATKEY_BASE_COLOR);
             mat->AddProperty(&base, 1, AI_MATKEY_COLOR_DIFFUSE);

@@ -126,3 +126,5 @@ generated/*
 contrib/meshlab/autoclone
 # web-ifc repo, automatically cloned via CMake
 contrib/web-ifc/autoclone
+# LightUSD repo, automatically cloned via CMake
+contrib/lightusd/autoclone

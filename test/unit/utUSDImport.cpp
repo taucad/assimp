@@ -1039,6 +1039,104 @@ def Xform "root"
     EXPECT_EQ(nullptr, scene->mRootNode->FindNode("OpenPBR"));
 }
 
+TEST_F(utUSDImport, primvarReaderDiffuseKeepsFallbackAndVertexColors) {
+    // diffuseColor fed by a UsdPrimvarReader_float3 reading displayColor is
+    // valid USD (assimp's own exporter writes it for vertex-coloured meshes).
+    // The colours arrive as vertex colours; the material keeps the
+    // UsdPreviewSurface fallback diffuse instead of failing the import.
+    const char *main = R"(#usda 1.0
+(
+    defaultPrim = "root"
+)
+def Xform "root"
+{
+    def Mesh "tri" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </root/Looks/VC>
+    }
+    def Scope "Looks"
+    {
+        def Material "VC"
+        {
+            token outputs:surface.connect = </root/Looks/VC/PreviewSurface.outputs:surface>
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </root/Looks/VC/displayColorReader.outputs:result>
+                float inputs:roughness = 1
+                token outputs:surface
+            }
+            def Shader "displayColorReader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float3"
+                string inputs:varname = "displayColor"
+                float3 outputs:result
+            }
+        }
+    }
+}
+)";
+    Assimp::Importer importer;
+    const aiScene *scene = ReadFromMap(importer, { { "vc.usda", main } }, "vc.usda");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    ASSERT_TRUE(mesh->HasVertexColors(0));
+    bool sawRed = false;
+    for (unsigned v = 0; v < mesh->mNumVertices; ++v) {
+        sawRed = sawRed || (mesh->mColors[0][v].r > 0.99f && mesh->mColors[0][v].g < 0.01f);
+    }
+    EXPECT_TRUE(sawRed);
+    const aiMaterial *mat = scene->mMaterials[mesh->mMaterialIndex];
+    aiString name;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_NAME, name));
+    EXPECT_STREQ("VC", name.C_Str());
+    aiColor4D base;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_BASE_COLOR, base));
+    EXPECT_NEAR(0.18f, base.r, 1e-6f);
+    EXPECT_NEAR(0.18f, base.g, 1e-6f);
+    EXPECT_NEAR(0.18f, base.b, 1e-6f);
+    EXPECT_EQ(0u, mat->GetTextureCount(aiTextureType_BASE_COLOR));
+    float roughness = 0.0f;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness));
+    EXPECT_NEAR(1.0f, roughness, 1e-6f);
+}
+
+TEST_F(utUSDImport, vertexColoredGltfExportedToUsdcReimports) {
+    // quad_skin.glb has vertex colours, so the USD exporter connects
+    // diffuseColor to a displayColor primvar reader.
+    Assimp::Importer source;
+    const aiScene *gltf = source.ReadFile(ASSIMP_TEST_MODELS_DIR "/glTF2/simple_skin/quad_skin.glb", 0u);
+    ASSERT_NE(nullptr, gltf) << source.GetErrorString();
+    Assimp::Exporter exporter;
+    const aiExportDataBlob *blob = exporter.ExportToBlob(gltf, "usdc");
+    ASSERT_NE(nullptr, blob) << exporter.GetErrorString();
+    const std::string usdc(static_cast<const char *>(blob->data), blob->size);
+
+    Assimp::Importer importer;
+    const aiScene *scene = ReadFromMap(importer, { { "quad_skin.usdc", usdc } }, "quad_skin.usdc");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMesh *mesh = scene->mMeshes[0];
+    EXPECT_TRUE(mesh->HasVertexColors(0));
+    const aiMaterial *mat = scene->mMaterials[mesh->mMaterialIndex];
+    aiString name;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_NAME, name));
+    // The exporter's vertex-colour material (diffuseColor <- displayColor reader).
+    EXPECT_STREQ("DefaultMaterial_vertexColor", name.C_Str());
+    aiColor4D base;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_BASE_COLOR, base));
+    EXPECT_NEAR(0.18f, base.r, 1e-6f);
+}
+
 TEST_F(utUSDImport, texturedCubeWithLightAndCameraValidates) {
     // D7: lights and cameras get nodes with their names.
     Assimp::Importer importer;
