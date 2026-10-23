@@ -838,8 +838,6 @@ ADD_ASSIMP_IMPORTER( USD
   AssetLib/USD/USDLoader.h
   AssetLib/USD/USDLoaderImplLightUSD.cpp
   AssetLib/USD/USDLoaderImplLightUSD.h
-  AssetLib/USD/USDLoaderUtil.cpp
-  AssetLib/USD/USDLoaderUtil.h
 )
 
 ADD_ASSIMP_IMPORTER( X
@@ -1056,7 +1054,12 @@ IF (ASSIMP_USD_ENABLED)
             cmake_policy(SET CMP0169 OLD)
         endif ()
         FetchContent_Populate(lightusd)
+        # assimp builds its C sources as C99, but LightUSD's bundled C code
+        # (nanoimage) uses C11's max_align_t.
+        set(_assimp_c_standard ${CMAKE_C_STANDARD})
+        set(CMAKE_C_STANDARD 11)
         add_subdirectory(${lightusd_SOURCE_DIR} ${lightusd_BINARY_DIR} EXCLUDE_FROM_ALL)
+        set(CMAKE_C_STANDARD ${_assimp_c_standard})
     endif ()
     set(LightUSD_INCLUDE_DIRS "${lightusd_SOURCE_DIR}/src")
     MESSAGE(STATUS "LightUSD enabled (${LIGHTUSD_GIT_TAG})")
@@ -1774,9 +1777,10 @@ TARGET_INCLUDE_DIRECTORIES ( assimp PUBLIC
 
 IF (ASSIMP_USD_ENABLED)
   # LightUSD's headers stay private to assimp; its static library is linked
-  # into assimp (and exported with it for static installs).
+  # into assimp (and exported with it for static installs). The plain
+  # signature is required: assimp's other target_link_libraries calls use it.
   TARGET_INCLUDE_DIRECTORIES(assimp PRIVATE ${LightUSD_INCLUDE_DIRS})
-  TARGET_LINK_LIBRARIES(assimp PRIVATE $<BUILD_INTERFACE:lightusd_static>)
+  TARGET_LINK_LIBRARIES(assimp $<BUILD_INTERFACE:lightusd_static>)
 ENDIF()
 
 IF(ASSIMP_HUNTER_ENABLED)
