@@ -1,0 +1,56 @@
+name: USD validation
+
+# Builds the LightUSD-based USD importer and exporter, runs the USD unit tests,
+# then exports a fixture matrix to USDA, USDC and USDZ and validates every
+# output with OpenUSD: usd-core 25.8 runs the ARKit ComplianceChecker
+# (`usdchecker --arkit`), usd-core 26.11 runs every UsdValidation validator.
+# Errors and warnings both fail; see scripts/usd/validate-exports.sh.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  usd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v5
+    - name: Install build tools
+      run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ninja-build ccache
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: usd-validation
+    - name: Configure
+      run: >-
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        -DASSIMP_BUILD_TESTS=ON -DASSIMP_BUILD_ASSIMP_TOOLS=ON
+        -DASSIMP_BUILD_USD_IMPORTER=ON -DASSIMP_BUILD_USD_EXPORTER=ON
+        -DASSIMP_BUILD_ASSBIN_EXPORTER=ON -DASSIMP_BUILD_ASSXML_EXPORTER=ON
+        -DASSIMP_WARNINGS_AS_ERRORS=OFF
+    - name: Build
+      run: cmake --build build --target unit assimp_cmd
+    - name: USD unit tests
+      run: cd build/bin && ./unit --gtest_filter='*USD*:*Usd*:*usd*'
+    - name: Install usd-core 25.8 and 26.11
+      run: |
+        python3 -m venv /tmp/usd25 && /tmp/usd25/bin/python -m pip install --quiet usd-core==25.8
+        python3 -m venv /tmp/usd26 && /tmp/usd26/bin/python -m pip install --quiet usd-core==26.11
+    - name: Export and validate the USD matrix
+      env:
+        USD_PYTHON_ARKIT: /tmp/usd25/bin/python
+        USD_PYTHON_LATEST: /tmp/usd26/bin/python
+      run: scripts/usd/validate-exports.sh build/bin/assimp /tmp/usd-matrix
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: usd-matrix
+        path: /tmp/usd-matrix
+        if-no-files-found: warn

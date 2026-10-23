@@ -26,5 +26,17 @@ each a separate commit intended for upstream:
 - No per-load threading warning.
 - USDZ packages with a USDA root get a base directory, not a filename.
 - The MaterialX `vector3` type is accepted for `normal`.
+- `.mtlx` documents converted to USD keep their shader inputs and connect
+  each Material's `outputs:mtlx:surface` to its surface shader.
+- An unresolved subLayer honours `error_when_asset_not_found`.
+- Tydra skips an invalid geometry prim, or a malformed BlendShape, with a
+  warning instead of failing the scene (`MeshConverterConfig::skip_invalid_geometry`).
+- Material, Shader and NodeGraph nodes are tagged `NodeCategory::Material`.
+- Dense BlendShapes (no `pointIndices`) convert, and `ShapeTarget::abs_path`
+  holds the full prim path.
+- LightUSD's C sources build as C11.
+- The USDC writer stores token, string and asset index arrays uncompressed,
+  as OpenUSD does, and keeps attribute metadata (interpolation, elementSize)
+  on Points and BasisCurves.
 
 When a fix lands upstream, rebase the branch and drop it here.

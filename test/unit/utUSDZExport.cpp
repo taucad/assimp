@@ -192,16 +192,29 @@ public:
 
 class ScopedLog {
 public:
+    // Attach to the logger the test runner installed rather than replacing it:
+    // killing that logger would free the C-API stream Main.cpp detaches at exit.
     ScopedLog() {
-        DefaultLogger::create("", Logger::NORMAL, 0);
+        mOwnsLogger = DefaultLogger::isNullLogger();
+        if (mOwnsLogger) {
+            DefaultLogger::create("", Logger::NORMAL, 0);
+        }
         mStream = new LogCapture;
         DefaultLogger::get()->attachStream(mStream, Logger::Warn | Logger::Err | Logger::Info);
     }
-    ~ScopedLog() { DefaultLogger::kill(); }
+    ~ScopedLog() {
+        if (mOwnsLogger) {
+            DefaultLogger::kill();
+        } else {
+            DefaultLogger::get()->detachStream(mStream);
+            delete mStream;
+        }
+    }
     const std::string &Text() const { return mStream->text; }
 
 private:
     LogCapture *mStream = nullptr;
+    bool mOwnsLogger = false;
 };
 
 aiMesh *MakeTriangle(const char *name) {

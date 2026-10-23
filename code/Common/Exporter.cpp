@@ -424,15 +424,6 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         const Exporter::ExportFormatEntry& exp = pimpl->mExporters[i];
         if (!strcmp(exp.mDescription.id,pFormatId)) {
             try {
-                // Always create a full copy of the scene. We might optimize this one day,
-                // but for now it is the most pragmatic way.
-                aiScene* scenecopy_tmp = nullptr;
-                SceneCombiner::CopyScene(&scenecopy_tmp,pScene);
-
-                std::unique_ptr<aiScene> scenecopy(scenecopy_tmp);
-                if (!updateProgress(1)) {
-                    return AI_FAILURE;
-                }
                 const ScenePrivateData* const priv = ScenePriv(pScene);
 
                 if (!strcmp(pFormatId, "3mf") && priv && !priv->mManifoldMeshes.empty()) {
@@ -470,6 +461,23 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                 const unsigned int pp = (exp.mEnforcePP | pPreprocessing) & ~(priv && !priv->mIsCopy
                     ? (priv->mPPStepsApplied & ~nonIdempotentSteps)
                     : 0u);
+
+                // Post-processing works on a copy. Exporters that only read the scene
+                // export the caller's scene directly when nothing has to change, which
+                // saves a full copy of every mesh (the dominant cost for large scenes).
+                const bool readOnlyExporter = !strcmp(pFormatId, "usda") || !strcmp(pFormatId, "usdc") ||
+                        !strcmp(pFormatId, "usdz");
+                const bool needsCopy = !readOnlyExporter || pp != 0 ||
+                        (!is_verbose_format && (exp.mEnforcePP & aiProcess_JoinIdenticalVertices));
+                std::unique_ptr<aiScene> scenecopy;
+                if (needsCopy) {
+                    aiScene* scenecopy_tmp = nullptr;
+                    SceneCombiner::CopyScene(&scenecopy_tmp,pScene);
+                    scenecopy.reset(scenecopy_tmp);
+                }
+                if (!updateProgress(1)) {
+                    return AI_FAILURE;
+                }
 
                 // If no extra post-processing was specified, and we obtained this scene from an
                 // Assimp importer, apply the reverse steps automatically.
@@ -568,7 +576,7 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                 ExportProperties emptyProperties;  // Never pass nullptr ExportProperties so Exporters don't have to worry.
                 ExportProperties* pProp = pProperties ? (ExportProperties*)pProperties : &emptyProperties;
         		pProp->SetPropertyBool("bJoinIdenticalVertices", pp & aiProcess_JoinIdenticalVertices);
-                exp.mExportFunction(pPath,pimpl->mIOSystem.get(),scenecopy.get(), pProp);
+                exp.mExportFunction(pPath,pimpl->mIOSystem.get(),scenecopy ? scenecopy.get() : pScene, pProp);
 
                 // The writer may already have committed output; this is notification only.
                 pimpl->mProgressHandler->UpdateFileWrite(4, 4);

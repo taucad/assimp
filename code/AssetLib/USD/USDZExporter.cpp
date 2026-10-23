@@ -794,11 +794,7 @@ private:
     // ARKit requires a Y-up stage: Z-up (or X-up) sources get a rotation on the root prim
     aiMatrix4x4 mAxisCorrection;
 
-    // LightUSD writes token[] arrays of 16+ elements integer-compressed, which
-    // OpenUSD reads as raw indices; such stages are written uncompressed.
-    bool mLongTokenArrays = false;
     std::vector<luv::token> Tokens(const std::vector<std::string> &names) {
-        mLongTokenArrays = mLongTokenArrays || names.size() >= 16;
         return ToTokens(names);
     }
 
@@ -1633,9 +1629,8 @@ void UsdExporter::ConvertPointsGeometry(const aiMesh *mesh, lu::GeomPoints &usd)
     // USD's fallback width is one scene unit; use a size relative to the cloud.
     const float diag = nv > 0 ? static_cast<float>((hi - lo).Length()) : 0.0f;
     const float width = diag > 0 ? diag * 0.002f : 0.01f;
-    // per-point widths: LightUSD's USDC writer drops the interpolation metadata
-    // of Points attributes, so a constant width would read as a short array
-    usd.widths.set_value(MakeAnimatable(std::vector<float>(nv, width)));
+    usd.widths.set_value(MakeAnimatable(std::vector<float>{ width }));
+    usd.widths.metas().set_interpolation_enum(lu::Interpolation::Constant);
     if (nv > 0) {
         lu::Extent extent;
         extent.lower = { { static_cast<float>(lo.x - width), static_cast<float>(lo.y - width), static_cast<float>(lo.z - width) } };
@@ -2976,8 +2971,8 @@ void UsdExporter::WriteFile(const std::string &name, const uint8_t *data, size_t
 }
 
 bool UsdExporter::SaveCrate(const lu::Stage &stage, std::vector<uint8_t> &out, std::string &err) {
-    // lu::usdc::SaveAsUSDCToMemory with one change: compression is turned off
-    // when the stage has long token arrays (see mLongTokenArrays).
+    // lu::usdc::SaveAsUSDCToMemory, with the size and memory limits and float
+    // array compression under the exporter's control.
     auto stream = std::unique_ptr<lu::experimental::MemoryOutputStream>(new lu::experimental::MemoryOutputStream());
     lu::experimental::MemoryOutputStream *buffer = stream.get();
     lu::experimental::CrateWriter writer(std::unique_ptr<lu::experimental::IOutputStream>(std::move(stream)));
@@ -2985,16 +2980,13 @@ bool UsdExporter::SaveCrate(const lu::Stage &stage, std::vector<uint8_t> &out, s
     opts.version_major = 0;
     opts.version_minor = 8;
     opts.version_patch = 0;
-    opts.enable_compression = !mLongTokenArrays;
+    opts.enable_compression = true;
     opts.enable_deduplication = true;
     // lossless (exact-integer and lookup-table codings), readable by OpenUSD (P8)
-    opts.enable_float_array_compression = mOpts.compressFloatArrays && !mLongTokenArrays;
+    opts.enable_float_array_compression = mOpts.compressFloatArrays;
     opts.max_file_size_bytes = mOpts.maxFileBytes;
     opts.max_memory_bytes = mOpts.maxMemoryBytes;
     writer.SetOptions(opts);
-    if (mLongTokenArrays) {
-        ASSIMP_LOG_INFO("USD export: USDC written without array compression (token arrays of 16+ elements)");
-    }
     if (!writer.Open(&err) || !writer.ConvertStageToSpecs(stage, &err) || !writer.Finalize(&err)) {
         return false;
     }

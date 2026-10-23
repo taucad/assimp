@@ -1020,7 +1020,7 @@ IF (ASSIMP_USD_ENABLED)
     if (ASSIMP_BUILD_USD_VERBOSE_LOGS)
         ADD_DEFINITIONS( -DASSIMP_USD_VERBOSE_LOGS)
     endif ()
-    set(LIGHTUSD_GIT_TAG "984f05b56bad6cdf80446c26cc7355bc1198f59c")
+    set(LIGHTUSD_GIT_TAG "a959b89f0cf663b7f3d1816571c016a8fd982b7f")
 
     include(FetchContent)
     FetchContent_Declare(
@@ -1057,9 +1057,6 @@ IF (ASSIMP_USD_ENABLED)
         endif ()
         FetchContent_Populate(lightusd)
         add_subdirectory(${lightusd_SOURCE_DIR} ${lightusd_BINARY_DIR} EXCLUDE_FROM_ALL)
-        # LightUSD's bundled C sources (nanoimage) use C11 max_align_t, while
-        # assimp sets CMAKE_C_STANDARD 99 globally.
-        set_target_properties(lightusd_static PROPERTIES C_STANDARD 11)
     endif ()
     set(LightUSD_INCLUDE_DIRS "${lightusd_SOURCE_DIR}/src")
     MESSAGE(STATUS "LightUSD enabled (${LIGHTUSD_GIT_TAG})")
