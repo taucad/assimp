@@ -710,12 +710,12 @@ if (NOT ASSIMP_NO_EXPORT)
     AssetLib/Step/StepExporter.h
     AssetLib/Step/StepExporter.cpp)
 
-  if (ASSIMP_BUILD_USD_IMPORTER)
+  # The USD exporter follows the USD importer switch unless it is requested
+  # explicitly, so builds without USD do not fetch LightUSD.
+  if (ASSIMP_BUILD_USD_IMPORTER OR ASSIMP_BUILD_USD_EXPORTER)
     ADD_ASSIMP_EXPORTER( USD
       AssetLib/USD/USDZExporter.h
       AssetLib/USD/USDZExporter.cpp
-      AssetLib/USD/USDZExporterHelper.h
-      AssetLib/USD/USDZExporterHelper.cpp
       AssetLib/USD/usdz-writer.hh
       AssetLib/USD/usdz-writer.cc)
   else()
@@ -836,10 +836,8 @@ ADD_ASSIMP_IMPORTER( 3D
 ADD_ASSIMP_IMPORTER( USD
   AssetLib/USD/USDLoader.cpp
   AssetLib/USD/USDLoader.h
-  AssetLib/USD/USDLoaderImplTinyusdz.cpp
-  AssetLib/USD/USDLoaderImplTinyusdz.h
-  AssetLib/USD/USDLoaderImplTinyusdzHelper.cpp
-  AssetLib/USD/USDLoaderImplTinyusdzHelper.h
+  AssetLib/USD/USDLoaderImplLightUSD.cpp
+  AssetLib/USD/USDLoaderImplLightUSD.h
   AssetLib/USD/USDLoaderUtil.cpp
   AssetLib/USD/USDLoaderUtil.h
 )
@@ -1006,125 +1004,65 @@ ELSE() # IF (ASSIMP_BUILD_VRML_IMPORTER)
     MESSAGE(STATUS "VRML disabled")
 ENDIF() # IF (ASSIMP_BUILD_VRML_IMPORTER)
 
-# USD/USDA/USDC/USDZ support
-# tinyusdz
-IF (ASSIMP_BUILD_USD_IMPORTER)
+# USD/USDA/USDC/USDZ support, through LightUSD (formerly TinyUSDZ)
+# https://github.com/lighttransport/LightUSD
+#
+# The pin is a commit on the `lightusd` branch of taucad/tinyusdz, which is
+# GitHub's fork of lighttransport/LightUSD carrying fixes Tau needs until they
+# land upstream (see contrib/lightusd/README.md). Always pin a full commit SHA.
+# Set FETCHCONTENT_SOURCE_DIR_LIGHTUSD to build against a local checkout.
+SET(ASSIMP_USD_ENABLED OFF)
+separate_arguments(_assimp_usd_exporters UNIX_COMMAND "${ASSIMP_EXPORTERS_ENABLED}")
+IF (ASSIMP_BUILD_USD_IMPORTER OR (USD IN_LIST _assimp_usd_exporters))
+  SET(ASSIMP_USD_ENABLED ON)
+ENDIF()
+IF (ASSIMP_USD_ENABLED)
     if (ASSIMP_BUILD_USD_VERBOSE_LOGS)
         ADD_DEFINITIONS( -DASSIMP_USD_VERBOSE_LOGS)
     endif ()
-    # Use CMAKE_CURRENT_SOURCE_DIR which provides assimp-local path (CMAKE_SOURCE_DIR is
-    # relative to top-level/main project)
-    set(Tinyusdz_BASE_ABSPATH "${CMAKE_CURRENT_SOURCE_DIR}/../contrib/tinyusdz")
-    set(Tinyusdz_REPO_ABSPATH "${Tinyusdz_BASE_ABSPATH}/autoclone")
+    set(LIGHTUSD_GIT_TAG "984f05b56bad6cdf80446c26cc7355bc1198f59c")
 
-    # Note: ALWAYS specify a git commit hash (or tag) instead of a branch name; using a branch
-    #       name can lead to non-deterministic (unpredictable) results since the code is potentially
-    #       in flux
-    # "release" branch on taucad fork, 17 Apr 2026 - merged with upstream lighttransport/release
-    # (11a2d361) and includes:
-    #   - 48e327dd: Fix UsdUVTexture serialization (wrapS/wrapT labels, boolalpha, inputs:st type)
-    #   - f385e5fe: Skip degenerate faces in mesh conversion (ARM32 NEON stubs reverted in 23d5718b)
-    #   - a852eb09: Merge upstream lighttransport/tinyusdz release (11a2d361, NRVO fix)
-    #   - 23d5718b: Remove obsolete ARM32 NEON stub workaround (upstream stb already covers it)
-    #   - 67a2d664: Complete std::boolalpha coverage for Animatable<bool> + broaden pprint tests
-    set(TINYUSDZ_GIT_TAG "67a2d664acc0c7d3d263887b3d65f332287d63e2")
-    message("****")
-    message("\n\n**** Cloning tinyusdz repo, git tag ${TINYUSDZ_GIT_TAG}\n\n")
-
-    # Note: CMake's "FetchContent" (which executes at configure time) is much better for this use case
-    #       than "ExternalProject" (which executes at build time); we just want to clone a repo and
-    #       block (wait) as long as necessary until cloning is complete, so we immediately have full
-    #       access to the cloned source files
     include(FetchContent)
-    # Only want to clone once (on Android, using SOURCE_DIR will clone per-ABI (x86, x86_64 etc))
-    set(FETCHCONTENT_BASE_DIR ${Tinyusdz_REPO_ABSPATH})
-    set(FETCHCONTENT_QUIET on) # Turn off to troubleshoot repo clone problems
-    set(FETCHCONTENT_UPDATES_DISCONNECTED on) # Prevent other ABIs from re-cloning/re-patching etc
     FetchContent_Declare(
-            tinyusdz_repo
-            EXCLUDE_FROM_ALL TRUE
+            lightusd
             GIT_REPOSITORY "https://github.com/taucad/tinyusdz"
-            GIT_TAG        ${TINYUSDZ_GIT_TAG}
+            GIT_TAG        ${LIGHTUSD_GIT_TAG}
+            GIT_SHALLOW    FALSE
     )
-    FetchContent_MakeAvailable(tinyusdz_repo)
-    message("**** Finished cloning tinyusdz repo")
-    message("****")
-
-    set(Tinyusdz_SRC_ABSPATH "${Tinyusdz_REPO_ABSPATH}/tinyusdz_repo-src/src")
-    set(Tinyusdz_SRCS
-            ${Tinyusdz_SRC_ABSPATH}/ascii-parser.cc
-            ${Tinyusdz_SRC_ABSPATH}/ascii-parser-basetype.cc
-            ${Tinyusdz_SRC_ABSPATH}/ascii-parser-timesamples.cc
-            ${Tinyusdz_SRC_ABSPATH}/ascii-parser-timesamples-array.cc
-            ${Tinyusdz_SRC_ABSPATH}/asset-resolution.cc
-            ${Tinyusdz_SRC_ABSPATH}/composition.cc
-            ${Tinyusdz_SRC_ABSPATH}/crate-format.cc
-            ${Tinyusdz_SRC_ABSPATH}/crate-pprint.cc
-            ${Tinyusdz_SRC_ABSPATH}/crate-reader.cc
-            ${Tinyusdz_SRC_ABSPATH}/image-loader.cc
-            ${Tinyusdz_SRC_ABSPATH}/image-util.cc
-            ${Tinyusdz_SRC_ABSPATH}/image-writer.cc
-            ${Tinyusdz_SRC_ABSPATH}/io-util.cc
-            ${Tinyusdz_SRC_ABSPATH}/linear-algebra.cc
-            ${Tinyusdz_SRC_ABSPATH}/path-util.cc
-            ${Tinyusdz_SRC_ABSPATH}/pprinter.cc
-            ${Tinyusdz_SRC_ABSPATH}/prim-composition.cc
-            ${Tinyusdz_SRC_ABSPATH}/prim-reconstruct.cc
-            ${Tinyusdz_SRC_ABSPATH}/prim-types.cc
-            ${Tinyusdz_SRC_ABSPATH}/primvar.cc
-            ${Tinyusdz_SRC_ABSPATH}/stage.cc
-            ${Tinyusdz_SRC_ABSPATH}/str-util.cc
-            ${Tinyusdz_SRC_ABSPATH}/tiny-format.cc
-            ${Tinyusdz_SRC_ABSPATH}/tinyusdz.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/attribute-eval.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/attribute-eval-typed.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/attribute-eval-typed-animatable.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/attribute-eval-typed-animatable-fallback.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/attribute-eval-typed-fallback.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/facial.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/prim-apply.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/render-data.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/scene-access.cc
-            ${Tinyusdz_SRC_ABSPATH}/tydra/shader-network.cc
-            ${Tinyusdz_SRC_ABSPATH}/usda-reader.cc
-            ${Tinyusdz_SRC_ABSPATH}/usda-writer.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdc-reader.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdc-writer.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdGeom.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdLux.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdMtlx.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdShade.cc
-            ${Tinyusdz_SRC_ABSPATH}/usdSkel.cc
-            ${Tinyusdz_SRC_ABSPATH}/value-pprint.cc
-            ${Tinyusdz_SRC_ABSPATH}/value-types.cc
-            ${Tinyusdz_SRC_ABSPATH}/xform.cc
-    )
-
-    set(Tinyusdz_DEP_SOURCES
-            ${Tinyusdz_SRC_ABSPATH}/external/fpng.cpp
-            #${Tinyusdz_SRC_ABSPATH}/external/staticstruct.cc
-            #${Tinyusdz_SRC_ABSPATH}/external/string_id/database.cpp
-            #${Tinyusdz_SRC_ABSPATH}/external/string_id/error.cpp
-            #${Tinyusdz_SRC_ABSPATH}/external/string_id/string_id.cpp
-            #${Tinyusdz_SRC_ABSPATH}/external/tinyxml2/tinyxml2.cpp
-            ${Tinyusdz_SRC_ABSPATH}/integerCoding.cpp
-            ${Tinyusdz_SRC_ABSPATH}/lz4-compression.cc
-            ${Tinyusdz_SRC_ABSPATH}/lz4/lz4.c
-    )
-
-    set(tinyusdz_INCLUDE_DIRS "${Tinyusdz_SRC_ABSPATH}")
-    INCLUDE_DIRECTORIES(${tinyusdz_INCLUDE_DIRS})
-    SOURCE_GROUP( Contrib\\Tinyusdz
-            FILES
-            ${Tinyusdz_SRCS}
-            ${Tinyusdz_DEP_SOURCES}
-    )
-    MESSAGE(STATUS "tinyusdz enabled")
-ELSE() # IF (ASSIMP_BUILD_USD_IMPORTER)
-    set(Tinyusdz_SRCS "")
-    set(Tinyusdz_DEP_SOURCES "")
-    MESSAGE(STATUS "tinyusdz disabled")
-ENDIF() # IF (ASSIMP_BUILD_USD_IMPORTER)
+    FetchContent_GetProperties(lightusd)
+    if (NOT lightusd_POPULATED)
+        # Only the library: every optional feature assimp does not use is
+        # forced off, which keeps the WebAssembly binary small. USDVOL and
+        # ZSTD stay on because Tydra and tinyvdb link against them
+        # unconditionally (LightUSD upstream defects).
+        foreach(_lightusd_off BUILD_TESTS BUILD_EXAMPLES BUILD_TOOLS BUILD_BENCHMARKS
+                WITH_C_API WITH_PXR_COMPAT_API WITH_USD_TO_GLTF WITH_JSON WITH_USDOBJ
+                WITH_USDFBX WITH_USDVOX WITH_AUDIO WITH_EXR WITH_TIFF WITH_TEXTOOLS
+                WITH_COLORIO WITH_COROUTINE WITH_MESHOPT WITH_PYTHON USE_CCACHE)
+            set(LIGHTUSD_${_lightusd_off} OFF CACHE BOOL "" FORCE)
+        endforeach()
+        foreach(_lightusd_on WITH_TYDRA WITH_USDMTLX WITH_USDVOL WITH_ZSTD_COMPRESSION
+                NO_WERROR PRODUCTION_BUILD)
+            set(LIGHTUSD_${_lightusd_on} ON CACHE BOOL "" FORCE)
+        endforeach()
+        if (EMSCRIPTEN)
+            set(LIGHTUSD_ENABLE_THREAD OFF CACHE BOOL "" FORCE)
+        else ()
+            set(LIGHTUSD_ENABLE_THREAD ON CACHE BOOL "" FORCE)
+        endif ()
+        if (POLICY CMP0169)
+            # add_subdirectory with EXCLUDE_FROM_ALL needs the one-argument
+            # FetchContent_Populate form.
+            cmake_policy(SET CMP0169 OLD)
+        endif ()
+        FetchContent_Populate(lightusd)
+        add_subdirectory(${lightusd_SOURCE_DIR} ${lightusd_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif ()
+    set(LightUSD_INCLUDE_DIRS "${lightusd_SOURCE_DIR}/src")
+    MESSAGE(STATUS "LightUSD enabled (${LIGHTUSD_GIT_TAG})")
+ELSE()
+    MESSAGE(STATUS "LightUSD disabled")
+ENDIF()
 
 # Web-IFC support (Web-IFC ONLY - no old implementation)
 IF (ASSIMP_BUILD_IFC_IMPORTER)
@@ -1712,8 +1650,6 @@ SET( assimp_src
   ${open3dgc_SRCS}
   ${ziplib_SRCS}
   ${Meshlab_SRCS}
-  ${Tinyusdz_SRCS}
-  ${Tinyusdz_DEP_SOURCES}
   ${WebIFC_SRCS}
   ${Lib3MF_SRCS}
   ${Pugixml_SRCS}
@@ -1835,6 +1771,13 @@ TARGET_INCLUDE_DIRECTORIES ( assimp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/../include>
   $<INSTALL_INTERFACE:${ASSIMP_INCLUDE_INSTALL_DIR}>
 )
+
+IF (ASSIMP_USD_ENABLED)
+  # LightUSD's headers stay private to assimp; its static library is linked
+  # into assimp (and exported with it for static installs).
+  TARGET_INCLUDE_DIRECTORIES(assimp PRIVATE ${LightUSD_INCLUDE_DIRS})
+  TARGET_LINK_LIBRARIES(assimp PRIVATE $<BUILD_INTERFACE:lightusd_static>)
+ENDIF()
 
 IF(ASSIMP_HUNTER_ENABLED)
   TARGET_LINK_LIBRARIES(assimp

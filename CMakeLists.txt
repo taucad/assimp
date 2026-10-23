@@ -53,10 +53,8 @@ CMAKE_MINIMUM_REQUIRED( VERSION 3.22 )
 OPTION(ASSIMP_BUILD_M3D_IMPORTER "Enable M3D file import" off)
 OPTION(ASSIMP_BUILD_M3D_EXPORTER "Enable M3D file export" off)
 
-# Experimental USD importer: disabled, need to opt-in
-# Note: assimp github PR automatic checks will fail the PR due to compiler warnings in
-# the external, 3rd party tinyusdz code which isn't technically part of the PR since it's
-# auto-cloned during build; so MUST disable the feature or the PR will be rejected
+# USD importer (LightUSD, fetched at configure time): opt-in. The USD exporter
+# follows this switch unless ASSIMP_BUILD_USD_EXPORTER is set explicitly.
 OPTION(ASSIMP_BUILD_USD_IMPORTER "Enable USD file import" off)
 OPTION(ASSIMP_BUILD_USD_VERBOSE_LOGS "Enable verbose USD import debug logging" off)
 
