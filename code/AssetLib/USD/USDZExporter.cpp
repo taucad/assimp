@@ -111,6 +111,31 @@ namespace {
 namespace lu = lightusd;
 namespace luv = lightusd::value;
 
+bool SameValue(float a, float b) {
+    return a == b;
+}
+
+bool SameValue(const luv::color3f &a, const luv::color3f &b) {
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+/// Un-authors a UsdPreviewSurface input whose only opinion is the schema's
+/// own fallback, so a value that only reached the scene as an importer's
+/// default is not written back (export(import(export(x))) == export(x)).
+template <class T>
+void DropFallbackValue(lu::TypedAttributeWithFallback<lu::Animatable<T>> &attr,
+        const lu::TypedAttributeWithFallback<lu::Animatable<T>> &unauthored, const T &fallback) {
+    if (attr.has_connections() || attr.is_blocked() || !attr.has_value()) {
+        return;
+    }
+    const lu::Animatable<T> &anim = attr.get_value();
+    T value;
+    if (anim.has_timesamples() || !anim.get_default(&value) || !SameValue(value, fallback)) {
+        return;
+    }
+    attr = unauthored;
+}
+
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRadToDeg = 180.0 / kPi;
 
@@ -977,8 +1002,17 @@ void UsdExporter::PlanSkeleton() {
         const aiMatrix4x4 &meshWorld = mNodes[mMeshUsers[m].front()].world;
         for (unsigned b = 0; b < mesh->mNumBones; ++b) {
             const aiBone *bone = mesh->mBones[b];
-            const int j = skel.jointOfNode[FindNode(bone->mName.C_Str())];
-            const aiMatrix4x4 bind = invParent * meshWorld * Inverse(bone->mOffsetMatrix);
+            const int boneNode = FindNode(bone->mName.C_Str());
+            const int j = skel.jointOfNode[boneNode];
+            aiMatrix4x4 bind = invParent * meshWorld * Inverse(bone->mOffsetMatrix);
+            // Bound at its rest pose (the usual case): take the bind pose from
+            // the node transforms, which round-trip exactly as restTransforms,
+            // rather than from the inverted offset matrix, which gains a
+            // rounding error on every export/import pass.
+            const aiMatrix4x4 restBind = invParent * mNodes[boneNode].world;
+            if (NearlyEqual(bind, restBind, static_cast<ai_real>(1e-4))) {
+                bind = restBind;
+            }
             if (!skel.bindSet[j]) {
                 skel.bind[j] = bind;
                 skel.bindSet[j] = true;
@@ -1700,21 +1734,27 @@ void UsdExporter::AddSkinning(unsigned meshIndex, lu::GeomMesh &usd) {
     std::vector<std::pair<float, int32_t>> scratch(influences);
     for (unsigned v = 0; v < nv; ++v) {
         const size_t base = size_t(v) * influences;
-        float sum = 0.0f;
+        double sum = 0.0;
         for (uint32_t i = 0; i < influences; ++i) {
             scratch[i] = { jointWeights[base + i], jointIndices[base + i] };
             sum += jointWeights[base + i];
         }
-        if (sum <= 0.0f) {
+        if (sum <= 0.0) {
             ++unweighted;
             jointIndices[base] = 0;
             jointWeights[base] = 1.0f;
             continue;
         }
-        std::stable_sort(scratch.begin(), scratch.end(),
-                [](const std::pair<float, int32_t> &a, const std::pair<float, int32_t> &b) { return a.first > b.first; });
+        // Heaviest first, ties by joint, so the order does not depend on the
+        // source's bone order.
+        std::sort(scratch.begin(), scratch.end(), [](const std::pair<float, int32_t> &a, const std::pair<float, int32_t> &b) {
+            return a.first != b.first ? a.first > b.first : a.second < b.second;
+        });
+        // Renormalise only weights that do not already sum to one: dividing
+        // by a float sum of ~1 changes the last bit on every export.
+        const bool normalize = std::abs(sum - 1.0) > 1e-5;
         for (uint32_t i = 0; i < influences; ++i) {
-            jointWeights[base + i] = scratch[i].first / sum;
+            jointWeights[base + i] = normalize ? static_cast<float>(scratch[i].first / sum) : scratch[i].first;
             jointIndices[base + i] = scratch[i].first > 0.0f ? scratch[i].second : 0;
         }
     }
@@ -2409,8 +2449,12 @@ std::string UsdExporter::MaterialPath(unsigned materialIndex, bool vertexColor) 
     aiString matName;
     mScene->mMaterials[materialIndex]->Get(AI_MATKEY_NAME, matName);
     std::string base = matName.length > 0 ? std::string(matName.C_Str()) : "Material";
-    if (vertexColor) {
-        base += "_vertexColor";
+    static const std::string kVertexColorSuffix = "_vertexColor";
+    const bool suffixed = base.size() > kVertexColorSuffix.size() &&
+                          base.compare(base.size() - kVertexColorSuffix.size(), kVertexColorSuffix.size(), kVertexColorSuffix) == 0;
+    if (vertexColor && !suffixed) {
+        // A material re-imported from this exporter already carries the suffix.
+        base += kVertexColorSuffix;
     }
     const std::string name = mMaterialNames.Claim(base, "Material");
     const std::string path = mMaterialsPath + "/" + name;
@@ -2790,6 +2834,22 @@ lu::Prim UsdExporter::BuildMaterial(unsigned materialIndex, bool vertexColor, co
         }
     }
 
+    {
+        const lu::UsdPreviewSurface fresh;
+        DropFallbackValue(surface.diffuseColor, fresh.diffuseColor, luv::color3f{ 0.18f, 0.18f, 0.18f });
+        DropFallbackValue(surface.emissiveColor, fresh.emissiveColor, luv::color3f{ 0.0f, 0.0f, 0.0f });
+        DropFallbackValue(surface.specularColor, fresh.specularColor, luv::color3f{ 0.0f, 0.0f, 0.0f });
+        DropFallbackValue(surface.metallic, fresh.metallic, 0.0f);
+        DropFallbackValue(surface.roughness, fresh.roughness, 0.5f);
+        DropFallbackValue(surface.clearcoat, fresh.clearcoat, 0.0f);
+        DropFallbackValue(surface.clearcoatRoughness, fresh.clearcoatRoughness, 0.01f);
+        DropFallbackValue(surface.opacity, fresh.opacity, 1.0f);
+        DropFallbackValue(surface.opacityThreshold, fresh.opacityThreshold, 0.0f);
+        DropFallbackValue(surface.ior, fresh.ior, 1.5f);
+        DropFallbackValue(surface.displacement, fresh.displacement, 0.0f);
+        DropFallbackValue(surface.occlusion, fresh.occlusion, 1.0f);
+    }
+
     // ---- assemble
     lu::Material material;
     surface.outputsSurface.set_authored(true);
@@ -2949,7 +3009,14 @@ int UsdExporter::RequestTexture(const std::string &path) {
     }
 
     TextureAsset asset;
-    const std::string name = mTextureNames.Claim(SanitizeFileName(FileStem(sourceName), "texture"), "texture");
+    std::string stem = SanitizeFileName(FileStem(sourceName), "texture");
+    const std::string sidecarPrefix = mOutputStem + "_";
+    if (mOpts.format != OutputFormat::USDZ && stem.size() > sidecarPrefix.size() &&
+            stem.compare(0, sidecarPrefix.size(), sidecarPrefix) == 0) {
+        // A sidecar this exporter wrote for the same layer name: keep its name.
+        stem = stem.substr(sidecarPrefix.size());
+    }
+    const std::string name = mTextureNames.Claim(stem, "texture");
     if (mOpts.format == OutputFormat::USDZ) {
         asset.fileName = "textures/" + name + "." + ext;
         asset.assetPath = asset.fileName;

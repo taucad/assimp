@@ -72,10 +72,11 @@ TEST_F(utUSDImport, meshTest) {
     EXPECT_NE(nullptr, scene);
     EXPECT_EQ(1u, scene->mNumMeshes);
     EXPECT_NE(nullptr, scene->mMeshes[0]);
-    // suzanne has face-varying normals and UVs, so every triangle corner is
-    // its own vertex; welding is left to aiProcess_JoinIdenticalVertices.
-    EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
-    EXPECT_EQ(3u * 968u, scene->mMeshes[0]->mNumVertices);
+    // suzanne has face-varying normals and UVs, so every face corner is its
+    // own vertex; welding is left to aiProcess_JoinIdenticalVertices and
+    // triangulation to aiProcess_Triangulate (468 quads and 32 triangles).
+    EXPECT_EQ(500u, scene->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(468u * 4u + 32u * 3u, scene->mMeshes[0]->mNumVertices);
     EXPECT_TRUE(scene->mMeshes[0]->HasNormals());
     EXPECT_TRUE(scene->mMeshes[0]->HasTextureCoords(0));
 }
@@ -83,7 +84,7 @@ TEST_F(utUSDImport, meshTest) {
 TEST_F(utUSDImport, meshJoinIdenticalVerticesWelds) {
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/../models-nonbsd/USD/usdc/suzanne.usdc",
-            aiProcess_ValidateDataStructure | aiProcess_JoinIdenticalVertices);
+            aiProcess_ValidateDataStructure | aiProcess_JoinIdenticalVertices | aiProcess_Triangulate);
     ASSERT_NE(nullptr, scene);
     ASSERT_EQ(1u, scene->mNumMeshes);
     EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
@@ -99,12 +100,13 @@ TEST_F(utUSDImport, skinnedMeshTest) {
     const aiMesh *mesh = scene->mMeshes[0];
     EXPECT_EQ(2, mesh->mNumBones);
 
-    // Check bone names and make sure scene has nodes of the same name
+    // Bones (and their nodes) are named by the joint's leaf name when it is
+    // unique in the skeleton, as the exporter writes joint paths from them.
     EXPECT_EQ(mesh->mBones[0]->mName, aiString("Bone"));
-    EXPECT_EQ(mesh->mBones[1]->mName, aiString("Bone/Bone_001"));
+    EXPECT_EQ(mesh->mBones[1]->mName, aiString("Bone_001"));
 
     EXPECT_NE(nullptr, scene->mRootNode->FindNode("Bone"));
-    EXPECT_NE(nullptr, scene->mRootNode->FindNode("Bone/Bone_001"));
+    EXPECT_NE(nullptr, scene->mRootNode->FindNode("Bone_001"));
 }
 
 TEST_F(utUSDImport, singleAnimationTest) {
@@ -407,7 +409,7 @@ TEST_F(utUSDImport, usdcWithNonUsdExtensionIsDetectedByContent) {
     const aiScene *scene = ReadFromMap(importer, { { "suzanne.bin", usdc } }, "suzanne.bin");
     ASSERT_NE(nullptr, scene) << importer.GetErrorString();
     ASSERT_EQ(1u, scene->mNumMeshes);
-    EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(500u, scene->mMeshes[0]->mNumFaces);
 }
 
 TEST_F(utUSDImport, usdaContentWithUsdcExtensionIsParsedAsText) {
@@ -603,13 +605,13 @@ TEST_F(utUSDImport, degenerateAndOutOfRangeFacesAreSkipped) {
     ASSERT_EQ(1u, scene->mNumMeshes);
     const aiMesh *mesh = scene->mMeshes[0];
     for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
-        ASSERT_EQ(3u, mesh->mFaces[f].mNumIndices);
-        for (unsigned k = 0; k < 3; ++k) {
+        ASSERT_GE(mesh->mFaces[f].mNumIndices, 3u);
+        for (unsigned k = 0; k < mesh->mFaces[f].mNumIndices; ++k) {
             EXPECT_LT(mesh->mFaces[f].mIndices[k], mesh->mNumVertices);
         }
     }
-    // [0,1,2], the quad (two triangles) and [1,2,3] survive; the 2-gon and the 1-gon do not.
-    EXPECT_EQ(4u, mesh->mNumFaces);
+    // [0,1,2], the quad and [1,2,3] survive; the 2-gon and the 1-gon do not.
+    EXPECT_EQ(3u, mesh->mNumFaces);
     // Normals and UVs with the wrong element count are dropped (D4), not read out of bounds.
     EXPECT_FALSE(mesh->HasNormals());
     EXPECT_FALSE(mesh->HasTextureCoords(0));
@@ -764,9 +766,12 @@ def Xform "World"
     ASSERT_NE(nullptr, scene) << importer.GetErrorString();
     ASSERT_EQ(1u, scene->mNumMeshes);
     EXPECT_EQ(3u, scene->mMeshes[0]->mNumVertices);
-    const aiNode *prop = scene->mRootNode->FindNode("Prop");
-    ASSERT_NE(nullptr, prop);
-    EXPECT_EQ(1u, prop->mNumMeshes);
+    // The referenced leaf Mesh prim (no transform of its own) is the mesh of
+    // its parent node, named after the prim.
+    EXPECT_STREQ("Prop", scene->mMeshes[0]->mName.C_Str());
+    const aiNode *world = scene->mRootNode->FindNode("World");
+    ASSERT_NE(nullptr, world);
+    EXPECT_EQ(1u, world->mNumMeshes);
     double unitScale = 0.0;
     EXPECT_TRUE(scene->mMetaData->Get("UnitScaleFactor", unitScale));
     EXPECT_NEAR(0.01, unitScale, 1e-9);
@@ -796,7 +801,7 @@ def Xform "World"
     const aiScene *scene = ReadFromMap(importer, { { "main.usda", main }, { "geo/suzanne.usdc", usdc } }, "main.usda");
     ASSERT_NE(nullptr, scene) << importer.GetErrorString();
     ASSERT_EQ(1u, scene->mNumMeshes);
-    EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(500u, scene->mMeshes[0]->mNumFaces);
     EXPECT_NE(nullptr, scene->mRootNode->FindNode("Monkey"));
 }
 
@@ -833,7 +838,7 @@ over "World"
     const aiScene *scene = ReadFromMap(importer, { { "main.usda", main }, { "layers/geo.usda", geo } }, "main.usda");
     ASSERT_NE(nullptr, scene) << importer.GetErrorString();
     ASSERT_EQ(1u, scene->mNumMeshes);
-    EXPECT_NE(nullptr, scene->mRootNode->FindNode("FromSublayer"));
+    EXPECT_STREQ("FromSublayer", scene->mMeshes[0]->mName.C_Str());
 }
 
 TEST_F(utUSDImport, compositionNestedLayerAnchorsTexturePaths) {

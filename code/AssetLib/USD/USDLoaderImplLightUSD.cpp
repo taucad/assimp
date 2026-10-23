@@ -583,6 +583,17 @@ aiMatrix4x4 ToAiMatrix(const lusd::value::matrix4d &m) {
             static_cast<ai_real>(m.m[0][3]), static_cast<ai_real>(m.m[1][3]), static_cast<ai_real>(m.m[2][3]), static_cast<ai_real>(m.m[3][3]));
 }
 
+bool IsIdentity(const lusd::value::matrix4d &m) {
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            if (m.m[r][c] != (r == c ? 1.0 : 0.0)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 aiColor3D ToAiColor(const tydra::vec3 &c) {
     return aiColor3D(c[0], c[1], c[2]);
 }
@@ -619,6 +630,11 @@ struct PhysicsData {
     aiVector3D gravityDirection;
     bool hasGravityMagnitude = false;
     float gravityMagnitude = 0.0f;
+    /// Prims Tydra reports as plain Xform nodes but that are not scene
+    /// objects of their own; see SceneBuilder::convertNode.
+    std::set<std::string> scopes;
+    std::set<std::string> skeletons;
+    std::set<std::string> skelAnimations;
 };
 
 void AddBool(std::vector<MetaEntry> &m, const char *key, bool b) {
@@ -757,6 +773,14 @@ private:
 
     void collect(const lusd::Prim &prim, const std::string &path) {
         if (prim.as<lusd::Material>() || prim.as<lusd::Shader>() || prim.as<lusd::NodeGraph>()) {
+            return;
+        }
+        if (prim.as<lusd::Scope>()) {
+            mOut.scopes.insert(path);
+        } else if (prim.as<lusd::Skeleton>()) {
+            mOut.skeletons.insert(path);
+        } else if (prim.as<lusd::SkelAnimation>()) {
+            mOut.skelAnimations.insert(path);
             return;
         }
         if (const auto *scene = prim.as<lusd::PhysicsScene>()) {
@@ -1041,7 +1065,9 @@ const float *Fetch(const AttributeView &v, size_t point, size_t faceVertex, size
 // Scene builder
 
 struct SkeletonInfo {
-    std::vector<std::string> jointNames; ///< indexed by joint id
+    /// Node and bone name per joint id: the joint path's leaf name, or the
+    /// whole path where the leaf name is not unique in the skeleton.
+    std::vector<std::string> jointNames;
     std::vector<aiMatrix4x4> bindWorld;  ///< skeleton-space bind transforms
 };
 
@@ -1089,6 +1115,16 @@ private:
             for (size_t j = 0; j < info.bindWorld.size() && j < skel.bind_transforms.size(); ++j) {
                 info.bindWorld[j] = ToAiMatrix(skel.bind_transforms[j]);
             }
+            std::map<std::string, unsigned> leafCount;
+            for (const std::string &path : info.jointNames) {
+                ++leafCount[LeafName(path)];
+            }
+            for (std::string &path : info.jointNames) {
+                const std::string leaf = LeafName(path);
+                if (!leaf.empty() && leafCount[leaf] == 1) {
+                    path = leaf;
+                }
+            }
         }
     }
 
@@ -1122,6 +1158,34 @@ private:
         mMaterials.push_back(mat);
         mDefaultMaterials.emplace(key, index);
         return index;
+    }
+
+    const tydra::UVTexture *textureOf(int32_t textureId) const {
+        if (textureId < 0 || static_cast<size_t>(textureId) >= mRS.textures.size()) {
+            return nullptr;
+        }
+        return &mRS.textures[static_cast<size_t>(textureId)];
+    }
+
+    float scalarFactor(const tydra::ShaderParam<float> &p) const {
+        const tydra::UVTexture *tex = textureOf(p.texture_id);
+        if (tex == nullptr) {
+            return p.value;
+        }
+        switch (tex->connectedOutputChannel) {
+        case tydra::UVTexture::Channel::G: return tex->scale[1];
+        case tydra::UVTexture::Channel::B: return tex->scale[2];
+        case tydra::UVTexture::Channel::A: return tex->scale[3];
+        default: return tex->scale[0];
+        }
+    }
+
+    aiColor3D colorFactor(const tydra::ShaderParam<tydra::vec3> &p) const {
+        const tydra::UVTexture *tex = textureOf(p.texture_id);
+        if (tex == nullptr) {
+            return ToAiColor(p.value);
+        }
+        return aiColor3D(tex->scale[0], tex->scale[1], tex->scale[2]);
     }
 
     void setTexture(aiMaterial *mat, aiTextureType type, int32_t textureId, unsigned &slotCounter) {
@@ -1190,13 +1254,16 @@ private:
             // An input fed by a UsdPrimvarReader_* (e.g. diffuseColor from
             // displayColor) keeps its authored or fallback value here; the
             // per-vertex data itself arrives as vertex colours.
-            const aiColor4D base(s.diffuseColor.value[0], s.diffuseColor.value[1], s.diffuseColor.value[2], s.opacity.value);
+            // A textured input's value is unused in USD; its factor (glTF
+            // semantics) is the UsdUVTexture `scale` of the connected channel.
+            const aiColor3D diffuse = colorFactor(s.diffuseColor);
+            const aiColor4D base(diffuse.r, diffuse.g, diffuse.b, scalarFactor(s.opacity));
             mat->AddProperty(&base, 1, AI_MATKEY_BASE_COLOR);
             mat->AddProperty(&base, 1, AI_MATKEY_COLOR_DIFFUSE);
             setTexture(mat, aiTextureType_BASE_COLOR, s.diffuseColor.texture_id, slots);
             setTexture(mat, aiTextureType_DIFFUSE, s.diffuseColor.texture_id, slots);
 
-            const aiColor3D emissive = ToAiColor(s.emissiveColor.value);
+            const aiColor3D emissive = colorFactor(s.emissiveColor);
             mat->AddProperty(&emissive, 1, AI_MATKEY_COLOR_EMISSIVE);
             setTexture(mat, aiTextureType_EMISSIVE, s.emissiveColor.texture_id, slots);
 
@@ -1205,19 +1272,22 @@ private:
                 mat->AddProperty(&specular, 1, AI_MATKEY_COLOR_SPECULAR);
                 setTexture(mat, aiTextureType_SPECULAR, s.specularColor.texture_id, slots);
             } else {
-                mat->AddProperty(&s.metallic.value, 1, AI_MATKEY_METALLIC_FACTOR);
+                const float metallic = scalarFactor(s.metallic);
+                mat->AddProperty(&metallic, 1, AI_MATKEY_METALLIC_FACTOR);
                 setTexture(mat, aiTextureType_METALNESS, s.metallic.texture_id, slots);
             }
-            mat->AddProperty(&s.roughness.value, 1, AI_MATKEY_ROUGHNESS_FACTOR);
+            const float roughness = scalarFactor(s.roughness);
+            mat->AddProperty(&roughness, 1, AI_MATKEY_ROUGHNESS_FACTOR);
             setTexture(mat, aiTextureType_DIFFUSE_ROUGHNESS, s.roughness.texture_id, slots);
 
-            mat->AddProperty(&s.opacity.value, 1, AI_MATKEY_OPACITY);
+            const float opacity = scalarFactor(s.opacity);
+            mat->AddProperty(&opacity, 1, AI_MATKEY_OPACITY);
             setTexture(mat, aiTextureType_OPACITY, s.opacity.texture_id, slots);
             if (s.opacityThreshold.value > 0.0f) {
                 const aiString mode("MASK");
                 mat->AddProperty(&mode, AI_MATKEY_GLTF_ALPHAMODE);
                 mat->AddProperty(&s.opacityThreshold.value, 1, AI_MATKEY_GLTF_ALPHACUTOFF);
-            } else if (s.opacity.value < 1.0f || s.opacity.is_texture()) {
+            } else if (opacity < 1.0f || s.opacity.is_texture()) {
                 const aiString mode("BLEND");
                 mat->AddProperty(&mode, AI_MATKEY_GLTF_ALPHAMODE);
             }
@@ -1993,6 +2063,7 @@ private:
 
     // --- nodes ---------------------------------------------------------------------------------
     void buildNodes() {
+        collectAnimatedPaths();
         std::unique_ptr<aiNode> root;
         if (mRS.nodes.size() == 1) {
             root.reset(convertNode(mRS.nodes[0], nullptr, aiMatrix4x4()));
@@ -2000,7 +2071,7 @@ private:
             root.reset(new aiNode("root"));
             std::vector<aiNode *> children;
             for (const tydra::Node &n : mRS.nodes) {
-                if (isShadingNode(n)) {
+                if (isNonSceneSubtree(n)) {
                     skipNode(n);
                     continue;
                 }
@@ -2099,6 +2170,33 @@ private:
         return n.category == tydra::NodeCategory::Material;
     }
 
+    /// Prim paths that animation channels target (by path or node index).
+    void collectAnimatedPaths() {
+        std::vector<const tydra::Node *> order;
+        std::vector<const tydra::Node *> stack;
+        for (auto it = mRS.nodes.rbegin(); it != mRS.nodes.rend(); ++it) {
+            stack.push_back(&*it);
+        }
+        while (!stack.empty()) {
+            const tydra::Node *n = stack.back();
+            stack.pop_back();
+            order.push_back(n);
+            for (auto it = n->children.rbegin(); it != n->children.rend(); ++it) {
+                stack.push_back(&*it);
+            }
+        }
+        for (const tydra::AnimationClip &clip : mRS.animations) {
+            for (const tydra::AnimationChannel &ch : clip.channels) {
+                if (!ch.target_prim_path.empty()) {
+                    mAnimatedPaths.insert(ch.target_prim_path);
+                }
+                if (ch.target_node >= 0 && static_cast<size_t>(ch.target_node) < order.size()) {
+                    mAnimatedPaths.insert(order[static_cast<size_t>(ch.target_node)]->abs_path);
+                }
+            }
+        }
+    }
+
     /// Keeps the pre-order numbering (animation targets) for a skipped subtree.
     void skipNode(const tydra::Node &n) {
         mNodeOrder.push_back(nullptr);
@@ -2127,20 +2225,29 @@ private:
         if (!n.abs_path.empty()) {
             mNodeByPath.emplace(n.abs_path, node.get());
         }
-        if (n.nodeType == tydra::NodeType::Mesh && n.id >= 0 && static_cast<size_t>(n.id) < mMeshMap.size()) {
-            const std::vector<unsigned> &meshes = mMeshMap[static_cast<size_t>(n.id)];
-            if (!meshes.empty()) {
-                node->mNumMeshes = static_cast<unsigned>(meshes.size());
-                node->mMeshes = new unsigned[meshes.size()];
-                std::copy(meshes.begin(), meshes.end(), node->mMeshes);
-            }
-        }
+        std::vector<unsigned> meshes = nodeMeshes(n);
         std::vector<aiNode *> children;
         children.reserve(n.children.size());
         try {
             for (const tydra::Node &c : n.children) {
-                if (isShadingNode(c)) {
+                if (isNonSceneSubtree(c)) {
                     skipNode(c);
+                    continue;
+                }
+                if (isFoldableSkeleton(c)) {
+                    // The joints attach here (attachSkeletons) instead of
+                    // under a node for the Skeleton prim itself.
+                    mNodeByPath.emplace(c.abs_path, node.get());
+                    skipNode(c);
+                    continue;
+                }
+                if (isFoldableMesh(c)) {
+                    // A leaf Mesh prim without a transform of its own is this
+                    // node's mesh, as assimp models it: no extra node.
+                    const std::vector<unsigned> m = nodeMeshes(c);
+                    meshes.insert(meshes.end(), m.begin(), m.end());
+                    mNodeOrder.push_back(node.get());
+                    mNodeByPath.emplace(c.abs_path, node.get());
                     continue;
                 }
                 children.push_back(convertNode(c, node.get(), global));
@@ -2151,8 +2258,61 @@ private:
             }
             throw;
         }
+        if (!meshes.empty()) {
+            node->mNumMeshes = static_cast<unsigned>(meshes.size());
+            node->mMeshes = new unsigned[meshes.size()];
+            std::copy(meshes.begin(), meshes.end(), node->mMeshes);
+        }
         attachChildren(node.get(), children);
         return node.release();
+    }
+
+    std::vector<unsigned> nodeMeshes(const tydra::Node &n) const {
+        if (n.nodeType == tydra::NodeType::Mesh && n.id >= 0 && static_cast<size_t>(n.id) < mMeshMap.size()) {
+            return mMeshMap[static_cast<size_t>(n.id)];
+        }
+        return {};
+    }
+
+    /// Material/Shader/NodeGraph and SkelAnimation prims, and Scopes holding
+    /// only such prims (the exporter's `Materials` scope), carry no scene
+    /// object and get no aiNode.
+    bool isNonSceneSubtree(const tydra::Node &n) const {
+        if (isShadingNode(n) || mPhysics.skelAnimations.count(n.abs_path) != 0) {
+            return true;
+        }
+        if (n.nodeType != tydra::NodeType::Xform || n.children.empty() || mPhysics.scopes.count(n.abs_path) == 0) {
+            return false;
+        }
+        for (const tydra::Node &c : n.children) {
+            if (!isNonSceneSubtree(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// A Skeleton prim with no transform of its own and no scene children:
+    /// its joints become nodes under the Skeleton's parent.
+    bool isFoldableSkeleton(const tydra::Node &n) const {
+        if (mPhysics.skeletons.count(n.abs_path) == 0 || n.has_resetXform || !IsIdentity(n.local_matrix) ||
+                mPhysics.primMeta.count(n.abs_path) != 0 || mAnimatedPaths.count(n.abs_path) != 0) {
+            return false;
+        }
+        for (const tydra::Node &c : n.children) {
+            if (!isNonSceneSubtree(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// A Mesh prim with no children, an identity transform, no animation and
+    /// no physics data folds into its parent node.
+    bool isFoldableMesh(const tydra::Node &n) const {
+        return n.nodeType == tydra::NodeType::Mesh && n.children.empty() && !n.has_resetXform && !n.is_instance &&
+               IsIdentity(n.local_matrix) && !nodeMeshes(n).empty() && mAnimatedPaths.count(n.abs_path) == 0 &&
+               mPhysics.primMeta.count(n.abs_path) == 0;
     }
 
     void attachSkeletons() {
@@ -2165,13 +2325,14 @@ private:
             } else {
                 parent = mScene->mRootNode;
             }
-            std::vector<aiNode *> children{ convertJoint(skel.root_node, parent, 0) };
+            std::vector<aiNode *> children{ convertJoint(mSkeletons[s], skel.root_node, parent, 0) };
             attachChildren(parent, children);
         }
     }
 
-    aiNode *convertJoint(const tydra::SkelNode &joint, aiNode *parent, int depth) {
-        std::unique_ptr<aiNode> node(new aiNode(joint.joint_path));
+    aiNode *convertJoint(const SkeletonInfo &info, const tydra::SkelNode &joint, aiNode *parent, int depth) {
+        const bool known = joint.joint_id >= 0 && static_cast<size_t>(joint.joint_id) < info.jointNames.size();
+        std::unique_ptr<aiNode> node(new aiNode(known ? info.jointNames[static_cast<size_t>(joint.joint_id)] : joint.joint_path));
         node->mParent = parent;
         node->mTransformation = ToAiMatrix(joint.rest_transform);
         if (depth > 4096) {
@@ -2180,7 +2341,7 @@ private:
         std::vector<aiNode *> children;
         try {
             for (const tydra::SkelNode &c : joint.children) {
-                children.push_back(convertJoint(c, node.get(), depth + 1));
+                children.push_back(convertJoint(info, c, node.get(), depth + 1));
             }
         } catch (...) {
             for (aiNode *c : children) {
@@ -2521,6 +2682,7 @@ private:
     std::map<const aiMesh *, std::vector<std::string>> mMorphTargets;
     std::map<std::string, size_t> mLightIndex;
     std::vector<aiNode *> mNodeOrder; ///< Tydra pre-order node index -> aiNode
+    std::set<std::string> mAnimatedPaths;
     std::unordered_map<std::string, aiNode *> mNodeByPath;
 
 public:
@@ -2604,6 +2766,8 @@ void ReadScene(const std::string &file, aiScene *scene, IOSystem *io, const Impo
     lusd::USDLoadOptions loadOptions;
     loadOptions.max_memory_limit_in_mb = static_cast<int32_t>(std::min<uint32_t>(maxMB, static_cast<uint32_t>(std::numeric_limits<int32_t>::max())));
     loadOptions.max_allowed_asset_size_in_mb = maxMB;
+    // USDC: children in authored (primChildren) order, not crate path order.
+    loadOptions.preserve_authored_child_order = true;
 
     const std::string baseDir = DirName(file);
     AssetSource source(io, baseDir);
@@ -2662,7 +2826,8 @@ void ReadScene(const std::string &file, aiScene *scene, IOSystem *io, const Impo
         env.asset_resolver = resolver;
         env.asset_resolver.set_current_working_path(resolver.current_working_path());
         env.scene_config.load_texture_assets = true;
-        env.mesh_config.triangulate = true;
+        // Polygons stay polygons; aiProcess_Triangulate is the caller's choice.
+        env.mesh_config.triangulate = false;
         env.mesh_config.compute_normals = false;
         env.mesh_config.compute_tangents_and_binormals = false;
         env.mesh_config.normal_storage = tydra::MeshConverterConfig::NormalStorageFormat::Float3;

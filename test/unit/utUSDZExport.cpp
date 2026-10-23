@@ -57,11 +57,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <regex>
 #include <sstream>
@@ -702,4 +704,77 @@ TEST_F(utUSDZExport, roundTripThroughImporter) {
     }
     fs::remove_all(dir);
 }
+// export(import(export(x))) must reproduce export(x) byte for byte (layer and
+// sidecar textures): the importer folds the exporter's Mesh-under-Xform,
+// Materials scope and Skeleton prims back into the assimp structures they came
+// from, and the exporter writes nothing an import only defaulted.
+namespace {
+
+std::map<std::string, std::vector<char>> ReadTree(const std::filesystem::path &dir) {
+    std::map<std::string, std::vector<char>> files;
+    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+        std::ifstream in(entry.path(), std::ios::binary);
+        files[entry.path().filename().string()] =
+                std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    return files;
+}
+
+struct FixedPointCase {
+    const char *model;
+    const char *format;
+};
+
+class utUSDExportFixedPoint : public ::testing::TestWithParam<FixedPointCase> {};
+
+} // namespace
+
+TEST_P(utUSDExportFixedPoint, reexportIsByteIdentical) {
+    namespace fs = std::filesystem;
+    const FixedPointCase c = GetParam();
+    const fs::path dir = fs::temp_directory_path() / "assimp_usd_fixed_point" /
+                         (fs::path(c.model).stem().string() + "_" + c.format);
+    fs::remove_all(dir);
+    std::string source = std::string(ASSIMP_TEST_MODELS_DIR) + "/" + c.model;
+    for (int pass = 1; pass <= 2; ++pass) {
+        const fs::path passDir = dir / ("p" + std::to_string(pass));
+        fs::create_directories(passDir);
+        Importer importer;
+        const aiScene *scene = importer.ReadFile(source, 0u);
+        ASSERT_NE(nullptr, scene) << "pass " << pass << ": " << importer.GetErrorString();
+        Exporter exporter;
+        const fs::path out = passDir / (std::string("out.") + c.format);
+        ASSERT_EQ(AI_SUCCESS, exporter.Export(scene, c.format, out.string())) << exporter.GetErrorString();
+        source = out.string();
+    }
+    const auto first = ReadTree(dir / "p1");
+    const auto second = ReadTree(dir / "p2");
+    ASSERT_EQ(first.size(), second.size());
+    for (const auto &file : first) {
+        auto it = second.find(file.first);
+        ASSERT_NE(second.end(), it) << file.first;
+        EXPECT_TRUE(file.second == it->second) << c.model << " (" << c.format << "): " << file.first << " differs";
+    }
+    fs::remove_all(dir);
+}
+
+INSTANTIATE_TEST_SUITE_P(USD, utUSDExportFixedPoint,
+        ::testing::Values(FixedPointCase{ "glTF2/simple_skin/quad_skin.glb", "usda" },
+                FixedPointCase{ "glTF2/simple_skin/quad_skin.glb", "usdc" },
+                FixedPointCase{ "glTF2/CesiumMan/CesiumMan.glb", "usda" },
+                FixedPointCase{ "glTF2/CesiumMan/CesiumMan.glb", "usdc" },
+                FixedPointCase{ "glTF2/BoxTextured-glTF-Binary/BoxTextured.glb", "usda" },
+                FixedPointCase{ "glTF2/BoxTextured-glTF-Binary/BoxTextured.glb", "usdc" },
+                FixedPointCase{ "OBJ/box.obj", "usda" },
+                FixedPointCase{ "OBJ/box.obj", "usdc" }),
+        [](const ::testing::TestParamInfo<FixedPointCase> &info) {
+            std::string name = std::filesystem::path(info.param.model).stem().string() + "_" + info.param.format;
+            for (char &ch : name) {
+                if (!std::isalnum(static_cast<unsigned char>(ch))) {
+                    ch = '_';
+                }
+            }
+            return name;
+        });
+
 #endif
