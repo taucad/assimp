@@ -182,16 +182,9 @@ if(ASSIMP_BUILD_USD_IMPORTER)
   )
 endif()
 
-# The USDZ export round-trip test needs the exporter, which has its own switch.
-set(_ASSIMP_USD_EXPORTER_ON OFF)
-if(NOT ASSIMP_NO_EXPORT)
-  if(DEFINED ASSIMP_BUILD_USD_EXPORTER)
-    set(_ASSIMP_USD_EXPORTER_ON ${ASSIMP_BUILD_USD_EXPORTER})
-  elseif(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT)
-    set(_ASSIMP_USD_EXPORTER_ON ON)
-  endif()
-endif()
-if(ASSIMP_BUILD_USD_IMPORTER AND _ASSIMP_USD_EXPORTER_ON)
+# The exporter tests need only the exporter; round-trip checks that re-import
+# the output are compiled when the importer is built too.
+if(ASSIMP_USD_EXPORTER_ENABLED)
   list( APPEND IMPORTERS
     unit/utUSDZExport.cpp
   )
@@ -256,6 +249,11 @@ add_executable( unit
     ${POST_PROCESSES}
     ${TOOLS}
 )
+
+# code/ defines the ASSIMP_BUILD_NO_* switches for the library only.
+if(NOT ASSIMP_BUILD_USD_IMPORTER)
+  target_compile_definitions(unit PRIVATE ASSIMP_BUILD_NO_USD_IMPORTER)
+endif()
 
 if(ASSIMP_HUNTER_ENABLED)
     hunter_add_package(GTest)

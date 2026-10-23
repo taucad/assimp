@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "Main.h"
 
 #include <assimp/ProgressHandler.hpp>
+#include <assimp/config.h>
 #include <iostream>
 
 class ConsoleProgressHandler : public ProgressHandler {
@@ -334,7 +335,8 @@ const aiScene* ImportModel(
 bool ExportModel(const aiScene* pOut,
 	const ImportData& imp,
 	const std::string& path,
-	const char* pID)
+	const char* pID,
+	const std::string& sourceFile)
 {
 	// Attach log streams
 	if (imp.log) {
@@ -356,7 +358,14 @@ bool ExportModel(const aiScene* pOut,
 
 	// do the actual export, measure time
 	const clock_t first = clock();
-	const aiReturn res = globalExporter->Export(pOut,pID,path);
+	// exporters that copy external textures (USD) resolve them against the
+	// source asset's directory
+	Assimp::ExportProperties props;
+	const std::string::size_type slash = sourceFile.find_last_of("/\\");
+	if (slash != std::string::npos) {
+		props.SetPropertyString(AI_CONFIG_EXPORT_USD_SOURCE_DIRECTORY, sourceFile.substr(0, slash));
+	}
+	const aiReturn res = globalExporter->Export(pOut, pID, path, 0u, &props);
 
 	if (imp.showLog) {
 		PrintHorBar();

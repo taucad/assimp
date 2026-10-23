@@ -158,7 +158,8 @@ const aiScene* ImportModel(
 bool ExportModel(const aiScene* pOut,
 	const ImportData& imp,
 	const std::string& path,
-	const char* pID);
+	const char* pID,
+	const std::string& sourceFile = std::string());
 
 #endif
 

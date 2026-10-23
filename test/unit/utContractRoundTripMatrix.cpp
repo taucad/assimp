@@ -76,6 +76,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -279,9 +280,37 @@ aiVector3D scanX3DPointAttr(const std::string &path) {
     return aiVector3D(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
 }
 
+// USD authors geometry in source units (`metersPerUnit`) and always declares
+// Y-up, carrying a Z-up or X-up source as a rotation on the root prim. The
+// scanner applies the first (root) `xformOp:transform` and `metersPerUnit`
+// so the extent is in metres, Y-up, like the other targets.
 aiVector3D scanUsdaPointArray(const std::string &path) {
     std::ifstream in(path);
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto numbersIn = [](std::string text) {
+        for (char &c : text) {
+            if (c == ',' || c == '(' || c == ')') c = ' ';
+        }
+        std::istringstream iss(text);
+        std::vector<double> values;
+        double v;
+        while (iss >> v) values.push_back(v);
+        return values;
+    };
+    double metersPerUnit = 1.0;
+    const size_t mpu = content.find("metersPerUnit = ");
+    if (mpu != std::string::npos) {
+        metersPerUnit = std::atof(content.c_str() + mpu + 16);
+    }
+    // row-vector convention: p' = p * M
+    std::vector<double> m = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const std::string xfAnchor = "matrix4d xformOp:transform = (";
+    const size_t xf = content.find(xfAnchor);
+    if (xf != std::string::npos) {
+        const size_t end = content.find('\n', xf);
+        const std::vector<double> values = numbersIn(content.substr(xf + xfAnchor.size(), end - xf - xfAnchor.size()));
+        if (values.size() == 16) m = values;
+    }
     aiVector3D mn(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
                   std::numeric_limits<float>::max());
     aiVector3D mx(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
@@ -294,27 +323,22 @@ aiVector3D scanUsdaPointArray(const std::string &path) {
         if (blockPos == std::string::npos) break;
         size_t blockEnd = content.find(']', blockPos);
         if (blockEnd == std::string::npos) break;
-        std::string block = content.substr(blockPos, blockEnd - blockPos);
-        size_t triCursor = 0;
-        while (true) {
-            size_t open = block.find('(', triCursor);
-            if (open == std::string::npos) break;
-            size_t close = block.find(')', open);
-            if (close == std::string::npos) break;
-            std::string triplet = block.substr(open + 1, close - open - 1);
-            std::replace(triplet.begin(), triplet.end(), ',', ' ');
-            std::istringstream iss(triplet);
-            float x, y, z;
-            if (iss >> x >> y >> z) {
-                mn.x = std::min(mn.x, x);
-                mn.y = std::min(mn.y, y);
-                mn.z = std::min(mn.z, z);
-                mx.x = std::max(mx.x, x);
-                mx.y = std::max(mx.y, y);
-                mx.z = std::max(mx.z, z);
-                found = true;
+        const std::vector<double> values =
+                numbersIn(content.substr(blockPos + blockAnchor.size(), blockEnd - blockPos - blockAnchor.size()));
+        for (size_t i = 0; i + 2 < values.size(); i += 3) {
+            const double p[3] = { values[i], values[i + 1], values[i + 2] };
+            float q[3];
+            for (int c = 0; c < 3; ++c) {
+                q[c] = static_cast<float>((p[0] * m[0 * 4 + c] + p[1] * m[1 * 4 + c] + p[2] * m[2 * 4 + c] + m[12 + c]) *
+                                          metersPerUnit);
             }
-            triCursor = close + 1;
+            mn.x = std::min(mn.x, q[0]);
+            mn.y = std::min(mn.y, q[1]);
+            mn.z = std::min(mn.z, q[2]);
+            mx.x = std::max(mx.x, q[0]);
+            mx.y = std::max(mx.y, q[1]);
+            mx.z = std::max(mx.z, q[2]);
+            found = true;
         }
         blockCursor = blockEnd + 1;
     }
@@ -383,9 +407,9 @@ const std::vector<ExporterTarget> &exporterTargets() {
         // round-trips cleanly is a one-line table edit.
         // X3D — m + Y-up canonical; importer is too lossy for axis check.
         { "x3d", "x3d", { "m_yup", 1.0, 1 }, false, &scanX3DPointAttr },
-        // USDA — m + Y-up canonical; importer round-trip is lossy and
-        // some configurations crash inside aiProcess_ValidateDataStructure
-        // on USD's own re-imports. Token scan is the reliable assertion.
+        // USDA — source units with metersPerUnit and a Y-up stage (the
+        // root prim carries any axis rotation); the scanner resolves both
+        // to metres + Y-up.
         { "usda", "usda", { "m_yup", 1.0, 1 }, false, &scanUsdaPointArray },
     };
     return targets;

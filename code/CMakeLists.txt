@@ -718,6 +718,8 @@ if (NOT ASSIMP_NO_EXPORT)
       AssetLib/USD/USDZExporter.cpp
       AssetLib/USD/usdz-writer.hh
       AssetLib/USD/usdz-writer.cc)
+    # test/ builds the exporter tests only when the exporter is compiled
+    set(ASSIMP_USD_EXPORTER_ENABLED ${ASSIMP_EXPORTER_ENABLED} PARENT_SCOPE)
   else()
     add_definitions(-DASSIMP_BUILD_NO_USD_EXPORTER)
   endif()
@@ -1054,12 +1056,10 @@ IF (ASSIMP_USD_ENABLED)
             cmake_policy(SET CMP0169 OLD)
         endif ()
         FetchContent_Populate(lightusd)
-        # assimp builds its C sources as C99, but LightUSD's bundled C code
-        # (nanoimage) uses C11's max_align_t.
-        set(_assimp_c_standard ${CMAKE_C_STANDARD})
-        set(CMAKE_C_STANDARD 11)
         add_subdirectory(${lightusd_SOURCE_DIR} ${lightusd_BINARY_DIR} EXCLUDE_FROM_ALL)
-        set(CMAKE_C_STANDARD ${_assimp_c_standard})
+        # LightUSD's bundled C sources (nanoimage) use C11 max_align_t, while
+        # assimp sets CMAKE_C_STANDARD 99 globally.
+        set_target_properties(lightusd_static PROPERTIES C_STANDARD 11)
     endif ()
     set(LightUSD_INCLUDE_DIRS "${lightusd_SOURCE_DIR}/src")
     MESSAGE(STATUS "LightUSD enabled (${LIGHTUSD_GIT_TAG})")

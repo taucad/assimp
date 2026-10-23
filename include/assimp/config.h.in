@@ -1571,6 +1571,71 @@ enum aiComponent
  */
 #define AI_CONFIG_EXPORT_BLOB_NAME "EXPORT_BLOB_NAME"
 
+// ---------------------------------------------------------------------------
+/** @brief USD exporters (usda, usdc, usdz): export animations.
+ *
+ * Property type: Bool. Default value: true.
+ */
+#define AI_CONFIG_EXPORT_USD_ANIMATIONS "USDZ_EXPORT_ANIMATIONS"
+
+/** @brief USD exporters: index of the animation to export when the scene's
+ * animations target the same channels. Animations that target disjoint
+ * channels are merged onto one timeline; USD has a single timeline per stage.
+ *
+ * Property type: Integer. Default value: 0.
+ */
+#define AI_CONFIG_EXPORT_USD_ANIMATION_INDEX "USD_EXPORT_ANIMATION_INDEX"
+
+/** @brief USD exporters: map clearcoat factors and textures to UsdPreviewSurface.
+ *
+ * Property type: Bool. Default value: true.
+ */
+#define AI_CONFIG_EXPORT_USD_CLEARCOAT "USDZ_EXPORT_CLEARCOAT"
+
+/** @brief USDZ exporter: keep lights. ARKit allows no UsdLux prims, so USDZ
+ * packages drop lights unless this is set. USDA and USDC always keep them.
+ *
+ * Property type: Bool. Default value: false.
+ */
+#define AI_CONFIG_EXPORT_USDZ_LIGHTS "USDZ_EXPORT_LIGHTS"
+
+/** @brief USDZ exporter: keep UsdPhysics joint prims. ARKit allows no joint
+ * prim types, so USDZ packages export joint nodes as plain Xforms unless this
+ * is set. USDA and USDC always keep them.
+ *
+ * Property type: Bool. Default value: false.
+ */
+#define AI_CONFIG_EXPORT_USDZ_PHYSICS_JOINTS "USDZ_EXPORT_PHYSICS_JOINTS"
+
+/** @brief USD exporters: directory that relative external texture paths in
+ * the scene are resolved against (normally the source file's directory).
+ * Textures are always read through the exporter's IOSystem.
+ *
+ * Property type: String. Default value: "" (paths are used as given).
+ */
+#define AI_CONFIG_EXPORT_USD_SOURCE_DIRECTORY "USD_EXPORT_SOURCE_DIRECTORY"
+
+/** @brief USD exporters: largest USDC layer the writer may produce, in MiB.
+ * 0 selects the platform default (unlimited natively, 2048 under Emscripten).
+ *
+ * Property type: Integer. Default value: 0.
+ */
+#define AI_CONFIG_EXPORT_USD_MAX_FILE_SIZE_MB "USD_EXPORT_MAX_FILE_SIZE_MB"
+
+/** @brief USD exporters: memory budget of the USDC writer, in MiB.
+ * 0 selects the platform default (unlimited natively, 2048 under Emscripten).
+ *
+ * Property type: Integer. Default value: 0.
+ */
+#define AI_CONFIG_EXPORT_USD_MAX_MEMORY_MB "USD_EXPORT_MAX_MEMORY_MB"
+
+/** @brief USD exporters: use OpenUSD's lossless float-array compression in
+ * USDC layers (integer-valued and low-cardinality float arrays).
+ *
+ * Property type: Bool. Default value: true.
+ */
+#define AI_CONFIG_EXPORT_USD_COMPRESS_FLOAT_ARRAYS "USD_EXPORT_COMPRESS_FLOAT_ARRAYS"
+
 /**
  *  @brief  Specifies a global key factor for scale, float value
  */
