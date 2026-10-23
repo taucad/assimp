@@ -898,8 +898,77 @@ def Xform "root"
     aiString name;
     ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_NAME, name));
     EXPECT_STREQ("Gold_Material", name.C_Str());
+    // The referenced material is connected to its shader, so it imports shaded.
+    aiColor4D base;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_BASE_COLOR, base));
+    EXPECT_NEAR(0.944f, base.r, 1e-4f);
+    EXPECT_NEAR(0.776f, base.g, 1e-4f);
+    EXPECT_NEAR(0.373f, base.b, 1e-4f);
+    float metallic = 0.0f, roughness = 1.0f;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic));
+    EXPECT_NEAR(1.0f, metallic, 1e-6f);
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness));
+    EXPECT_NEAR(0.2f, roughness, 1e-6f);
     // Shader prims are not scene nodes.
     EXPECT_EQ(nullptr, scene->mRootNode->FindNode("OpenPBR_Gold"));
+}
+
+TEST_F(utUSDImport, materialXReferencedStandardSurfaceImportsShaded) {
+    const char *brass = R"(<?xml version="1.0"?>
+<materialx version="1.38" colorspace="lin_rec709">
+  <standard_surface name="SR_brass" type="surfaceshader">
+    <input name="base" type="float" value="1" />
+    <input name="base_color" type="color3" value="1, 0.766, 0.336" />
+    <input name="metalness" type="float" value="1" />
+    <input name="specular_roughness" type="float" value="0.25" />
+  </standard_surface>
+  <surfacematerial name="Brass" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_brass" />
+  </surfacematerial>
+</materialx>
+)";
+    const char *main = R"(#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def Mesh "tri" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Materials/Brass>
+    }
+    def Scope "Looks" (
+        references = @./materials/brass.mtlx@</MaterialX>
+    )
+    {
+    }
+}
+)";
+    Assimp::Importer importer;
+    const aiScene *scene = ReadFromMap(importer, { { "scene.usda", main }, { "materials/brass.mtlx", brass } }, "scene.usda");
+    ASSERT_NE(nullptr, scene) << importer.GetErrorString();
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    const aiMaterial *mat = scene->mMaterials[scene->mMeshes[0]->mMaterialIndex];
+    aiString name;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_NAME, name));
+    EXPECT_STREQ("Brass", name.C_Str());
+    aiColor4D base;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_BASE_COLOR, base));
+    EXPECT_NEAR(1.0f, base.r, 1e-4f);
+    EXPECT_NEAR(0.766f, base.g, 1e-4f);
+    EXPECT_NEAR(0.336f, base.b, 1e-4f);
+    float metallic = 0.0f, roughness = 1.0f;
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic));
+    EXPECT_NEAR(1.0f, metallic, 1e-6f);
+    ASSERT_EQ(aiReturn_SUCCESS, mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness));
+    EXPECT_NEAR(0.25f, roughness, 1e-6f);
+    EXPECT_EQ(nullptr, scene->mRootNode->FindNode("SR_brass"));
+    EXPECT_EQ(nullptr, scene->mRootNode->FindNode("Brass"));
 }
 
 // ------------------------------------------------------------------------------------------------
