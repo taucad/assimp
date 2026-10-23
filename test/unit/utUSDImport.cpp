@@ -60,8 +60,22 @@ TEST_F(utUSDImport, meshTest) {
     EXPECT_NE(nullptr, scene);
     EXPECT_EQ(1u, scene->mNumMeshes);
     EXPECT_NE(nullptr, scene->mMeshes[0]);
-    EXPECT_EQ(1968u, scene->mMeshes[0]->mNumVertices); // Note: suzanne is authored with only 507 vertices, but TinyUSDZ rebuilds the vertex array. see https://github.com/lighttransport/tinyusdz/blob/36f2aabb256b360365989c01a52f839a57dfe2a6/src/tydra/render-data.cc#L2673-L2690 
+    // suzanne has face-varying normals and UVs, so every triangle corner is
+    // its own vertex; welding is left to aiProcess_JoinIdenticalVertices.
     EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
+    EXPECT_EQ(3u * 968u, scene->mMeshes[0]->mNumVertices);
+    EXPECT_TRUE(scene->mMeshes[0]->HasNormals());
+    EXPECT_TRUE(scene->mMeshes[0]->HasTextureCoords(0));
+}
+
+TEST_F(utUSDImport, meshJoinIdenticalVerticesWelds) {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(ASSIMP_TEST_MODELS_DIR "/../models-nonbsd/USD/usdc/suzanne.usdc",
+            aiProcess_ValidateDataStructure | aiProcess_JoinIdenticalVertices);
+    ASSERT_NE(nullptr, scene);
+    ASSERT_EQ(1u, scene->mNumMeshes);
+    EXPECT_EQ(968u, scene->mMeshes[0]->mNumFaces);
+    EXPECT_LT(scene->mMeshes[0]->mNumVertices, 2000u);
 }
 
 TEST_F(utUSDImport, skinnedMeshTest) {
@@ -107,29 +121,16 @@ TEST_F(utUSDImport, blendShapeAnimationTest) {
     // Should have morph mesh channels for blend shapes
     EXPECT_GT(animation->mNumMorphMeshChannels, 0u);
     
-    // Check that we have the correct number of morph channels (2 blend shapes: "thin", "angle")
-    EXPECT_EQ(2u, animation->mNumMorphMeshChannels);
-    
-    // Verify morph channel names
-    bool foundThin = false, foundAngle = false;
-    for (unsigned int i = 0; i < animation->mNumMorphMeshChannels; ++i) {
-        const aiMeshMorphAnim* morphAnim = animation->mMorphMeshChannels[i];
-        EXPECT_NE(nullptr, morphAnim);
-        
-        std::string meshName = morphAnim->mName.C_Str();
-        if (meshName.find("thin") != std::string::npos) {
-            foundThin = true;
-        }
-        if (meshName.find("angle") != std::string::npos) {
-            foundAngle = true;
-        }
-        
-        // Should have time samples (101 frames)
-        EXPECT_GT(morphAnim->mNumKeys, 50u);  // At least 50+ keyframes
+    // One morph channel per animated mesh, named after the mesh's node (as
+    // the glTF importer does); each key carries one weight per blend shape.
+    ASSERT_EQ(1u, animation->mNumMorphMeshChannels);
+    const aiMeshMorphAnim *morphAnim = animation->mMorphMeshChannels[0];
+    ASSERT_NE(nullptr, morphAnim);
+    EXPECT_NE(nullptr, scene->mRootNode->FindNode(morphAnim->mName));
+    EXPECT_GT(morphAnim->mNumKeys, 50u); // 101 authored time samples
+    for (unsigned int k = 0; k < morphAnim->mNumKeys; ++k) {
+        EXPECT_EQ(2u, morphAnim->mKeys[k].mNumValuesAndWeights);
     }
-    
-    EXPECT_TRUE(foundThin) << "Should find 'thin' blend shape animation";
-    EXPECT_TRUE(foundAngle) << "Should find 'angle' blend shape animation";
     
     // Should have meshes with blend shapes
     EXPECT_TRUE(scene->HasMeshes());
@@ -206,18 +207,29 @@ TEST_F(utUSDImport, lightImportTest) {
     EXPECT_NE(nullptr, sphereLight);
     if (sphereLight) {
         EXPECT_EQ(aiLightSource_POINT, sphereLight->mType);
-        EXPECT_NEAR(318.30988f, sphereLight->mAttenuationConstant, 1.0f);  // intensity from USD
-        // Position should be set from the Xform parent: (4.076245, 1.005454, 5.903862)
-        EXPECT_NEAR(4.076245f, sphereLight->mPosition.x, 0.01f);
-        EXPECT_NEAR(1.005454f, sphereLight->mPosition.y, 0.01f);
-        EXPECT_NEAR(5.903862f, sphereLight->mPosition.z, 0.01f);
+        // Physical inverse-square falloff; intensity goes into the colour.
+        EXPECT_NEAR(0.0f, sphereLight->mAttenuationConstant, 1e-6f);
+        EXPECT_NEAR(1.0f, sphereLight->mAttenuationQuadratic, 1e-6f);
+        EXPECT_GT(sphereLight->mColorDiffuse.r, 100.0f); // 318.3 * authored colour
+        // The light sits at its node's origin; the node carries the Xform.
+        const aiNode *node = scene->mRootNode->FindNode(sphereLight->mName);
+        ASSERT_NE(nullptr, node);
+        aiMatrix4x4 world = node->mTransformation;
+        for (const aiNode *p = node->mParent; p != nullptr; p = p->mParent) {
+            world = p->mTransformation * world;
+        }
+        const aiVector3D pos = world * sphereLight->mPosition;
+        EXPECT_NEAR(4.076245f, pos.x, 0.01f);
+        EXPECT_NEAR(1.005454f, pos.y, 0.01f);
+        EXPECT_NEAR(5.903862f, pos.z, 0.01f);
     }
     
     // Verify DomeLight properties  
     EXPECT_NE(nullptr, domeLight);
     if (domeLight) {
         EXPECT_EQ(aiLightSource_AMBIENT, domeLight->mType);  // Dome lights are typically ambient
-        EXPECT_NEAR(1.0f, domeLight->mAttenuationConstant, 0.01f);  // intensity = 1
+        EXPECT_NEAR(1.0f, domeLight->mAttenuationConstant, 0.01f);
+        EXPECT_NEAR(1.0f, domeLight->mColorAmbient.r, 0.01f);  // intensity = 1
     }
 }
 
