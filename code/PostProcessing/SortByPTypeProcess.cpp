@@ -187,17 +187,24 @@ void SortByPTypeProcess::Execute(aiScene *pScene) {
 
         aiFace *const pLastFace = pFirstFace + mesh->mNumFaces;
 
+        // Faces without indices belong to no primitive type: the copy loop
+        // below never emits them, so counting them would leave empty faces
+        // at the end of the polygon mesh. Drop them (FindDegenerates does the
+        // same), warning once per mesh rather than once per face.
         unsigned int numPolyVerts = 0;
+        unsigned int numEmptyFaces = 0;
         for (; pFirstFace != pLastFace; ++pFirstFace) {
-            if (pFirstFace->mNumIndices >= 1 && pFirstFace->mNumIndices <= 3)
+            if (pFirstFace->mNumIndices == 0) {
+                ++numEmptyFaces;
+            } else if (pFirstFace->mNumIndices <= 3) {
                 ++aiNumPerPType[pFirstFace->mNumIndices - 1];
-            else {
+            } else {
                 ++aiNumPerPType[3];
                 numPolyVerts += pFirstFace->mNumIndices;
             }
-            if (pFirstFace->mNumIndices == 0) {
-                ASSIMP_LOG_WARN("Face with 0 indices treated as polygon");
-            }
+        }
+        if (numEmptyFaces != 0) {
+            ASSIMP_LOG_WARN("SortByPTypeProcess: dropped ", numEmptyFaces, " faces with 0 indices from mesh ", mesh->mName.C_Str());
         }
 
         VertexWeightTable *avw = ComputeVertexBoneWeightTable(mesh);
