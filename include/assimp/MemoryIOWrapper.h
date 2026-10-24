@@ -129,6 +129,13 @@ public:
         ai_assert(false); // won't be needed
     }
 
+    /// @brief The whole stream's bytes, so a reader can use them in place
+    /// instead of copying them out; valid while the stream is open (and, for
+    /// a non-owning stream, while its buffer lives).
+    const uint8_t *Contents() const {
+        return buffer;
+    }
+
 private:
     const uint8_t* buffer;
     size_t length,pos;

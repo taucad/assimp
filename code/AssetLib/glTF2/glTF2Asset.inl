@@ -621,10 +621,9 @@ inline void Buffer::Read(Value &obj, Asset &r) {
         if (byteLength > 0) {
             std::string dir = !r.mCurrentAssetDir.empty() ? (r.mCurrentAssetDir.back() == '/' ? r.mCurrentAssetDir : r.mCurrentAssetDir + '/') : "";
 
-            IOStream *file = r.OpenFile(dir + uri, "rb");
+            std::shared_ptr<IOStream> file(r.OpenFile(dir + uri, "rb"));
             if (file) {
-                bool ok = LoadFromStream(*file, byteLength);
-                delete file;
+                bool ok = LoadFromStream(file, byteLength);
 
                 if (!ok)
                     throw DeadlyImportError("GLTF: error while reading referenced file \"", uri, "\"");
@@ -651,6 +650,27 @@ inline bool Buffer::LoadFromStream(IOStream &stream, size_t length, size_t baseO
     if (stream.Read(mData.get(), byteLength, 1) != 1) {
         return false;
     }
+    return true;
+}
+
+inline bool Buffer::LoadFromStream(const std::shared_ptr<IOStream> &stream, size_t length, size_t baseOffset) {
+    // An imported buffer is only read, so the bytes of a memory stream (a
+    // GLB body or a .bin sidecar held by the host) can be used where they
+    // are; the aliasing shared_ptr keeps the stream, and with an owning
+    // stream its bytes, alive for as long as the buffer.
+    const auto *memory = dynamic_cast<const MemoryIOStream *>(stream.get());
+    if (memory == nullptr || memory->Contents() == nullptr) {
+        return LoadFromStream(*stream, length, baseOffset);
+    }
+    const size_t size = stream->FileSize();
+    byteLength = length ? length : size;
+    if (byteLength > size) {
+        throw DeadlyImportError("GLTF: Invalid byteLength exceeds size of actual data.");
+    }
+    if (baseOffset > size || byteLength > size - baseOffset) {
+        return false;
+    }
+    mData = std::shared_ptr<uint8_t>(stream, const_cast<uint8_t *>(memory->Contents() + baseOffset));
     return true;
 }
 
@@ -2222,7 +2242,7 @@ inline void Asset::Load(const std::string &pFile, bool isBinary)
 
     // Fill the buffer instance for the current file embedded contents
     if (mBodyLength > 0) {
-        if (!mBodyBuffer->LoadFromStream(*stream, mBodyLength, mBodyOffset)) {
+        if (!mBodyBuffer->LoadFromStream(stream, mBodyLength, mBodyOffset)) {
             throw DeadlyImportError("GLTF: Unable to read gltf file");
         }
     }

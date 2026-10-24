@@ -503,6 +503,10 @@ public:
 
     bool LoadFromStream(IOStream &stream, size_t length = 0, size_t baseOffset = 0);
 
+    /// As LoadFromStream, but a memory stream's bytes are referenced in place
+    /// (the buffer then keeps the stream open) instead of being copied.
+    bool LoadFromStream(const std::shared_ptr<IOStream> &stream, size_t length = 0, size_t baseOffset = 0);
+
     /// \fn void EncodedRegion_Mark(const size_t pOffset, const size_t pEncodedData_Length, uint8_t* pDecodedData, const size_t pDecodedData_Length, const std::string& pID)
     /// Mark region of "bufferView" as encoded. When data is request from such region then "bufferView" use decoded data.
     /// \param [in] pOffset - offset from begin of "bufferView" to encoded region, in bytes.
