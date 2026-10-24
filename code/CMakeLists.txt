@@ -1020,7 +1020,7 @@ IF (ASSIMP_USD_ENABLED)
     if (ASSIMP_BUILD_USD_VERBOSE_LOGS)
         ADD_DEFINITIONS( -DASSIMP_USD_VERBOSE_LOGS)
     endif ()
-    set(LIGHTUSD_GIT_TAG "5d59802d182bc77b6178b9acf447bc2d1e6a0658")
+    set(LIGHTUSD_GIT_TAG "04e5bde20eeb811f8f38b7d5e2644ae912d98503")
 
     include(FetchContent)
     # Earlier contrib blocks leave FETCHCONTENT_BASE_DIR pointing at their own
@@ -1035,17 +1035,16 @@ IF (ASSIMP_USD_ENABLED)
     FetchContent_GetProperties(lightusd)
     if (NOT lightusd_POPULATED)
         # Only the library: every optional feature assimp does not use is
-        # forced off, which keeps the WebAssembly binary small. USDVOL and
-        # ZSTD stay on because Tydra and tinyvdb link against them
-        # unconditionally (LightUSD upstream defects).
+        # forced off, which keeps the WebAssembly binary small. assimp reads
+        # no volumes and no zstd-compressed USDC, so USDVOL and ZSTD are off.
         foreach(_lightusd_off BUILD_TESTS BUILD_EXAMPLES BUILD_TOOLS BUILD_BENCHMARKS
                 WITH_C_API WITH_PXR_COMPAT_API WITH_USD_TO_GLTF WITH_JSON WITH_USDOBJ
                 WITH_USDFBX WITH_USDVOX WITH_AUDIO WITH_EXR WITH_TIFF WITH_TEXTOOLS
-                WITH_COLORIO WITH_COROUTINE WITH_MESHOPT WITH_PYTHON USE_CCACHE)
+                WITH_COLORIO WITH_COROUTINE WITH_MESHOPT WITH_PYTHON USE_CCACHE
+                WITH_USDVOL WITH_ZSTD_COMPRESSION)
             set(LIGHTUSD_${_lightusd_off} OFF CACHE BOOL "" FORCE)
         endforeach()
-        foreach(_lightusd_on WITH_TYDRA WITH_USDMTLX WITH_USDVOL WITH_ZSTD_COMPRESSION
-                NO_WERROR PRODUCTION_BUILD)
+        foreach(_lightusd_on WITH_TYDRA WITH_USDMTLX NO_WERROR PRODUCTION_BUILD)
             set(LIGHTUSD_${_lightusd_on} ON CACHE BOOL "" FORCE)
         endforeach()
         if (EMSCRIPTEN)
