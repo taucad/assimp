@@ -518,6 +518,15 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         axisRotation = buildAxisRotationMatrix(sourceUpAxis, targetUpAxis);
     }
 
+    // ---- MANIFOLD REQUIREMENT ----
+    // Resolver: ExportProperty `3MF_EXPORT_REQUIRE_MANIFOLD` (bool) → true. 3MF
+    // Core §4.1 requires `model` objects to be manifold and oriented, so by
+    // default a mesh that is not fails the export (the print path). When the
+    // requirement is off, such a mesh is written as an object of type
+    // `other`, which the spec exempts, so open surfaces still convert.
+    const bool requireManifold = pProperties == nullptr ||
+            pProperties->GetPropertyBool("3MF_EXPORT_REQUIRE_MANIFOLD", true);
+
     if (pProperties) {
         std::string app = pProperties->GetPropertyString("3MF_EXPORT_APPLICATION", "");
         if (!app.empty()) {
@@ -635,8 +644,13 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
                 meshObject.as<Lib3MF_MeshObject>(), &manifoldAndOriented),
                 meshObject.get(), "Failed to validate 3MF mesh object");
         if (!manifoldAndOriented) {
-            throw DeadlyExportError("3MF ", source,
-                    " is not manifold and oriented after geometry conversion");
+            if (requireManifold) {
+                throw DeadlyExportError("3MF ", source,
+                        " is not manifold and oriented after geometry conversion"
+                        " (set 3MF_EXPORT_REQUIRE_MANIFOLD to false to write it as an object of type other)");
+            }
+            checkResult(lib3mf_object_settype(meshObject.as<Lib3MF_Object>(), Lib3MF::eObjectType::Other),
+                    meshObject.get(), "Failed to mark a non-manifold mesh object as type other");
         }
 
         if (!materialPropertyIDs.empty() &&
