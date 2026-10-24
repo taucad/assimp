@@ -285,19 +285,26 @@ inline Logger::LogSeverity Logger::getLogSeverity() const {
 } // Namespace Assimp
 
 // ------------------------------------------------------------------------------------------------
+// The arguments are formatted into a string before the logger sees them, so
+// skip the call entirely while no logger is installed (the NullLogger), which
+// keeps per-element messages in hot loops free. An expression, so the macros
+// stay usable wherever a void expression is.
+#define ASSIMP_LOG_IMPL_(method, ...) \
+	(Assimp::DefaultLogger::isNullLogger() ? (void)0 : Assimp::DefaultLogger::get()->method(__VA_ARGS__))
+
 #define ASSIMP_LOG_WARN(...) \
-	Assimp::DefaultLogger::get()->warn(__VA_ARGS__)
+	ASSIMP_LOG_IMPL_(warn, __VA_ARGS__)
 
 #define ASSIMP_LOG_ERROR(...) \
-	Assimp::DefaultLogger::get()->error(__VA_ARGS__)
+	ASSIMP_LOG_IMPL_(error, __VA_ARGS__)
 
 #define ASSIMP_LOG_DEBUG(...) \
-	Assimp::DefaultLogger::get()->debug(__VA_ARGS__)
+	ASSIMP_LOG_IMPL_(debug, __VA_ARGS__)
 
 #define ASSIMP_LOG_VERBOSE_DEBUG(...) \
-	Assimp::DefaultLogger::get()->verboseDebug(__VA_ARGS__)
+	ASSIMP_LOG_IMPL_(verboseDebug, __VA_ARGS__)
 
 #define ASSIMP_LOG_INFO(...) \
-	Assimp::DefaultLogger::get()->info(__VA_ARGS__)
+	ASSIMP_LOG_IMPL_(info, __VA_ARGS__)
 
 #endif // !! INCLUDED_AI_LOGGER_H
