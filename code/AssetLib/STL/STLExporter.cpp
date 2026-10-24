@@ -43,10 +43,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "STLExporter.h"
 #include "Common/IOStreamBuf.h"
 #include "Common/UnitAxisContract.h"
+#include "PostProcessing/ProcessHelper.h"
 #include <assimp/version.h>
 #include <assimp/IOSystem.hpp>
 #include <assimp/scene.h>
 #include <assimp/Exporter.hpp>
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -163,6 +165,16 @@ STLExporter::STLExporter(std::streambuf* out, const char* _filename, const aiSce
             throw DeadlyExportError("STL: a node references a mesh that does not exist");
         }
     }
+    // PretransformVertices grouped the instances by material, then by vertex format, keeping the
+    // node order within a group; keep that facet order so outputs keep their bytes.
+    std::stable_sort(mInstances.begin(), mInstances.end(), [pScene](const Instance &a, const Instance &b) {
+        const aiMesh *ma = pScene->mMeshes[a.mesh];
+        const aiMesh *mb = pScene->mMeshes[b.mesh];
+        if (ma->mMaterialIndex != mb->mMaterialIndex) {
+            return ma->mMaterialIndex < mb->mMaterialIndex;
+        }
+        return GetMeshVFormatUnique(ma) < GetMeshVFormatUnique(mb);
+    });
     // make sure that all formatting happens using the standard, C locale and not the user's current locale
     const std::locale& l = std::locale("C");
     mOutput.imbue(l);
