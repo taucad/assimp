@@ -53,7 +53,6 @@ struct aiNode;
 
 namespace Assimp {
 
-#ifndef ASSIMP_BUILD_NO_3DS_IMPORTER
 
 // --------------------------------------------------------------------------------
 /** Importer class for the 3DS ASE ASCII format.
@@ -187,7 +186,6 @@ protected:
     const Importer *mImporter = nullptr;
 };
 
-#endif // ASSIMP_BUILD_NO_3DS_IMPORTER
 
 } // end of namespace Assimp
 

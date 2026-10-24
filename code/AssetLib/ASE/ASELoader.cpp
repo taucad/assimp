@@ -44,7 +44,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef ASSIMP_BUILD_NO_ASE_IMPORTER
-#ifndef ASSIMP_BUILD_NO_3DS_IMPORTER
 
 // internal headers
 #include "ASELoader.h"
@@ -1286,6 +1285,5 @@ bool ASEImporter::GenerateNormals(ASE::Mesh &mesh) {
 
 }
 
-#endif // ASSIMP_BUILD_NO_3DS_IMPORTER
 
 #endif // !! ASSIMP_BUILD_NO_BASE_IMPORTER
