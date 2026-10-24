@@ -707,10 +707,12 @@ inline bool Buffer::ReplaceData(const size_t pBufferData_Offset, const size_t pB
     // Copy new data.
     ::memcpy(&new_data[pBufferData_Offset], pReplace_Data, pReplace_Count);
     // Copy data which place after replacing part.
-    ::memcpy(&new_data[pBufferData_Offset + pReplace_Count], &mData.get()[pBufferData_Offset + pBufferData_Count], pBufferData_Offset);
+    ::memcpy(&new_data[pBufferData_Offset + pReplace_Count], &mData.get()[pBufferData_Offset + pBufferData_Count],
+            new_data_size - (pBufferData_Offset + pReplace_Count));
     // Apply new data
     mData.reset(new_data, std::default_delete<uint8_t[]>());
     byteLength = new_data_size;
+    capacity = new_data_size;
 
     return true;
 }
@@ -731,6 +733,7 @@ inline bool Buffer::ReplaceData_joint(const size_t pBufferData_Offset, const siz
     // Apply new data
     mData.reset(new_data, std::default_delete<uint8_t[]>());
     byteLength = new_data_size;
+    capacity = new_data_size;
 
     return true;
 }
@@ -757,13 +760,17 @@ inline void Buffer::Grow(size_t amount) {
         return;
     }
 
-    // Just allocate data which we need
-    capacity = byteLength + amount;
+    // Grow geometrically (x1.5) so appending A accessors costs O(total bytes)
+    // instead of copying the whole body once per accessor. Bytes beyond
+    // byteLength are never written out.
+    const size_t needed = byteLength + amount;
+    capacity = std::max(needed, capacity + capacity / 2);
 
-    uint8_t *b = new uint8_t[capacity]();
+    uint8_t *b = new uint8_t[capacity];
     if (nullptr != mData) {
         memcpy(b, mData.get(), byteLength);
     }
+    memset(b + byteLength, 0, capacity - byteLength);
     mData.reset(b, std::default_delete<uint8_t[]>());
     byteLength += amount;
 }

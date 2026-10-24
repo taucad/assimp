@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define AI_PLYEXPORTER_H_INC
 
 #include <sstream>
+#include <streambuf>
 
 struct aiScene;
 struct aiNode;
@@ -59,7 +60,7 @@ namespace Assimp {
 class PlyExporter {
 public:
     /// The class constructor for a specific scene to export
-    PlyExporter(const char* filename, const aiScene* pScene, bool binary = false);
+    PlyExporter(std::streambuf* out, const char* filename, const aiScene* pScene, bool binary = false);
     /// The class destructor, empty.
     ~PlyExporter() = default;
 
@@ -68,7 +69,7 @@ public:
 
 public:
     /// public string-streams to write all output into:
-    std::ostringstream mOutput;
+    std::ostream mOutput;
 
 private:
     void WriteMeshVerts(const aiMesh* m, unsigned int components);

@@ -49,8 +49,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ProcessHelper.h"
 #include <assimp/Vertex.h>
 #include <assimp/TinyFormatter.h>
+#include <assimp/Exceptional.h>
 
 #include <stdio.h>
+#include <cstring>
+#include <cstdint>
 #include <unordered_set>
 #include <unordered_map>
 #include <memory>
@@ -159,6 +162,62 @@ void updateXMeshVertices(XMesh *pMesh, std::vector<int> &uniqueVertices) {
 } // namespace
 
 // ------------------------------------------------------------------------------------------------
+// Index-keyed vertex identity. Hashes and compares exactly the channels that Vertex::operator<
+// compares (position, normal, every present UV set, every present colour set), reading the mesh
+// arrays directly, so the lookup table holds one 32-bit vertex index per slot instead of a
+// 272-byte Vertex per std::map node.
+namespace {
+class VertexIdentity {
+public:
+    explicit VertexIdentity(const aiMesh *mesh) : mMesh(mesh) {
+        mHasNormals = mesh->HasNormals();
+        while (mNumUV < AI_MAX_NUMBER_OF_TEXTURECOORDS && mesh->HasTextureCoords(mNumUV)) ++mNumUV;
+        while (mNumColors < AI_MAX_NUMBER_OF_COLOR_SETS && mesh->HasVertexColors(mNumColors)) ++mNumColors;
+    }
+
+    uint64_t hash(unsigned int i) const {
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        mix3(h, mMesh->mVertices[i]);
+        if (mHasNormals) mix3(h, mMesh->mNormals[i]);
+        for (unsigned int c = 0; c < mNumUV; ++c) mix3(h, mMesh->mTextureCoords[c][i]);
+        for (unsigned int c = 0; c < mNumColors; ++c) {
+            const aiColor4D &col = mMesh->mColors[c][i];
+            mix(h, col.r); mix(h, col.g); mix(h, col.b); mix(h, col.a);
+        }
+        h ^= h >> 33;
+        h *= 0xff51afd7ed558ccdull;
+        h ^= h >> 33;
+        return h;
+    }
+
+    bool equal(unsigned int a, unsigned int b) const {
+        if (mMesh->mVertices[a] != mMesh->mVertices[b]) return false;
+        if (mHasNormals && mMesh->mNormals[a] != mMesh->mNormals[b]) return false;
+        for (unsigned int c = 0; c < mNumUV; ++c) {
+            if (mMesh->mTextureCoords[c][a] != mMesh->mTextureCoords[c][b]) return false;
+        }
+        for (unsigned int c = 0; c < mNumColors; ++c) {
+            if (mMesh->mColors[c][a] != mMesh->mColors[c][b]) return false;
+        }
+        return true;
+    }
+
+private:
+    static void mix(uint64_t &h, ai_real value) {
+        // +0 and -0 compare equal, so they must hash equal.
+        uint64_t bits = 0;
+        if (value != ai_real(0)) std::memcpy(&bits, &value, sizeof(value));
+        h = (h ^ bits) * 0x100000001B3ull;
+        h ^= h >> 29;
+    }
+    static void mix3(uint64_t &h, const aiVector3D &v) { mix(h, v.x); mix(h, v.y); mix(h, v.z); }
+
+    const aiMesh *mMesh;
+    bool mHasNormals = false;
+    unsigned int mNumUV = 0;
+    unsigned int mNumColors = 0;
+};
+} // namespace
 
 static constexpr size_t JOINED_VERTICES_MARK = 0x80000000u;
 
@@ -177,10 +236,19 @@ int JoinVerticesProcess::ProcessMesh( aiMesh* pMesh, unsigned int meshIndex) {
     // multiple meshes)
     std::vector<bool> usedVertexIndicesMask;
     usedVertexIndicesMask.resize(pMesh->mNumVertices, false);
+    size_t numUsedVertices = 0;
     for (unsigned int a = 0; a < pMesh->mNumFaces; a++) {
         aiFace& face = pMesh->mFaces[a];
         for (unsigned int b = 0; b < face.mNumIndices; b++) {
-            usedVertexIndicesMask[face.mIndices[b]] = true;
+            const unsigned int index = face.mIndices[b];
+            if (index >= pMesh->mNumVertices) {
+                throw DeadlyImportError("JoinVerticesProcess: face index ", index, " out of range in mesh ", meshIndex,
+                        " with ", pMesh->mNumVertices, " vertices");
+            }
+            if (!usedVertexIndicesMask[index]) {
+                usedVertexIndicesMask[index] = true;
+                ++numUsedVertices;
+            }
         }
     }
 
@@ -207,38 +275,47 @@ int JoinVerticesProcess::ProcessMesh( aiMesh* pMesh, unsigned int meshIndex) {
             uniqueAnimatedVertices[animMeshIndex].reserve(pMesh->mNumVertices);
         }
     }
-    // a map that maps a vertex to its new index
-    std::map<Vertex, int> vertex2Index = {};
-    // we can not end up with more vertices than we started with
-    // Now check each vertex if it brings something new to the table
+    // Open-addressing table of vertex indices; first occurrence wins, so the output order of
+    // unique vertices is identical to the std::map implementation it replaces.
     int newIndex = 0;
-    for( unsigned int a = 0; a < pMesh->mNumVertices; a++)  {
-        // if the vertex is unused Do nothing
-        if (!usedVertexIndicesMask[a]) {
-            continue;
-        }
-        // collect the vertex data
-        Vertex v(pMesh,a);
-        // is the vertex already in the map?
-        auto it = vertex2Index.find(v);
-        // if the vertex is not in the map then it is a new vertex add it.
-        if (it == vertex2Index.end()) {
-            // this is a new vertex give it a new index
-            vertex2Index.emplace(v, newIndex);
-            // keep track of its index and increment 1
-            replaceIndex[a] = newIndex++;
-            // add the vertex to the unique vertices
-            uniqueVertices.push_back(a);
-            if (hasAnimMeshes) {
-                for (unsigned int animMeshIndex = 0; animMeshIndex < pMesh->mNumAnimMeshes; animMeshIndex++) {
-                    uniqueAnimatedVertices[animMeshIndex].emplace_back(a);
-                }
+    {
+        const VertexIdentity identity(pMesh);
+        // Load factor <= 0.5 over the used vertices: linear probing stays short.
+        size_t capacity = 16;
+        while (capacity < numUsedVertices * 2) capacity <<= 1;
+        const size_t slotMask = capacity - 1;
+        std::vector<unsigned int> table(capacity, 0xffffffffu);
+        uniqueVertices.reserve(numUsedVertices);
+        for (unsigned int a = 0; a < pMesh->mNumVertices; a++) {
+            if (!usedVertexIndicesMask[a]) {
+                continue;
             }
-        } else{
-            // if the vertex is already there just find the replace index that is appropriate to it
-			// mark it with JOINED_VERTICES_MARK
-            replaceIndex[a] = it->second | JOINED_VERTICES_MARK;
+            size_t slot = static_cast<size_t>(identity.hash(a)) & slotMask;
+            for (;;) {
+                const unsigned int existing = table[slot];
+                if (existing == 0xffffffffu) {
+                    table[slot] = a;
+                    replaceIndex[a] = newIndex++;
+                    uniqueVertices.push_back(a);
+                    if (hasAnimMeshes) {
+                        for (unsigned int animMeshIndex = 0; animMeshIndex < pMesh->mNumAnimMeshes; animMeshIndex++) {
+                            uniqueAnimatedVertices[animMeshIndex].emplace_back(a);
+                        }
+                    }
+                    break;
+                }
+                if (identity.equal(existing, a)) {
+                    replaceIndex[a] = replaceIndex[existing] | JOINED_VERTICES_MARK;
+                    break;
+                }
+                slot = (slot + 1) & slotMask;
+            }
         }
+    }
+
+    // Nothing to join and nothing unused: the mesh is already in its final form.
+    if (numUsedVertices == pMesh->mNumVertices && static_cast<unsigned int>(newIndex) == pMesh->mNumVertices) {
+        return pMesh->mNumVertices;
     }
 
     if (!DefaultLogger::isNullLogger() && DefaultLogger::get()->getLogSeverity() == Logger::VERBOSE)    {

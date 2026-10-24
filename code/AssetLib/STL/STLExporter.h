@@ -47,6 +47,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define AI_STLEXPORTER_H_INC
 
 #include <sstream>
+#include <streambuf>
+#include <vector>
+#include "Common/UnitAxisContract.h"
+#include <assimp/matrix3x3.h>
+#include <assimp/mesh.h>
 
 struct aiScene;
 struct aiNode;
@@ -60,19 +65,32 @@ namespace Assimp {
 class STLExporter {
 public:
     /// Constructor for a specific scene to export
-    STLExporter(const char *filename, const aiScene *pScene, bool exportPOintClouds, bool binary = false);
+    STLExporter(std::streambuf *out, const char *filename, const aiScene *pScene, bool exportPOintClouds, bool binary = false,
+            const ContractTransform &contract = ContractTransform());
 
     /// public string-streams to write all output into
-    std::ostringstream mOutput;
+    std::ostream mOutput;
+
+    /// One placement of a mesh in the node hierarchy.
+    struct Instance {
+        unsigned int mesh = 0;
+        aiMatrix4x4 world;
+        aiMatrix3x3 normal;
+        bool identity = true;
+    };
 
 private:
     void WritePointCloud(const std::string &name, const aiScene *pScene);
-    void WriteMesh(const aiMesh *m);
-    void WriteMeshBinary(const aiMesh *m);
+    void WriteMesh(const aiMesh *m, const Instance &instance);
+    void WriteMeshBinary(const aiMesh *m, const Instance &instance);
+    aiVector3D Position(const aiMesh *m, unsigned int index, const Instance &instance) const;
+    aiVector3D FaceNormal(const aiMesh *m, const aiFace &f, const Instance &instance, bool safe) const;
 
 private:
     const std::string filename;
     const std::string endl;
+    ContractTransform mContract;
+    std::vector<Instance> mInstances;
 };
 
 } // namespace Assimp

@@ -51,6 +51,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/matrix4x4.h>
 #include <assimp/Exporter.hpp>
 #include <sstream>
+#include <utility>
+#include <vector>
+#include <streambuf>
 
 
 struct aiScene;
@@ -65,7 +68,7 @@ class StepExporter
 {
 public:
     /// Constructor for a specific scene to export
-    StepExporter(const aiScene* pScene, IOSystem* pIOSystem, const std::string& path, const std::string& file, const ExportProperties* pProperties);
+    StepExporter(std::streambuf* out, const aiScene* pScene, IOSystem* pIOSystem, const std::string& path, const std::string& file, const ExportProperties* pProperties);
 
 protected:
     /// Starts writing the contents
@@ -73,8 +76,8 @@ protected:
 
 public:
 
-    /// Stringstream to write all output into
-    std::stringstream mOutput;
+    /// Stream to write all output into (streams straight to the output file)
+    std::ostream mOutput;
 
 protected:
 
@@ -100,7 +103,9 @@ protected:
     std::map<const aiNode*, aiMatrix4x4> trafos;
 
     /// map to all meshed of nodes
-    typedef std::multimap<const aiNode*, unsigned int> MeshesByNodeMap;
+    // Node/mesh pairs in depth-first order. (A map keyed by node pointer made the vertex order, and so the
+    // output bytes, depend on heap addresses.)
+    typedef std::vector<std::pair<const aiNode*, unsigned int>> MeshesByNodeMap;
     MeshesByNodeMap meshes;
 
 };

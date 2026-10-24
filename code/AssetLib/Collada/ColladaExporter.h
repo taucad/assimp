@@ -51,6 +51,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 #include <map>
 #include <sstream>
+#include <streambuf>
 #include <unordered_set>
 #include <vector>
 
@@ -68,7 +69,7 @@ class IOSystem;
 class ColladaExporter {
 public:
     /// Constructor for a specific scene to export
-    ColladaExporter(const aiScene *pScene, IOSystem *pIOSystem, const std::string &path, const std::string &file);
+    ColladaExporter(std::streambuf *out, const aiScene *pScene, IOSystem *pIOSystem, const std::string &path, const std::string &file);
 
     /// Destructor
     virtual ~ColladaExporter() = default;
@@ -182,8 +183,8 @@ private:
     std::array<IndexIdMap, static_cast<size_t>(AiObjectType::Count)> mObjectNameMap; // Cache of encoded names
 
 public:
-    /// Stringstream to write all output into
-    std::stringstream mOutput;
+    /// Stream to write all output into (streams straight to the output file)
+    std::ostream mOutput;
 
     /// The IOSystem for output
     IOSystem *mIOSystem;

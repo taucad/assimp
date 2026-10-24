@@ -41,6 +41,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if !defined(ASSIMP_BUILD_NO_EXPORT) && !defined(ASSIMP_BUILD_NO_PLY_EXPORTER)
 
 #include "PlyExporter.h"
+#include "Common/IOStreamBuf.h"
 #include "Common/UnitAxisContract.h"
 #include <memory>
 #include <cmath>
@@ -83,35 +84,35 @@ void bakePlyContract(const aiScene *pScene) {
 void ExportScenePly(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* /*pProperties*/) {
     bakePlyContract(pScene);
 
-    // invoke the exporter
-    PlyExporter exporter(pFile, pScene);
-
-    if (exporter.mOutput.fail()) {
-        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
-    }
-
-    // we're still here - export successfully completed. Write the file.
     std::unique_ptr<IOStream> outfile (pIOSystem->Open(pFile,"wt"));
     if (outfile == nullptr) {
         throw DeadlyExportError("could not open output .ply file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(outfile.get());
 
-    outfile->Write( exporter.mOutput.str().c_str(), static_cast<size_t>(exporter.mOutput.tellp()),1);
+    // invoke the exporter, streaming into the output file
+    PlyExporter exporter(&outbuf, pFile, pScene);
+    exporter.mOutput.flush();
+    if (exporter.mOutput.fail() || outbuf.failed()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    }
 }
 
 void ExportScenePlyBinary(const char* pFile, IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* /*pProperties*/) {
     bakePlyContract(pScene);
 
-    // invoke the exporter
-    PlyExporter exporter(pFile, pScene, true);
-
-    // we're still here - export successfully completed. Write the file.
     std::unique_ptr<IOStream> outfile(pIOSystem->Open(pFile, "wb"));
     if (outfile == nullptr) {
         throw DeadlyExportError("could not open output .ply file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(outfile.get());
 
-    outfile->Write(exporter.mOutput.str().c_str(), static_cast<size_t>(exporter.mOutput.tellp()), 1);
+    // invoke the exporter, streaming into the output file
+    PlyExporter exporter(&outbuf, pFile, pScene, true);
+    exporter.mOutput.flush();
+    if (exporter.mOutput.fail() || outbuf.failed()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    }
 }
 
 #define PLY_EXPORT_HAS_NORMALS 0x1
@@ -120,8 +121,8 @@ void ExportScenePlyBinary(const char* pFile, IOSystem* pIOSystem, const aiScene*
 #define PLY_EXPORT_HAS_COLORS (PLY_EXPORT_HAS_TEXCOORDS << AI_MAX_NUMBER_OF_TEXTURECOORDS)
 
 // ------------------------------------------------------------------------------------------------
-PlyExporter::PlyExporter(const char* _filename, const aiScene* pScene, bool binary) : 
-        filename(_filename), endl("\n") {
+PlyExporter::PlyExporter(std::streambuf* out, const char* _filename, const aiScene* pScene, bool binary) :
+        mOutput(out), filename(_filename), endl("\n") {
     // make sure that all formatting happens using the standard, C locale and not the user's current locale
     const std::locale& l = std::locale("C");
     mOutput.imbue(l);
@@ -382,7 +383,7 @@ void PlyExporter::WriteMeshIndices(const aiMesh* m, unsigned int offset) {
 // ------------------------------------------------------------------------------------------------
 // Generic method in case we want to use different data types for the indices or make this configurable.
 template<typename NumIndicesType, typename IndexType>
-void WriteMeshIndicesBinary_Generic(const aiMesh* m, unsigned int offset, std::ostringstream& output) {
+void WriteMeshIndicesBinary_Generic(const aiMesh* m, unsigned int offset, std::ostream& output) {
     for (unsigned int i = 0; i < m->mNumFaces; ++i) {
         const aiFace& f = m->mFaces[i];
         NumIndicesType numIndices = static_cast<NumIndicesType>(f.mNumIndices);

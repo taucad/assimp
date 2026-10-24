@@ -214,6 +214,45 @@ enum class BakeOutcome {
  *  spec frame. Exporters whose target frame is configurable via
  *  `ExportProperty` must resolve the target up-front and pass the result.
  */
+/** The unit/axis transform an exporter targeting (`targetUnitToMeters`,
+ *  `targetUpAxis`) applies, resolved without touching the scene. `active` is
+ *  false exactly when `bakeContractTransformIntoMeshes` skips (it returns
+ *  `Skipped_NoOptIn` or `Skipped_Identity`), so `Exporter::Export` can hand a
+ *  baking exporter the caller's scene whenever the bake would be a no-op, and
+ *  writers can apply the transform per vertex instead of mutating the scene.
+ */
+struct ContractTransform {
+    bool active = false;
+    bool needsScale = false;
+    bool needsRotation = false;
+    float scale = 1.0f;
+    aiMatrix4x4 rotation;
+
+    /** Same arithmetic, in the same order, as the in-place bake of a position. */
+    void applyToPoint(aiVector3D &v) const {
+        if (needsScale) {
+            v.x *= scale;
+            v.y *= scale;
+            v.z *= scale;
+        }
+        if (needsRotation) {
+            applyLinearTransform(rotation, v);
+        }
+    }
+
+    /** Same as the in-place bake of a normal, tangent or bitangent (rotation only). */
+    void applyToDirection(aiVector3D &v) const {
+        if (needsRotation) {
+            applyLinearTransform(rotation, v);
+        }
+    }
+};
+
+ASSIMP_API ContractTransform resolveContractTransform(const aiScene *scene,
+                                                      double targetUnitToMeters,
+                                                      int32_t targetUpAxis,
+                                                      bool requireOptIn = true);
+
 ASSIMP_API BakeOutcome bakeContractTransformIntoMeshes(aiScene *scene,
                                                        double targetUnitToMeters,
                                                        int32_t targetUpAxis,

@@ -44,6 +44,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "AssetLib/Step/StepExporter.h"
 #include "PostProcessing/ConvertToLHProcess.h"
+#include "Common/IOStreamBuf.h"
 
 #include <assimp/Bitmap.h>
 #include <assimp/BaseImporter.h>
@@ -100,17 +101,18 @@ void ExportSceneStep(const char* pFile,IOSystem* pIOSystem, const aiScene* pScen
     // create/copy Properties
     ExportProperties props(*pProperties);
 
-    // invoke the exporter
-    StepExporter iDoTheExportThing( pScene, pIOSystem, path, file, &props);
-
-    // we're still here - export successfully completed. Write result to the given IOSYstem
     std::unique_ptr<IOStream> outfile (pIOSystem->Open(pFile,"wt"));
     if (outfile == nullptr) {
         throw DeadlyExportError("could not open output .stp file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(outfile.get());
 
-    // XXX maybe use a small wrapper around IOStream that behaves like std::stringstream in order to avoid the extra copy.
-    outfile->Write( iDoTheExportThing.mOutput.str().c_str(), static_cast<size_t>(iDoTheExportThing.mOutput.tellp()),1);
+    // invoke the exporter, streaming into the output file
+    StepExporter iDoTheExportThing(&outbuf, pScene, pIOSystem, path, file, &props);
+    iDoTheExportThing.mOutput.flush();
+    if (iDoTheExportThing.mOutput.fail() || outbuf.failed()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    }
 }
 
 } // end of namespace Assimp
@@ -127,9 +129,9 @@ namespace {
     }
 
     // Generate a flat list of the meshes (by index) assigned to each node
-    void CollectMeshes(const aiNode* node, std::multimap<const aiNode*, unsigned int>& meshes) {
+    void CollectMeshes(const aiNode* node, std::vector<std::pair<const aiNode*, unsigned int>>& meshes) {
         for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
-            meshes.insert(std::make_pair(node, node->mMeshes[i]));
+            meshes.emplace_back(node, node->mMeshes[i]);
         }
         for (unsigned int i = 0; i < node->mNumChildren; ++i) {
             CollectMeshes(node->mChildren[i], meshes);
@@ -139,9 +141,9 @@ namespace {
 
 // ------------------------------------------------------------------------------------------------
 // Constructor for a specific scene to export
-StepExporter::StepExporter(const aiScene* pScene, IOSystem* pIOSystem, const std::string& path,
+StepExporter::StepExporter(std::streambuf* out, const aiScene* pScene, IOSystem* pIOSystem, const std::string& path,
     const std::string& file, const ExportProperties* pProperties) :
-    mProperties(pProperties), mIOSystem(pIOSystem), mFile(file), mPath(path),
+    mOutput(out), mProperties(pProperties), mIOSystem(pIOSystem), mFile(file), mPath(path),
     mScene(pScene), endstr(";\n") {
     CollectTrafos(pScene->mRootNode, trafos);
     CollectMeshes(pScene->mRootNode, meshes);

@@ -799,23 +799,37 @@ void ExportAssimp2Json(const char *file, Assimp::IOSystem *io, const aiScene *sc
         throw DeadlyExportError("could not open output file");
     }
 
+    unsigned int flags = JSONWriter::Flag_WriteSpecialFloats;
+    if (pProperties->GetPropertyBool("JSON_SKIP_WHITESPACES", false)) {
+        flags |= JSONWriter::Flag_SkipWhitespaces;
+    }
+
+    // Meshes are split so they fit into a 16 bit index buffer. The splitter leaves meshes at or under
+    // the limit untouched, so the scene is copied only when one of them has to be split.
+    constexpr unsigned int kSplitLimit = 1 << 16;
+    bool needsSplit = false;
+    for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
+        if (scene->mMeshes[i] != nullptr && scene->mMeshes[i]->mNumVertices > kSplitLimit) {
+            needsSplit = true;
+            break;
+        }
+    }
+    if (!needsSplit) {
+        // XXX Flag_WriteSpecialFloats is turned on by default, right now we don't have a configuration interface for exporters
+        JSONWriter s(*str, flags);
+        Write(s, *scene);
+        return;
+    }
+
     // get a copy of the scene so we can modify it
     aiScene *scenecopy_tmp;
     aiCopyScene(scene, &scenecopy_tmp);
 
     try {
-        // split meshes so they fit into a 16 bit index buffer
         MeshSplitter splitter;
-        splitter.SetLimit(1 << 16);
+        splitter.SetLimit(kSplitLimit);
         splitter.Execute(scenecopy_tmp);
 
-        // XXX Flag_WriteSpecialFloats is turned on by default, right now we don't have a configuration interface for exporters
-
-        unsigned int flags = JSONWriter::Flag_WriteSpecialFloats;
-        if (pProperties->GetPropertyBool("JSON_SKIP_WHITESPACES", false)) {
-            flags |= JSONWriter::Flag_SkipWhitespaces;
-        }
-        
         JSONWriter s(*str, flags);
         Write(s, *scenecopy_tmp);
 

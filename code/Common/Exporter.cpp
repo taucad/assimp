@@ -64,13 +64,17 @@ Here we implement only the C++ interface (Assimp::Exporter).
 #include "Common/DefaultProgressHandler.h"
 #include "Common/BaseProcess.h"
 #include "Common/ScenePrivate.h"
+#include "Common/UnitAxisContract.h"
 #include "PostProcessing/CalcTangentsProcess.h"
 #include "PostProcessing/MakeVerboseFormat.h"
 #include "PostProcessing/JoinVerticesProcess.h"
 #include "PostProcessing/ConvertToLHProcess.h"
 #include "PostProcessing/PretransformVertices.h"
 
+#include <cstring>
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace Assimp {
 
@@ -169,10 +173,13 @@ static void setupExporterArray(std::vector<Exporter::ExportFormatEntry> &exporte
 #endif
 
 #ifndef ASSIMP_BUILD_NO_STL_EXPORTER
+	// The STL writer applies node transforms and derives missing face normals itself (the same
+	// arithmetic as PreTransformVertices + GenNormals), so it reads the caller's scene instead of a
+	// pre-transformed, un-indexed, normal-generated copy.
 	exporters.emplace_back("stl", "Stereolithography", "stl", &ExportSceneSTL,
-			aiProcess_Triangulate | aiProcess_GenNormals | aiProcess_PreTransformVertices);
+			aiProcess_Triangulate);
 	exporters.emplace_back("stlb", "Stereolithography (binary)", "stl", &ExportSceneSTLBinary,
-			aiProcess_Triangulate | aiProcess_GenNormals | aiProcess_PreTransformVertices);
+			aiProcess_Triangulate);
 #endif
 
 #ifndef ASSIMP_BUILD_NO_PLY_EXPORTER
@@ -392,6 +399,126 @@ const aiExportDataBlob* Exporter::ExportToBlob( const aiScene* pScene, const cha
 }
 
 // ------------------------------------------------------------------------------------------------
+namespace {
+
+// Users who build scenes from scratch will likely not set AI_SCENE_FLAGS_NON_VERBOSE_FORMAT, so a
+// scene that claims to be indexed is checked for shared vertices. Only needed when a step runs.
+bool IsVerboseScene(const aiScene *pScene) {
+    return !(pScene->mFlags & AI_SCENE_FLAGS_NON_VERBOSE_FORMAT) || MakeVerboseFormatProcess::IsVerboseFormat(pScene);
+}
+
+// Exporters that never modify the scene they are handed, so they read the caller's scene when no
+// post-processing has to run. The ones that bake the unit/axis contract into the meshes in place
+// (`bakeContractTransformIntoMeshes`) stay read-only only while that bake is the identity for their
+// target frame; the others apply any transform into temporaries or while writing.
+struct ReadOnlyExporter {
+    const char *id;
+    bool bakesContract;
+    double targetUnitToMeters;
+    int32_t targetUpAxis;
+};
+
+const ReadOnlyExporter kReadOnlyExporters[] = {
+    { "usda", false, 0.0, 0 },
+    { "usdc", false, 0.0, 0 },
+    { "usdz", false, 0.0, 0 },
+    { "gltf2", false, 0.0, 0 },  // contract, normal normalisation and UV flip go into temporaries
+    { "glb2", false, 0.0, 0 },
+    { "stl", false, 0.0, 0 },    // node transforms, contract and face normals are applied while writing
+    { "stlb", false, 0.0, 0 },
+    { "assjson", false, 0.0, 0 }, // copies the scene itself only when meshes must be split
+    { "stp", false, 0.0, 0 },
+    { "3mf", false, 0.0, 0 },    // the lib3mf bridge bakes node transforms while it writes
+    { "obj", true, 1.0, 1 },
+    { "objnomtl", true, 1.0, 1 },
+    { "ply", true, 1.0, 1 },
+    { "plyb", true, 1.0, 1 },
+    { "collada", true, 1.0, 1 },
+    { "fbx", true, 1e-2, 1 },
+    { "fbxa", true, 1e-2, 1 },
+};
+
+bool IsReadOnlyExport(const aiScene *pScene, const char *pFormatId) {
+    for (const ReadOnlyExporter &entry : kReadOnlyExporters) {
+        if (!strcmp(entry.id, pFormatId)) {
+            return !entry.bakesContract ||
+                   !resolveContractTransform(pScene, entry.targetUnitToMeters, entry.targetUpAxis).active;
+        }
+    }
+    return false;
+}
+
+bool AllMeshes(const aiScene *pScene, bool (*predicate)(const aiMesh *)) {
+    for (unsigned int i = 0; i < pScene->mNumMeshes; ++i) {
+        if (pScene->mMeshes[i] == nullptr || !predicate(pScene->mMeshes[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True when PretransformVertices would hand the PLY writer the same vertex and face data: one mesh,
+// referenced by exactly one node, whose world transform is the identity by the step's own
+// `IsIdentity` test. (The step then copies positions, normals and tangents verbatim, and the PLY
+// writer reads nothing it drops.)
+bool IsPretransformIdentity(const aiScene *pScene) {
+    if (pScene->mNumMeshes != 1 || pScene->mRootNode == nullptr) {
+        return false;
+    }
+    unsigned int references = 0;
+    std::vector<std::pair<const aiNode *, aiMatrix4x4>> stack;
+    stack.emplace_back(pScene->mRootNode, pScene->mRootNode->mTransformation);
+    while (!stack.empty()) {
+        const aiNode *node = stack.back().first;
+        const aiMatrix4x4 world = stack.back().second;
+        stack.pop_back();
+        if (node->mNumMeshes != 0) {
+            references += node->mNumMeshes;
+            if (references > 1 || !world.IsIdentity()) {
+                return false;
+            }
+        }
+        for (unsigned int c = 0; c < node->mNumChildren; ++c) {
+            stack.emplace_back(node->mChildren[c], world * node->mChildren[c]->mTransformation);
+        }
+    }
+    return references == 1;
+}
+
+// Drop enforced steps that provably leave this scene unchanged, so they neither force a scene copy
+// nor un-index it for nothing.
+unsigned int DropNoOpSteps(const aiScene *pScene, const char *pFormatId, unsigned int pp, const ExportProperties *pProperties) {
+    // Normal generation never replaces existing normals unless forced.
+    if ((pp & (aiProcess_GenNormals | aiProcess_GenSmoothNormals)) && !(pp & aiProcess_ForceGenNormals) &&
+            AllMeshes(pScene, [](const aiMesh *m) { return m->HasNormals(); })) {
+        pp &= ~(aiProcess_GenNormals | aiProcess_GenSmoothNormals);
+    }
+    // Triangulation only touches meshes that declare polygons.
+    if ((pp & aiProcess_Triangulate) && AllMeshes(pScene, [](const aiMesh *m) {
+            return m->mPrimitiveTypes != 0 && !(m->mPrimitiveTypes & aiPrimitiveType_POLYGON);
+        })) {
+        pp &= ~aiProcess_Triangulate;
+    }
+    // Sorting by primitive type only splits meshes that mix types.
+    if ((pp & aiProcess_SortByPType) && AllMeshes(pScene, [](const aiMesh *m) {
+            const unsigned int types = m->mPrimitiveTypes & (aiPrimitiveType_POINT | aiPrimitiveType_LINE |
+                                                              aiPrimitiveType_TRIANGLE | aiPrimitiveType_POLYGON);
+            return types != 0 && (types & (types - 1)) == 0;
+        })) {
+        pp &= ~aiProcess_SortByPType;
+    }
+    // The PLY writer reads only mesh arrays, so pre-transforming a lone, untransformed mesh is a copy.
+    const bool pointCloud = pProperties != nullptr && pProperties->GetPropertyBool(AI_CONFIG_EXPORT_POINT_CLOUDS);
+    if ((pp & aiProcess_PreTransformVertices) && !pointCloud &&
+            (!strcmp(pFormatId, "ply") || !strcmp(pFormatId, "plyb")) && IsPretransformIdentity(pScene)) {
+        pp &= ~aiProcess_PreTransformVertices;
+    }
+    return pp;
+}
+
+} // namespace
+
+// ------------------------------------------------------------------------------------------------
 aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const char* pPath,
         unsigned int pPreprocessing, const ExportProperties* pProperties) {
     ASSIMP_BEGIN_EXCEPTION_REGION();
@@ -402,12 +529,6 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
         return AI_FAILURE;
     }
     
-    // when they create scenes from scratch, users will likely create them not in verbose
-    // format. They will likely not be aware that there is a flag in the scene to indicate
-    // this, however. To avoid surprises and bug reports, we check for duplicates in
-    // meshes upfront.
-    const bool is_verbose_format = !(pScene->mFlags & AI_SCENE_FLAGS_NON_VERBOSE_FORMAT) || MakeVerboseFormatProcess::IsVerboseFormat(pScene);
-
     pimpl->mError = "";
     const auto updateProgress = [this](int step) {
         if (!pimpl->mProgressHandler->UpdateFileWrite(step, 4)) {
@@ -458,17 +579,15 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                 const unsigned int nonIdempotentSteps = aiProcess_FlipWindingOrder | aiProcess_FlipUVs | aiProcess_MakeLeftHanded;
 
                 // Erase all pp steps that were already applied to this scene
-                const unsigned int pp = (exp.mEnforcePP | pPreprocessing) & ~(priv && !priv->mIsCopy
+                unsigned int pp = (exp.mEnforcePP | pPreprocessing) & ~(priv && !priv->mIsCopy
                     ? (priv->mPPStepsApplied & ~nonIdempotentSteps)
                     : 0u);
+                pp = DropNoOpSteps(pScene, pFormatId, pp, pProperties);
 
                 // Post-processing works on a copy. Exporters that only read the scene
                 // export the caller's scene directly when nothing has to change, which
                 // saves a full copy of every mesh (the dominant cost for large scenes).
-                const bool readOnlyExporter = !strcmp(pFormatId, "usda") || !strcmp(pFormatId, "usdc") ||
-                        !strcmp(pFormatId, "usdz");
-                const bool needsCopy = !readOnlyExporter || pp != 0 ||
-                        (!is_verbose_format && (exp.mEnforcePP & aiProcess_JoinIdenticalVertices));
+                const bool needsCopy = pp != 0 || !IsReadOnlyExport(pScene, pFormatId);
                 std::unique_ptr<aiScene> scenecopy;
                 if (needsCopy) {
                     aiScene* scenecopy_tmp = nullptr;
@@ -487,9 +606,13 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                 //}
 
                 // If the input scene is not in verbose format, but there is at least post-processing step that relies on it,
-                // we need to run the MakeVerboseFormat step first.
+                // we need to run the MakeVerboseFormat step first. Only an active step justifies un-indexing the
+                // copy: JoinIdenticalVertices enforced by the exporter but already applied by the importer is not
+                // active, and the scene is already in the joined form the exporter asks for. When the copy is
+                // un-indexed for another step, it is joined again afterwards unless JoinIdenticalVertices is itself
+                // one of the active steps (it runs last in the registry).
                 bool must_join_again = false;
-                if (!is_verbose_format) {
+                if (pp != 0 && !IsVerboseScene(pScene)) {
                     bool verbosify = false;
                     for( unsigned int a = 0; a < pimpl->mPostProcessingSteps.size(); a++) {
                         BaseProcess* const p = pimpl->mPostProcessingSteps[a];
@@ -500,13 +623,13 @@ aiReturn Exporter::Export( const aiScene* pScene, const char* pFormatId, const c
                         }
                     }
 
-                    if (verbosify || (exp.mEnforcePP & aiProcess_JoinIdenticalVertices)) {
+                    if (verbosify) {
                         ASSIMP_LOG_DEBUG("export: Scene data not in verbose format, applying MakeVerboseFormat step first");
 
                         MakeVerboseFormatProcess proc;
                         proc.Execute(scenecopy.get());
 
-                        if(!(exp.mEnforcePP & aiProcess_JoinIdenticalVertices)) {
+                        if (!(pp & aiProcess_JoinIdenticalVertices)) {
                             must_join_again = true;
                         }
                     }

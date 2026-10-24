@@ -49,7 +49,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/types.h>
 #include <sstream>
 #include <vector>
-#include <map>
+#include <cstdint>
+#include <cstring>
+#include <utility>
 
 #include <assimp/Exporter.hpp>
 
@@ -65,13 +67,14 @@ namespace Assimp {
 class ObjExporter final {
 public:
     /// Constructor for a specific scene to export
-    ObjExporter(const char* filename, const aiScene* pScene, bool noMtl=false, const ExportProperties* props = nullptr);
+    ObjExporter(std::streambuf* out, const char* filename, const aiScene* pScene, bool noMtl=false, const ExportProperties* props = nullptr);
     ~ObjExporter();
     std::string GetMaterialLibName();
     std::string GetMaterialLibFileName();
 
     /// public string-streams to write all output into
-    std::ostringstream mOutput, mOutputMat;
+    std::ostream mOutput;
+    std::ostringstream mOutputMat;
 
 private:
     // intermediate data structures
@@ -97,7 +100,7 @@ private:
         std::vector<Face> faces;
     };
 
-    void WriteHeader(std::ostringstream& out);
+    void WriteHeader(std::ostream& out);
     void WriteMaterialFile();
     void WriteGeometryFile(bool noMtl=false, bool merge_identical_vertices = false);
     std::string GetMaterialName(unsigned int index);
@@ -119,69 +122,106 @@ private:
     std::vector<vertexData> vp;
     bool useVc;
 
-    struct vertexDataCompare {
-        bool operator() ( const vertexData& a, const vertexData& b ) const {
-            // position
-            if (a.vp.x < b.vp.x) return true;
-            if (a.vp.x > b.vp.x) return false;
-            if (a.vp.y < b.vp.y) return true;
-            if (a.vp.y > b.vp.y) return false;
-            if (a.vp.z < b.vp.z) return true;
-            if (a.vp.z > b.vp.z) return false;
+    // Exact-equality keys (+0 and -0 are equal), hashed bit-wise with -0 folded onto +0.
+    static uint64_t hashFloat(uint64_t h, ai_real value) {
+        uint64_t bits = 0;
+        if (value != ai_real(0)) {
+            std::memcpy(&bits, &value, sizeof(value));
+        }
+        h = (h ^ bits) * 0x100000001B3ull;
+        return h ^ (h >> 29);
+    }
+    static uint64_t finishHash(uint64_t h) {
+        h ^= h >> 33;
+        h *= 0xff51afd7ed558ccdull;
+        return h ^ (h >> 33);
+    }
 
-            // color
-            if (a.vc.r < b.vc.r) return true;
-            if (a.vc.r > b.vc.r) return false;
-            if (a.vc.g < b.vc.g) return true;
-            if (a.vc.g > b.vc.g) return false;
-            if (a.vc.b < b.vc.b) return true;
-            if (a.vc.b > b.vc.b) return false;
-            return a.index < b.index;
+    struct vertexDataHash {
+        uint64_t operator()(const vertexData &v) const {
+            uint64_t h = 0x9E3779B97F4A7C15ull;
+            h = hashFloat(h, v.vp.x);
+            h = hashFloat(h, v.vp.y);
+            h = hashFloat(h, v.vp.z);
+            h = hashFloat(h, v.vc.r);
+            h = hashFloat(h, v.vc.g);
+            h = hashFloat(h, v.vc.b);
+            h = (h ^ v.index) * 0x100000001B3ull;
+            return finishHash(h);
+        }
+    };
+    struct vertexDataEqual {
+        bool operator()(const vertexData &a, const vertexData &b) const {
+            return a.vp == b.vp && a.vc.r == b.vc.r && a.vc.g == b.vc.g && a.vc.b == b.vc.b && a.index == b.index;
+        }
+    };
+    struct aiVectorHash {
+        uint64_t operator()(const aiVector3D &v) const {
+            uint64_t h = 0x9E3779B97F4A7C15ull;
+            h = hashFloat(h, v.x);
+            h = hashFloat(h, v.y);
+            h = hashFloat(h, v.z);
+            return finishHash(h);
+        }
+    };
+    struct aiVectorEqual {
+        bool operator()(const aiVector3D &a, const aiVector3D &b) const {
+            return a == b;
         }
     };
 
-    struct aiVectorCompare {
-        bool operator() (const aiVector3D& a, const aiVector3D& b) const {
-            if(a.x < b.x) return true;
-            if(a.x > b.x) return false;
-            if(a.y < b.y) return true;
-            if(a.y > b.y) return false;
-            if(a.z < b.z) return true;
-            return false;
-        }
-    };
-
-    template <class T, class Compare = std::less<T>>
+    /// Assigns 1-based indices to distinct keys in first-seen order. An open-addressing table of
+    /// indices into the key list: 4 bytes per slot instead of a std::map node per key.
+    template <class T, class Hash, class Equal>
     class indexMap {
-        int mNextIndex;
-        typedef std::map<T, int, Compare> dataType;
-        dataType vecMap;
+        std::vector<T> mKeys;
+        std::vector<uint32_t> mTable;
+        size_t mMask = 0;
+        static constexpr uint32_t kEmpty = 0xffffffffu;
+
+        void rehash(size_t capacity) {
+            mTable.assign(capacity, kEmpty);
+            mMask = capacity - 1;
+            for (size_t i = 0; i < mKeys.size(); ++i) {
+                size_t slot = static_cast<size_t>(Hash()(mKeys[i])) & mMask;
+                while (mTable[slot] != kEmpty) {
+                    slot = (slot + 1) & mMask;
+                }
+                mTable[slot] = static_cast<uint32_t>(i);
+            }
+        }
 
     public:
-        indexMap()
-        : mNextIndex(1) {
-            // empty
+        int getIndex(const T& key) {
+            if ((mKeys.size() + 1) * 2 > mTable.size()) {
+                rehash(mTable.empty() ? 64 : mTable.size() * 2);
+            }
+            size_t slot = static_cast<size_t>(Hash()(key)) & mMask;
+            for (;;) {
+                const uint32_t existing = mTable[slot];
+                if (existing == kEmpty) {
+                    mTable[slot] = static_cast<uint32_t>(mKeys.size());
+                    mKeys.push_back(key);
+                    return static_cast<int>(mKeys.size());
+                }
+                if (Equal()(mKeys[existing], key)) {
+                    return static_cast<int>(existing + 1);
+                }
+                slot = (slot + 1) & mMask;
+            }
         }
 
-        int getIndex(const T& key) {
-            typename dataType::iterator vertIt = vecMap.find(key);
-            // vertex already exists, so reference it
-            if(vertIt != vecMap.end()){
-                return vertIt->second;
-            }
-            return vecMap[key] = mNextIndex++;
-        };
-
+        /// Hands the keys over in index order; the map is empty afterwards.
         void getKeys( std::vector<T>& keys ) {
-            keys.resize(vecMap.size());
-            for(typename dataType::iterator it = vecMap.begin(); it != vecMap.end(); ++it){
-                keys[it->second-1] = it->first;
-            }
-        };
+            keys = std::move(mKeys);
+            mKeys.clear();
+            std::vector<uint32_t>().swap(mTable);
+            mMask = 0;
+        }
     };
 
-    indexMap<aiVector3D, aiVectorCompare> mVnMap, mVtMap;
-    indexMap<vertexData, vertexDataCompare> mVpMap;
+    indexMap<aiVector3D, aiVectorHash, aiVectorEqual> mVnMap, mVtMap;
+    indexMap<vertexData, vertexDataHash, vertexDataEqual> mVpMap;
     std::vector<MeshInstance> mMeshes;
 
     // this endl() doesn't flush() the stream

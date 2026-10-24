@@ -42,6 +42,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_COLLADA_EXPORTER
 
 #include "ColladaExporter.h"
+#include "Common/IOStreamBuf.h"
 #include "Common/UnitAxisContract.h"
 
 #include <assimp/Bitmap.h>
@@ -122,21 +123,18 @@ void ExportSceneCollada(const char *pFile, IOSystem *pIOSystem, const aiScene *p
 
     bakeColladaContract(pScene);
 
-    // invoke the exporter
-    ColladaExporter iDoTheExportThing(pScene, pIOSystem, path, file);
-
-    if (iDoTheExportThing.mOutput.fail()) {
-        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
-    }
-
-    // we're still here - export successfully completed. Write result to the given IOSYstem
     std::unique_ptr<IOStream> outfile(pIOSystem->Open(pFile, "wt"));
     if (outfile == nullptr) {
         throw DeadlyExportError("could not open output .dae file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(outfile.get());
 
-    // XXX maybe use a small wrapper around IOStream that behaves like std::stringstream in order to avoid the extra copy.
-    outfile->Write(iDoTheExportThing.mOutput.str().c_str(), static_cast<size_t>(iDoTheExportThing.mOutput.tellp()), 1);
+    // invoke the exporter, streaming into the output file
+    ColladaExporter iDoTheExportThing(&outbuf, pScene, pIOSystem, path, file);
+    iDoTheExportThing.mOutput.flush();
+    if (iDoTheExportThing.mOutput.fail() || outbuf.failed()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -190,7 +188,8 @@ inline std::string MakeUniqueId(const std::unordered_set<std::string> &idSet, co
 
 // ------------------------------------------------------------------------------------------------
 // Constructor for a specific scene to export
-ColladaExporter::ColladaExporter(const aiScene *pScene, IOSystem *pIOSystem, const std::string &path, const std::string &file) :
+ColladaExporter::ColladaExporter(std::streambuf *out, const aiScene *pScene, IOSystem *pIOSystem, const std::string &path, const std::string &file) :
+        mOutput(out),
         mIOSystem(pIOSystem),
         mPath(path),
         mFile(file),

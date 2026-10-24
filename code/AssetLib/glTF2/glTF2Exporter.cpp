@@ -1264,18 +1264,18 @@ void glTF2Exporter::ExportMeshes() {
             throw DeadlyExportError("GLTF2: Cannot export face-less non-point mesh");
         }
 
-        // ---- R12 — BAKE TRANSFORM INTO MESH DATA IN-PLACE ----
-        // We mutate `aim->mVertices` / `mNormals` / `mTangents` directly. This
-        // matches the existing exporter pattern (see the `NormalizeSafe()` loop
-        // below for normals and tangents). Positions get scale + rotation;
-        // normals and tangents get rotation only (the linear transform is a
-        // pure rotation, length-preserving). Blendshape targets are diff-encoded
-        // against the base mesh, so we apply the identical transform to each
-        // morph-target's vertex/normal arrays before the diff is computed.
-        if (needsTransform) {
+        // ---- R12 — BAKE TRANSFORM INTO MESH DATA ----
+        // Positions get scale + rotation; normals and tangents get rotation
+        // only (the linear transform is a pure rotation, length-preserving).
+        // The transformed attributes go into temporaries: the scene may be the
+        // caller's (Exporter::Export hands read-only exporters the original
+        // scene), so it is never modified. Blendshape targets are diff-encoded
+        // against the base mesh, so their arrays get the identical transform
+        // before the diff is computed.
+        const auto transformPoints = [&](const aiVector3D *in, unsigned int count, std::vector<aiVector3D> &out) {
+            out.assign(in, in + count);
             const float scaleF = static_cast<float>(vertexScale);
-            for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
-                aiVector3D v = aim->mVertices[i];
+            for (aiVector3D &v : out) {
                 if (needsScale) {
                     v.x *= scaleF;
                     v.y *= scaleF;
@@ -1284,42 +1284,22 @@ void glTF2Exporter::ExportMeshes() {
                 if (needsRotation) {
                     applyLinearTransform(axisRotation, v);
                 }
-                aim->mVertices[i] = v;
             }
-            if (needsRotation && aim->mNormals != nullptr) {
-                for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
-                    applyLinearTransform(axisRotation, aim->mNormals[i]);
+        };
+        const auto transformDirections = [&](const aiVector3D *in, unsigned int count, std::vector<aiVector3D> &out) {
+            out.assign(in, in + count);
+            if (needsRotation) {
+                for (aiVector3D &v : out) {
+                    applyLinearTransform(axisRotation, v);
                 }
             }
-            if (needsRotation && aim->mTangents != nullptr) {
-                for (unsigned int i = 0; i < aim->mNumVertices; ++i) {
-                    applyLinearTransform(axisRotation, aim->mTangents[i]);
-                }
-            }
-            if (aim->mNumAnimMeshes > 0) {
-                for (unsigned int am = 0; am < aim->mNumAnimMeshes; ++am) {
-                    aiAnimMesh *pAnimMesh = aim->mAnimMeshes[am];
-                    if (pAnimMesh->mVertices != nullptr) {
-                        for (unsigned int i = 0; i < pAnimMesh->mNumVertices; ++i) {
-                            aiVector3D v = pAnimMesh->mVertices[i];
-                            if (needsScale) {
-                                v.x *= scaleF;
-                                v.y *= scaleF;
-                                v.z *= scaleF;
-                            }
-                            if (needsRotation) {
-                                applyLinearTransform(axisRotation, v);
-                            }
-                            pAnimMesh->mVertices[i] = v;
-                        }
-                    }
-                    if (needsRotation && pAnimMesh->mNormals != nullptr) {
-                        for (unsigned int i = 0; i < pAnimMesh->mNumVertices; ++i) {
-                            applyLinearTransform(axisRotation, pAnimMesh->mNormals[i]);
-                        }
-                    }
-                }
-            }
+        };
+
+        std::vector<aiVector3D> positions;
+        const aiVector3D *basePositions = aim->mVertices;
+        if (needsTransform) {
+            transformPoints(aim->mVertices, aim->mNumVertices, positions);
+            basePositions = positions.data();
         }
 
         std::string name = aim->mName.C_Str();
@@ -1335,33 +1315,39 @@ void glTF2Exporter::ExportMeshes() {
         p.ngonEncoded = (aim->mPrimitiveTypes & aiPrimitiveType_NGONEncodingFlag) != 0;
 
         /******************* Vertices ********************/
-        Ref<Accessor> v = ExportData(*mAsset, meshId, b, aim->mNumVertices, aim->mVertices, AttribType::VEC3,
-                AttribType::VEC3, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER);
+        Ref<Accessor> v = ExportData(*mAsset, meshId, b, aim->mNumVertices, const_cast<aiVector3D *>(basePositions),
+                AttribType::VEC3, AttribType::VEC3, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER);
         if (v) {
             p.attributes.position.push_back(v);
         }
+        std::vector<aiVector3D>().swap(positions);
 
         /******************** Normals ********************/
-        // Normalize all normals as the validator can emit a warning otherwise
+        // Normalize all normals as the validator can emit a warning otherwise.
+        // Kept until the blendshape targets below are diff-encoded against them.
+        std::vector<aiVector3D> normals;
         if (nullptr != aim->mNormals) {
-            for (auto i = 0u; i < aim->mNumVertices; ++i) {
-                aim->mNormals[i].NormalizeSafe();
+            transformDirections(aim->mNormals, aim->mNumVertices, normals);
+            for (aiVector3D &normal : normals) {
+                normal.NormalizeSafe();
             }
         }
 
-        Ref<Accessor> n = ExportData(*mAsset, meshId, b, aim->mNumVertices, aim->mNormals, AttribType::VEC3,
-                AttribType::VEC3, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER);
+        Ref<Accessor> n = ExportData(*mAsset, meshId, b, aim->mNumVertices, normals.empty() ? nullptr : normals.data(),
+                AttribType::VEC3, AttribType::VEC3, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER);
         if (n) {
             p.attributes.normal.push_back(n);
         }
 
         /******************** Tangents ********************/
         if (nullptr != aim->mTangents) {
-            for (uint32_t i = 0; i < aim->mNumVertices; ++i) {
-                aim->mTangents[i].NormalizeSafe();
+            std::vector<aiVector3D> tangents;
+            transformDirections(aim->mTangents, aim->mNumVertices, tangents);
+            for (aiVector3D &tangent : tangents) {
+                tangent.NormalizeSafe();
             }
             Ref<Accessor> t = ExportData(
-                *mAsset, meshId, b, aim->mNumVertices, aim->mTangents, AttribType::VEC3,
+                *mAsset, meshId, b, aim->mNumVertices, tangents.data(), AttribType::VEC3,
                 AttribType::VEC3, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER
             );
             if (t) {
@@ -1375,17 +1361,18 @@ void glTF2Exporter::ExportMeshes() {
                 continue;
             }
 
-            // Flip UV y coords
-            if (aim->mNumUVComponents[i] > 1) {
-                for (unsigned int j = 0; j < aim->mNumVertices; ++j) {
-                    aim->mTextureCoords[i][j].y = 1 - aim->mTextureCoords[i][j].y;
-                }
-            }
-
             if (aim->mNumUVComponents[i] > 0) {
+                // Flip UV y coords
+                std::vector<aiVector3D> uvs(aim->mTextureCoords[i], aim->mTextureCoords[i] + aim->mNumVertices);
+                if (aim->mNumUVComponents[i] > 1) {
+                    for (aiVector3D &uv : uvs) {
+                        uv.y = 1 - uv.y;
+                    }
+                }
+
                 AttribType::Value type = (aim->mNumUVComponents[i] == 2) ? AttribType::VEC2 : AttribType::VEC3;
 
-                Ref<Accessor> tc = ExportData(*mAsset, meshId, b, aim->mNumVertices, aim->mTextureCoords[i],
+                Ref<Accessor> tc = ExportData(*mAsset, meshId, b, aim->mNumVertices, uvs.data(),
                         AttribType::VEC3, type, ComponentType_FLOAT, BufferViewTarget_ARRAY_BUFFER);
                 if (tc) {
                     p.attributes.texcoord.push_back(tc);
@@ -1403,13 +1390,30 @@ void glTF2Exporter::ExportMeshes() {
         }
 
         /*************** Vertices indices ****************/
+        // glTF primitives have one fixed face size (points, lines or triangles),
+        // so every face must have the size of the first one and that size must
+        // be 1, 2 or 3. Exporter::Export enforces Triangulate and SortByPType,
+        // which guarantees this for scenes it prepares; anything else is
+        // rejected instead of being read past the end of a face.
         if (aim->mNumFaces > 0) {
+            const unsigned int nIndicesPerFace = aim->mFaces[0].mNumIndices;
+            if (nIndicesPerFace < 1 || nIndicesPerFace > 3) {
+                throw DeadlyExportError("GLTF2: mesh \"", name, "\" has a ", nIndicesPerFace,
+                        "-index face; only points, lines and triangles can be exported");
+            }
             std::vector<IndicesType> indices;
-            unsigned int nIndicesPerFace = aim->mFaces[0].mNumIndices;
-            indices.resize(aim->mNumFaces * nIndicesPerFace);
+            indices.resize(static_cast<size_t>(aim->mNumFaces) * nIndicesPerFace);
             for (size_t i = 0; i < aim->mNumFaces; ++i) {
+                const aiFace &face = aim->mFaces[i];
+                if (face.mNumIndices != nIndicesPerFace) {
+                    throw DeadlyExportError("GLTF2: mesh \"", name, "\" mixes ", nIndicesPerFace, "-index and ",
+                            face.mNumIndices, "-index faces; sort the mesh by primitive type first");
+                }
                 for (size_t j = 0; j < nIndicesPerFace; ++j) {
-                    indices[i * nIndicesPerFace + j] = IndicesType(aim->mFaces[i].mIndices[j]);
+                    if (face.mIndices[j] >= aim->mNumVertices) {
+                        throw DeadlyExportError("GLTF2: mesh \"", name, "\" has a face index out of range");
+                    }
+                    indices[i * nIndicesPerFace + j] = IndicesType(face.mIndices[j]);
                 }
             }
 
@@ -1420,7 +1424,7 @@ void glTF2Exporter::ExportMeshes() {
         switch (aim->mPrimitiveTypes) {
         case aiPrimitiveType_POLYGON:
             p.mode = PrimitiveMode_TRIANGLES;
-            break; // TODO implement this
+            break; // only reachable with triangle-sized faces (checked above)
         case aiPrimitiveType_LINE:
             p.mode = PrimitiveMode_LINES;
             break;
@@ -1465,9 +1469,22 @@ void glTF2Exporter::ExportMeshes() {
                 // position
                 if (pAnimMesh->HasPositions()) {
                     // NOTE: in gltf it is the diff stored
+                    if (pAnimMesh->mNumVertices > aim->mNumVertices) {
+                        throw DeadlyExportError("GLTF2: morph target has more vertices than its base mesh");
+                    }
+                    std::vector<aiVector3D> targetPositions;
+                    const aiVector3D *target = pAnimMesh->mVertices;
+                    std::vector<aiVector3D> basePositionsForDiff;
+                    const aiVector3D *base = aim->mVertices;
+                    if (needsTransform) {
+                        transformPoints(pAnimMesh->mVertices, pAnimMesh->mNumVertices, targetPositions);
+                        target = targetPositions.data();
+                        transformPoints(aim->mVertices, pAnimMesh->mNumVertices, basePositionsForDiff);
+                        base = basePositionsForDiff.data();
+                    }
                     aiVector3D *pPositionDiff = new aiVector3D[pAnimMesh->mNumVertices];
                     for (unsigned int vt = 0; vt < pAnimMesh->mNumVertices; ++vt) {
-                        pPositionDiff[vt] = pAnimMesh->mVertices[vt] - aim->mVertices[vt];
+                        pPositionDiff[vt] = target[vt] - base[vt];
                     }
                     Ref<Accessor> vec;
                     if (bUseSparse) {
@@ -1486,10 +1503,15 @@ void glTF2Exporter::ExportMeshes() {
                 }
 
                 // normal
-                if (pAnimMesh->HasNormals() && bIncludeNormal) {
+                if (pAnimMesh->HasNormals() && bIncludeNormal && !normals.empty()) {
+                    if (pAnimMesh->mNumVertices > aim->mNumVertices) {
+                        throw DeadlyExportError("GLTF2: morph target has more vertices than its base mesh");
+                    }
+                    std::vector<aiVector3D> targetNormals;
+                    transformDirections(pAnimMesh->mNormals, pAnimMesh->mNumVertices, targetNormals);
                     aiVector3D *pNormalDiff = new aiVector3D[pAnimMesh->mNumVertices];
                     for (unsigned int vt = 0; vt < pAnimMesh->mNumVertices; ++vt) {
-                        pNormalDiff[vt] = pAnimMesh->mNormals[vt] - aim->mNormals[vt];
+                        pNormalDiff[vt] = targetNormals[vt] - normals[vt];
                     }
                     Ref<Accessor> vec;
                     if (bUseSparse) {

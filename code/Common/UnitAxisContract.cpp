@@ -328,19 +328,20 @@ void bakeTransformIntoMesh(aiMesh *mesh, double vertexScale,
 
 } // anonymous namespace
 
-BakeOutcome bakeContractTransformIntoMeshes(aiScene *scene,
-                                            double targetUnitToMeters,
-                                            int32_t targetUpAxis,
-                                            bool requireOptIn) {
+ContractTransform resolveContractTransform(const aiScene *scene,
+                                           double targetUnitToMeters,
+                                           int32_t targetUpAxis,
+                                           bool requireOptIn) {
+    ContractTransform result;
     if (scene == nullptr) {
-        return BakeOutcome::Skipped_NoOptIn;
+        return result;
     }
-    validateUpAxisInt(targetUpAxis, "bakeContractTransformIntoMeshes(targetUpAxis)");
+    validateUpAxisInt(targetUpAxis, "resolveContractTransform(targetUpAxis)");
 
     const bool optedIn = scene->mMetaData != nullptr &&
         scene->mMetaData->HasKey(AI_METADATA_UNIT_SCALE_TO_METERS);
     if (requireOptIn && !optedIn) {
-        return BakeOutcome::Skipped_NoOptIn;
+        return result;
     }
 
     const double sourceUnit = readSceneUnitScaleToMeters(scene);
@@ -355,28 +356,48 @@ BakeOutcome bakeContractTransformIntoMeshes(aiScene *scene,
     const bool unitMatches = !unitDeclared || std::fabs(sourceUnit - targetUnitToMeters) < kUnitMatchEps;
     const bool axisMatches = !axisDeclared || sourceAxis == targetUpAxis;
     if (unitMatches && axisMatches) {
-        return BakeOutcome::Skipped_Identity;
+        return result;
     }
 
     double vertexScale = 1.0;
     if (unitDeclared && targetUnitToMeters > 0.0) {
         vertexScale = sourceUnit / targetUnitToMeters;
     }
-    aiMatrix4x4 axisRotation; // identity by default
     if (axisDeclared) {
         validateUpAxisInt(sourceAxis, AI_METADATA_UP_AXIS " (scene metadata)");
-        axisRotation = buildAxisRotationMatrix(sourceAxis, targetUpAxis);
+        result.rotation = buildAxisRotationMatrix(sourceAxis, targetUpAxis);
     }
 
-    const bool needsScale = std::fabs(vertexScale - 1.0) > kUnitMatchEps;
-    const bool needsRotation = !isApproxIdentity(axisRotation);
-    if (!needsScale && !needsRotation) {
+    result.needsScale = std::fabs(vertexScale - 1.0) > kUnitMatchEps;
+    result.needsRotation = !isApproxIdentity(result.rotation);
+    result.scale = static_cast<float>(vertexScale);
+    result.active = result.needsScale || result.needsRotation;
+    return result;
+}
+
+BakeOutcome bakeContractTransformIntoMeshes(aiScene *scene,
+                                            double targetUnitToMeters,
+                                            int32_t targetUpAxis,
+                                            bool requireOptIn) {
+    if (scene == nullptr) {
+        return BakeOutcome::Skipped_NoOptIn;
+    }
+    validateUpAxisInt(targetUpAxis, "bakeContractTransformIntoMeshes(targetUpAxis)");
+    const bool optedIn = scene->mMetaData != nullptr &&
+        scene->mMetaData->HasKey(AI_METADATA_UNIT_SCALE_TO_METERS);
+    if (requireOptIn && !optedIn) {
+        return BakeOutcome::Skipped_NoOptIn;
+    }
+
+    const ContractTransform contract =
+            resolveContractTransform(scene, targetUnitToMeters, targetUpAxis, requireOptIn);
+    if (!contract.active) {
         return BakeOutcome::Skipped_Identity;
     }
 
     for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-        bakeTransformIntoMesh(scene->mMeshes[i], vertexScale, axisRotation,
-                              needsScale, needsRotation);
+        bakeTransformIntoMesh(scene->mMeshes[i], contract.scale, contract.rotation,
+                              contract.needsScale, contract.needsRotation);
     }
     return BakeOutcome::Applied;
 }

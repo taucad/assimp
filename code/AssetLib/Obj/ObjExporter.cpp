@@ -44,6 +44,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef ASSIMP_BUILD_NO_OBJ_EXPORTER
 
 #include "ObjExporter.h"
+#include "Common/IOStreamBuf.h"
 #include "Common/UnitAxisContract.h"
 #include <assimp/Exceptional.h>
 #include <assimp/StringComparison.h>
@@ -81,20 +82,18 @@ void bakeObjContract(const aiScene *pScene) {
 void ExportSceneObj(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* props) {
     bakeObjContract(pScene);
 
-    // invoke the exporter
-    ObjExporter exporter(pFile, pScene, false, props);
-
-    if (exporter.mOutput.fail() || exporter.mOutputMat.fail()) {
-        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    std::unique_ptr<IOStream> objfile (pIOSystem->Open(pFile,"wt"));
+    if (objfile == nullptr) {
+        throw DeadlyExportError("could not open output .obj file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(objfile.get());
 
-    // we're still here - export successfully completed. Write both the main OBJ file and the material script
-    {
-        std::unique_ptr<IOStream> outfile (pIOSystem->Open(pFile,"wt"));
-        if (outfile == nullptr) {
-            throw DeadlyExportError("could not open output .obj file: " + std::string(pFile));
-        }
-        outfile->Write( exporter.mOutput.str().c_str(), static_cast<size_t>(exporter.mOutput.tellp()),1);
+    // invoke the exporter, streaming the geometry into the .obj file
+    ObjExporter exporter(&outbuf, pFile, pScene, false, props);
+    exporter.mOutput.flush();
+
+    if (exporter.mOutput.fail() || outbuf.failed() || exporter.mOutputMat.fail()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
     }
     {
         std::unique_ptr<IOStream> outfile (pIOSystem->Open(exporter.GetMaterialLibFileName(),"wt"));
@@ -110,20 +109,18 @@ void ExportSceneObj(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene
 void ExportSceneObjNoMtl(const char* pFile,IOSystem* pIOSystem, const aiScene* pScene, const ExportProperties* props) {
     bakeObjContract(pScene);
 
-    // invoke the exporter
-    ObjExporter exporter(pFile, pScene, true, props);
-
-    if (exporter.mOutput.fail() || exporter.mOutputMat.fail()) {
-        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
+    std::unique_ptr<IOStream> objfile (pIOSystem->Open(pFile,"wt"));
+    if (objfile == nullptr) {
+        throw DeadlyExportError("could not open output .obj file: " + std::string(pFile));
     }
+    IOStreamBuf outbuf(objfile.get());
 
-    // we're still here - export successfully completed. Write both the main OBJ file and the material script
-    {
-        std::unique_ptr<IOStream> outfile (pIOSystem->Open(pFile,"wt"));
-        if (outfile == nullptr) {
-            throw DeadlyExportError("could not open output .obj file: " + std::string(pFile));
-        }
-        outfile->Write( exporter.mOutput.str().c_str(), static_cast<size_t>(exporter.mOutput.tellp()),1);
+    // invoke the exporter, streaming the geometry into the .obj file
+    ObjExporter exporter(&outbuf, pFile, pScene, true, props);
+    exporter.mOutput.flush();
+
+    if (exporter.mOutput.fail() || outbuf.failed() || exporter.mOutputMat.fail()) {
+        throw DeadlyExportError("output data creation failed. Most likely the file became too large: " + std::string(pFile));
     }
 
 
@@ -134,8 +131,9 @@ void ExportSceneObjNoMtl(const char* pFile,IOSystem* pIOSystem, const aiScene* p
 static const std::string MaterialExt = ".mtl";
 
 // ------------------------------------------------------------------------------------------------
-ObjExporter::ObjExporter(const char* _filename, const aiScene* pScene, bool noMtl, const ExportProperties* props)
-: filename(_filename)
+ObjExporter::ObjExporter(std::streambuf* out, const char* _filename, const aiScene* pScene, bool noMtl, const ExportProperties* props)
+: mOutput(out)
+, filename(_filename)
 , pScene(pScene)
 , vn()
 , vt()
@@ -189,7 +187,7 @@ std::string ObjExporter::GetMaterialLibFileName() {
 }
 
 // ------------------------------------------------------------------------------------------------
-void ObjExporter::WriteHeader(std::ostringstream& out) {
+void ObjExporter::WriteHeader(std::ostream& out) {
     out << "# File produced by Open Asset Import Library (http://www.assimp.sf.net)" << endl;
     out << "# (assimp v" << aiGetVersionMajor() << '.' << aiGetVersionMinor() << '.'
         << aiGetVersionRevision() << ")" << endl  << endl;
