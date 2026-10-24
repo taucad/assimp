@@ -66,6 +66,13 @@ bool validateColorString(const std::string color) {
     return true;
 }
 
+// Object-level property indices are file-controlled: check them against the group they index.
+void checkObjectPropertyIndex(int pindex, size_t count) {
+    if (pindex < 0 || static_cast<size_t>(pindex) >= count) {
+        throw DeadlyImportError("3MF: object property index ", pindex, " out of range (", count, " entries)");
+    }
+}
+
 aiFace ReadTriangle(XmlNode &node, int &texId0, int &texId1, int &texId2) {
     aiFace face;
 
@@ -336,9 +343,11 @@ void XmlSerializer::ReadObject(XmlNode &node) {
                 if (hasPindex && it != mResourcesDictionnary.end()) {
                     if (it->second->getType() == ResourceType::RT_BaseMaterials) {
                         BaseMaterials *materials = static_cast<BaseMaterials *>(it->second);
+                        checkObjectPropertyIndex(pindex, materials->mMaterialIndex.size());
                         mesh->mMaterialIndex = materials->mMaterialIndex[pindex];
                     } else if (it->second->getType() == ResourceType::RT_Texture2DGroup) {
                         Texture2DGroup *group = static_cast<Texture2DGroup *>(it->second);
+                        checkObjectPropertyIndex(pindex, group->mTex2dCoords.size());
                         if (mesh->mTextureCoords[0] == nullptr) {
                             mesh->mNumUVComponents[0] = 2;
                             for (unsigned int i = 1; i < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++i) {
@@ -371,6 +380,7 @@ void XmlSerializer::ReadObject(XmlNode &node) {
                             mesh->mColors[0] = new aiColor4D[mesh->mNumVertices];
 
                             ColorGroup *group = static_cast<ColorGroup *>(it->second);
+                            checkObjectPropertyIndex(pindex, group->mColors.size());
                             for (unsigned int vertex_idx = 0; vertex_idx < mesh->mNumVertices; vertex_idx++) {
                                 mesh->mColors[0][vertex_idx] = group->mColors[pindex];
                             }
@@ -462,11 +472,25 @@ void XmlSerializer::ImportTriangles(XmlNode &node, aiMesh *mesh) {
 
             int pindex[3];
             aiFace face = ReadTriangle(currentNode, pindex[0], pindex[1], pindex[2]);
+            for (unsigned int i = 0; i < face.mNumIndices; ++i) {
+                if (face.mIndices[i] >= mesh->mNumVertices) {
+                    throw DeadlyImportError("3MF: triangle vertex index ", face.mIndices[i], " out of range (", mesh->mNumVertices, " vertices)");
+                }
+            }
+            // Property indices are file-controlled: check them against the group they index.
+            const auto checkPropertyIndex = [&](int idx, size_t count) {
+                if (pindex[idx] != IdNotSet && (pindex[idx] < 0 || static_cast<size_t>(pindex[idx]) >= count)) {
+                    throw DeadlyImportError("3MF: triangle property index ", pindex[idx], " out of range (", count, " entries)");
+                }
+            };
             if (hasPid && (pindex[0] != IdNotSet || pindex[1] != IdNotSet || pindex[2] != IdNotSet)) {
                 auto it = mResourcesDictionnary.find(pid);
                 if (it != mResourcesDictionnary.end()) {
                     if (it->second->getType() == ResourceType::RT_BaseMaterials) {
                         BaseMaterials *baseMaterials = static_cast<BaseMaterials *>(it->second);
+                        for (int i = 0; i < 3; ++i) {
+                            checkPropertyIndex(i, baseMaterials->mMaterialIndex.size());
+                        }
 
                         auto update_material = [&](int idx) {
                             if (pindex[idx] != IdNotSet) {
@@ -481,6 +505,9 @@ void XmlSerializer::ImportTriangles(XmlNode &node, aiMesh *mesh) {
                     } else if (it->second->getType() == ResourceType::RT_Texture2DGroup) {
                         // Load texture coordinates into mesh, when any
                         Texture2DGroup *group = static_cast<Texture2DGroup *>(it->second); // fix bug
+                        for (int i = 0; i < 3; ++i) {
+                            checkPropertyIndex(i, group->mTex2dCoords.size());
+                        }
                         if (mesh->mTextureCoords[0] == nullptr) {
                             mesh->mNumUVComponents[0] = 2;
                             for (unsigned int i = 1; i < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++i) {
@@ -514,6 +541,9 @@ void XmlSerializer::ImportTriangles(XmlNode &node, aiMesh *mesh) {
                     } else if (it->second->getType() == ResourceType::RT_ColorGroup) {
                         // Load vertex color into mesh, when any
                         ColorGroup *group = static_cast<ColorGroup *>(it->second);
+                        for (int i = 0; i < 3; ++i) {
+                            checkPropertyIndex(i, group->mColors.size());
+                        }
                         if (mesh->mColors[0] == nullptr) {
                             mesh->mColors[0] = new aiColor4D[mesh->mNumVertices];
                         }

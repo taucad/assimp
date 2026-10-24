@@ -80,6 +80,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <exception>
 #include <set>
+#include <limits>
 #include <memory>
 #include <cctype>
 
@@ -700,10 +701,15 @@ const aiScene* Importer::ReadFile( const char* _pFile, unsigned int pFlags) {
 
         // Get file size for progress handler
         IOStream * fileIO = pimpl->mIOHandler->Open( pFile );
-        uint32_t fileSize = 0;
+        // The progress API counts in int steps: clamp instead of letting a file
+        // over 2 GiB wrap to a negative (or, at 4 GiB, a tiny) step count.
+        int fileSize = 0;
         if (fileIO)
         {
-            fileSize = static_cast<uint32_t>(fileIO->FileSize());
+            const size_t bytes = fileIO->FileSize();
+            fileSize = bytes > static_cast<size_t>(std::numeric_limits<int>::max())
+                    ? std::numeric_limits<int>::max()
+                    : static_cast<int>(bytes);
             pimpl->mIOHandler->Close( fileIO );
         }
 

@@ -96,7 +96,9 @@ inline void AddNodeMetaData(aiNode *node, const std::string &key, const T &value
 // Reads a float value from an accessor and its data array.
 static ai_real ReadFloat(const Accessor &pAccessor, const Data &pData, size_t pIndex, size_t pOffset) {
     size_t pos = pAccessor.mStride * pIndex + pAccessor.mOffset + pOffset;
-    ai_assert(pos < pData.mValues.size());
+    if (pos >= pData.mValues.size()) {
+        throw DeadlyImportError("Collada: accessor index ", pIndex, " reads past its source data");
+    }
     return pData.mValues[pos];
 }
 
@@ -803,29 +805,39 @@ std::unique_ptr<aiMesh> ColladaLoader::CreateMesh(const ColladaParser &pParser, 
         size_t numBones = jointNames.mStrings.size();
         std::vector<std::vector<aiVertexWeight>> dstBones(numBones);
 
-        // build a temporary array of pointers to the start of each vertex's weights
-        using IndexPairVector = std::vector<std::pair<size_t, size_t>>;
-        std::vector<IndexPairVector::const_iterator> weightStartPerVertex;
-        weightStartPerVertex.resize(pSrcController->mWeightCounts.size(), pSrcController->mWeights.end());
-
-        auto pit = pSrcController->mWeights.begin();
+        // the offset of each vertex's first weight pair; the counts come from the file, so they must
+        // add up to no more pairs than were read
+        std::vector<size_t> weightStartPerVertex(pSrcController->mWeightCounts.size());
+        size_t pairsUsed = 0;
         for (size_t a = 0; a < pSrcController->mWeightCounts.size(); ++a) {
-            weightStartPerVertex[a] = pit;
-            pit += pSrcController->mWeightCounts[a];
+            weightStartPerVertex[a] = pairsUsed;
+            if (pSrcController->mWeightCounts[a] > pSrcController->mWeights.size() - pairsUsed) {
+                throw DeadlyImportError("Collada: <vcount> claims more vertex weights than <v> holds");
+            }
+            pairsUsed += pSrcController->mWeightCounts[a];
         }
 
         // now for each vertex put the corresponding vertex weights into each bone's weight collection
         for (size_t a = pStartVertex; a < pStartVertex + numVertices; ++a) {
             // which position index was responsible for this vertex? that's also the index by which
             // the controller assigns the vertex weights
+            if (a >= pSrcMesh->mFacePosIndices.size()) {
+                throw DeadlyImportError("Collada: skinned vertex without a position index");
+            }
             size_t orgIndex = pSrcMesh->mFacePosIndices[a];
+            if (orgIndex >= pSrcController->mWeightCounts.size()) {
+                throw DeadlyImportError("Collada: <vcount> has fewer entries than the mesh has positions");
+            }
             // find the vertex weights for this vertex
-            auto iit = weightStartPerVertex[orgIndex];
+            auto iit = pSrcController->mWeights.begin() + weightStartPerVertex[orgIndex];
             size_t pairCount = pSrcController->mWeightCounts[orgIndex];
 
             for (size_t b = 0; b < pairCount; ++b, ++iit) {
                 const size_t jointIndex = iit->first;
                 const size_t vertexIndex = iit->second;
+                if (jointIndex >= numBones) {
+                    throw DeadlyImportError("Collada: vertex weight references joint ", jointIndex, " of ", numBones);
+                }
                 ai_real weight = 1.0f;
                 if (!weights.mValues.empty()) {
                     weight = ReadFloat(weightsAcc, weights, vertexIndex, 0);
