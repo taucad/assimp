@@ -323,7 +323,8 @@ void collectMeshNodes(const aiNode *node, const aiMatrix4x4 &parentTransform,
 
 void orientClosedComponents(std::vector<Lib3MF::sPosition> &vertices,
                             std::vector<Lib3MF::sTriangle> &triangles,
-                            const std::string &source) {
+                            const std::string &source,
+                            bool requireManifold) {
     std::vector<std::vector<size_t>> incident(vertices.size());
     for (size_t triangleIndex = 0; triangleIndex < triangles.size(); ++triangleIndex) {
         for (unsigned int corner = 0; corner < 3; ++corner) {
@@ -376,8 +377,14 @@ void orientClosedComponents(std::vector<Lib3MF::sPosition> &vertices,
                     ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
         }
         if (signedVolumeTimesSix == 0.0) {
+            // A flat component encloses nothing, so no winding is outward. It
+            // can only be written as an object of type other.
+            if (!requireManifold) {
+                continue;
+            }
             throw DeadlyExportError("3MF ", source, " component containing triangle ",
-                    start, " has zero signed volume");
+                    start, " has zero signed volume"
+                    " (set 3MF_EXPORT_REQUIRE_MANIFOLD to false to write it as an object of type other)");
         }
         if (signedVolumeTimesSix < 0.0) {
             for (size_t triangleIndex : component) {
@@ -614,7 +621,7 @@ void exportToLib3MF(const aiScene *pScene, std::vector<Lib3MF_uint8> &outputBuff
         if (vertices.empty() || triangles.empty()) {
             throw DeadlyExportError("3MF ", source, " contains no mesh geometry");
         }
-        orientClosedComponents(vertices, triangles, source);
+        orientClosedComponents(vertices, triangles, source, requireManifold);
         Lib3MFHandle meshObject;
         checkResult(
             lib3mf_model_addmeshobject(model.as<Lib3MF_Model>(), meshObject.ptr()),
