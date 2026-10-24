@@ -144,7 +144,12 @@ Element::Element(const Token& key_token, Parser& parser) :
         }
 
         if (n->Type() == TokenType_OPEN_BRACKET) {
+            if (parser.scopeDepth >= parser.maxScopeDepth) {
+                ParseError("scopes nest deeper than " + ai_to_string(parser.maxScopeDepth) + " levels", n);
+            }
+            ++parser.scopeDepth;
             compound = new_Scope(parser);
+            --parser.scopeDepth;
 
             // current token should be a TOK_CLOSE_BRACKET
             n = parser.CurrentToken();
@@ -225,8 +230,8 @@ Scope::~Scope()
 }
 
 // ------------------------------------------------------------------------------------------------
-Parser::Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary) :
-        tokens(tokens), allocator(allocator), last(), current(), cursor(tokens.begin()), is_binary(is_binary)
+Parser::Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary, unsigned int maxScopeDepth) :
+        tokens(tokens), allocator(allocator), maxScopeDepth(maxScopeDepth), last(), current(), cursor(tokens.begin()), is_binary(is_binary)
 {
     ASSIMP_LOG_DEBUG("Parsing FBX tokens");
     root = new_Scope(*this, true);

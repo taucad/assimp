@@ -502,6 +502,11 @@ Ref<T> LazyDict<T>::Retrieve(unsigned int i) {
     if (mRecursiveReferenceCheck.find(i) != mRecursiveReferenceCheck.end()) {
         throw DeadlyImportError("GLTF: Object at index ", i, " in array \"", mDictId, "\" has recursive reference to itself");
     }
+    // Nested Retrieve calls follow one reference chain (node children); stop
+    // before a hostile chain overflows the stack.
+    if (mRecursiveReferenceCheck.size() >= mAsset.maxNodeDepth) {
+        throw DeadlyImportError("GLTF: \"", mDictId, "\" references nest deeper than ", mAsset.maxNodeDepth, " levels");
+    }
     mRecursiveReferenceCheck.insert(i);
 
     // Unique ptr prevents memory leak in case of Read throws an exception
@@ -1880,9 +1885,18 @@ inline void Node::Read(Value &obj, Asset &r) {
             if (child.IsUint()) {
                 // get/create the child node
                 Ref<Node> chn = r.nodes.Retrieve(child.GetUint());
-                if (chn) {
-                    this->children.push_back(chn);
+                if (!chn) {
+                    continue;
                 }
+                // A node listed under several parents would be expanded once
+                // per path when building the scene (exponentially for a
+                // chain of such nodes); keep only the first parent.
+                if (chn->claimed) {
+                    ASSIMP_LOG_WARN("GLTF: ", chn->id, " has more than one parent; ignoring its link from ", id);
+                    continue;
+                }
+                chn->claimed = true;
+                this->children.push_back(chn);
             }
         }
     }

@@ -411,12 +411,13 @@ static void ReadCamera(XmlNode &node, Camera &camera) {
 
 // ------------------------------------------------------------------------------------------------
 // Constructor to be privately used by Importer
-ColladaParser::ColladaParser(IOSystem *pIOHandler, const std::string &pFile) :
+ColladaParser::ColladaParser(IOSystem *pIOHandler, const std::string &pFile, unsigned int maxNodeDepth) :
         mFileName(pFile),
         mRootNode(nullptr),
         mUnitSize(1.0f),
         mUpDirection(UP_Y),
-        mFormat(FV_1_5_n) {
+        mFormat(FV_1_5_n),
+        mMaxNodeDepth(maxNodeDepth) {
     if (nullptr == pIOHandler) {
         throw DeadlyImportError("IOSystem is nullptr.");
     }
@@ -460,22 +461,35 @@ ColladaParser::ColladaParser(IOSystem *pIOHandler, const std::string &pFile) :
         return;
     }
 
-    // Read content and embedded textures
-    ReadContents(colladaNode);
-    if (zip_archive && zip_archive->isOpen()) {
-        ReadEmbeddedTextures(*zip_archive);
+    // Read content and embedded textures. A throwing constructor skips the
+    // destructor, so free what was read before rethrowing.
+    try {
+        ReadContents(colladaNode);
+        if (zip_archive && zip_archive->isOpen()) {
+            ReadEmbeddedTextures(*zip_archive);
+        }
+    } catch (...) {
+        ReleaseLibraries();
+        throw;
     }
 }
 
 // ------------------------------------------------------------------------------------------------
 // Destructor, private as well
 ColladaParser::~ColladaParser() {
+    ReleaseLibraries();
+}
+
+// ------------------------------------------------------------------------------------------------
+void ColladaParser::ReleaseLibraries() {
     for (auto &it : mNodeLibrary) {
         delete it.second;
     }
+    mNodeLibrary.clear();
     for (auto &it : mMeshLibrary) {
         delete it.second;
     }
+    mMeshLibrary.clear();
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2131,8 +2145,13 @@ void ColladaParser::ReadSceneNode(XmlNode &node, Node *pNode) {
                 mNodeLibrary[child->mID] = child;
             }
 
-            // read on recursively from there
+            // read on recursively from there, within the nesting cap
+            if (mNodeDepth >= mMaxNodeDepth) {
+                throw DeadlyImportError("Collada: <node> elements nest deeper than ", mMaxNodeDepth, " levels");
+            }
+            ++mNodeDepth;
             ReadSceneNode(currentNode, child);
+            --mNodeDepth;
             continue;
         } else if (!pNode) {
             // For any further stuff we need a valid node to work on

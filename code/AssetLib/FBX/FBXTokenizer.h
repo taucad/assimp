@@ -49,6 +49,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "Common/StackAllocator.h"
 #include <assimp/ai_assert.h>
 #include <assimp/defs.h>
+#include <assimp/config.h>
 #include <vector>
 #include <string>
 
@@ -178,8 +179,10 @@ void Tokenize(TokenList &output_tokens, const char *input, StackAllocator &token
  * @param output_tokens Receives a list of all tokens in the input data.
  * @param input_buffer Binary input buffer to be processed.
  * @param length Length of input buffer, in bytes. There is no 0-terminal.
+ * @param maxDepth Deepest record nesting accepted (records are read recursively).
  * @throw DeadlyImportError if something goes wrong */
-void TokenizeBinary(TokenList &output_tokens, const char *input, size_t length, StackAllocator &tokenAllocator);
+void TokenizeBinary(TokenList &output_tokens, const char *input, size_t length, StackAllocator &tokenAllocator,
+        unsigned int maxDepth = AI_DEFAULT_MAX_NODE_DEPTH);
 
 
 } // ! FBX

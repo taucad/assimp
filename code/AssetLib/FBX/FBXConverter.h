@@ -462,6 +462,13 @@ private:
     double anim_fps;
 
     std::vector<aiSkeleton *> mSkeletons;
+
+    // ConvertNodes: depth of the aiNode it is attaching under (root = 1), and
+    // the models already placed, so a model linked under several parents (or
+    // in a cycle) is converted once.
+    unsigned int mNodeDepth = 1;
+    std::unordered_set<uint64_t> mConvertedModels;
+
     aiScene* const mSceneOut;
     const FBX::Document& doc;
     bool mRemoveEmptyBones;

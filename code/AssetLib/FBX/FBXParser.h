@@ -159,7 +159,7 @@ class Parser
 public:
     /** Parse given a token list. Does not take ownership of the tokens -
      *  the objects must persist during the entire parser lifetime */
-    Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary);
+    Parser(const TokenList &tokens, StackAllocator &allocator, bool is_binary, unsigned int maxScopeDepth = AI_DEFAULT_MAX_NODE_DEPTH);
     ~Parser();
 
     const Scope& GetRootScope() const {
@@ -185,6 +185,8 @@ private:
 private:
     const TokenList& tokens;
     StackAllocator &allocator;
+    unsigned int scopeDepth = 0; // nested scopes recurse, so their depth is capped
+    unsigned int maxScopeDepth;
     TokenPtr last, current;
     TokenList::const_iterator cursor;
     Scope *root;

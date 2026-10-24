@@ -93,6 +93,7 @@ private:
 
     /// An instance of rapidjson::IRemoteSchemaDocumentProvider
     void *mSchemaDocumentProvider = nullptr;
+    unsigned int mMaxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH;
 };
 
 } // namespace Assimp

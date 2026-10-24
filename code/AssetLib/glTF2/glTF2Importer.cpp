@@ -2278,6 +2278,7 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
 
     // read the asset file
     glTF2::Asset asset(pIOHandler, static_cast<rapidjson::IRemoteSchemaDocumentProvider *>(mSchemaDocumentProvider));
+    asset.maxNodeDepth = mMaxNodeDepth;
     asset.Load(pFile,
                CheckMagicToken(
                    pIOHandler, pFile, AI_GLB_MAGIC_NUMBER, 1, 0,
@@ -2325,6 +2326,7 @@ void glTF2Importer::InternReadFile(const std::string &pFile, aiScene *pScene, IO
 
 void glTF2Importer::SetupProperties(const Importer *pImp) {
     mSchemaDocumentProvider = static_cast<rapidjson::IRemoteSchemaDocumentProvider *>(pImp->GetPropertyPointer(AI_CONFIG_IMPORT_SCHEMA_DOCUMENT_PROVIDER));
+    mMaxNodeDepth = static_cast<unsigned int>(std::max(1, pImp->GetPropertyInteger(AI_CONFIG_IMPORT_MAX_NODE_DEPTH, AI_DEFAULT_MAX_NODE_DEPTH)));
 }
 
 #endif // ASSIMP_BUILD_NO_GLTF_IMPORTER

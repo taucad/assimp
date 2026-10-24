@@ -88,6 +88,23 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define AI_CONFIG_IMPORT_NO_SKELETON_MESHES \
     "IMPORT_NO_SKELETON_MESHES"
 
+// ---------------------------------------------------------------------------
+/** @brief Maximum scene-graph nesting depth an import may produce.
+ *
+ * Hostile files can nest nodes deep enough to overflow the call stack of
+ * the recursive readers, converters and post-processing steps, natively or
+ * under WebAssembly. Importers with recursive node reading stop at this
+ * depth, and Importer::ReadFile rejects any imported scene whose node tree
+ * is deeper, or whose nodes are shared or cyclic, before post-processing.
+ * Property type: integer. Default value: #AI_DEFAULT_MAX_NODE_DEPTH.
+ */
+#define AI_CONFIG_IMPORT_MAX_NODE_DEPTH \
+    "IMPORT_MAX_NODE_DEPTH"
+
+#if (!defined AI_DEFAULT_MAX_NODE_DEPTH)
+#   define AI_DEFAULT_MAX_NODE_DEPTH 1000
+#endif
+
 // ###########################################################################
 // POST PROCESSING SETTINGS
 // Various stuff to fine-tune the behavior of a specific post processing step.

@@ -147,6 +147,7 @@ void ColladaLoader::SetupProperties(const Importer *pImp) {
     noSkeletonMesh = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_NO_SKELETON_MESHES, 0) != 0;
     removeEmptyBones = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_REMOVE_EMPTY_BONES, true) != 0;
     ignoreUpDirection = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UP_DIRECTION, 0) != 0;
+    mMaxNodeDepth = static_cast<unsigned int>(std::max(1, pImp->GetPropertyInteger(AI_CONFIG_IMPORT_MAX_NODE_DEPTH, AI_DEFAULT_MAX_NODE_DEPTH)));
     ignoreUnitSize = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UNIT_SIZE, 0) != 0;
     useColladaName = pImp->GetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_USE_COLLADA_NAMES, 0) != 0;
     mImporter = pImp;
@@ -166,7 +167,7 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
     Clear();
 
     // parse the input file
-    ColladaParser parser(pIOHandler, pFile);
+    ColladaParser parser(pIOHandler, pFile, mMaxNodeDepth);
 
     if (!parser.mRootNode) {
         throw DeadlyImportError("Collada: File came out empty. Something is wrong here.");
@@ -265,7 +266,13 @@ void ColladaLoader::InternReadFile(const std::string &pFile, aiScene *pScene, IO
 
 // ------------------------------------------------------------------------------------------------
 // Recursively constructs a scene node for the given parser node and returns it.
-std::unique_ptr<aiNode> ColladaLoader::BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode) {
+std::unique_ptr<aiNode> ColladaLoader::BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode, unsigned int depth) {
+    // <instance_node> may point back up the hierarchy, so the nesting is
+    // capped here as well as in the parser.
+    if (depth > mMaxNodeDepth) {
+        throw DeadlyImportError("Collada: node hierarchy (with instanced nodes) nests deeper than ", mMaxNodeDepth, " levels");
+    }
+
     // create a node for it
     auto node = std::make_unique<aiNode>();
 
@@ -295,14 +302,14 @@ std::unique_ptr<aiNode> ColladaLoader::BuildHierarchy(const ColladaParser &pPars
     }
 
     for (size_t a = 0; a < pNode->mChildren.size(); ++a) {
-        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, pNode->mChildren[a]);
+        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, pNode->mChildren[a], depth + 1);
         child->mParent = node.get();
         node->mChildren[a] = child.release();
     }
 
     // ... and finally the resolved node instances
     for (size_t a = 0; a < instances.size(); ++a) {
-        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, instances[a]);
+        std::unique_ptr<aiNode> child = BuildHierarchy(pParser, instances[a], depth + 1);
         child->mParent = node.get();
         node->mChildren[pNode->mChildren.size() + a] = child.release();
     }

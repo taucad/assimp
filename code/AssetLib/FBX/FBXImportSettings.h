@@ -45,6 +45,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef INCLUDED_AI_FBX_IMPORTSETTINGS_H
 #define INCLUDED_AI_FBX_IMPORTSETTINGS_H
 
+#include <assimp/config.h>
+
 namespace Assimp {
 namespace FBX {
 
@@ -159,6 +161,10 @@ struct ImportSettings {
 
     // Set to true to ignore the axis configuration in the file
     bool ignoreUpDirection = false;
+
+    /** Deepest scene-node nesting the converter builds, and deepest scope
+     *  nesting the parser reads (AI_CONFIG_IMPORT_MAX_NODE_DEPTH). */
+    unsigned int maxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH;
 };
 
 } // namespace FBX

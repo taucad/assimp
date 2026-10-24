@@ -106,7 +106,7 @@ protected:
     void InternReadFile(const std::string &pFile, aiScene *pScene, IOSystem *pIOHandler) override;
 
     /// Recursively constructs a scene node for the given parser node and returns it.
-    std::unique_ptr<aiNode> BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode);
+    std::unique_ptr<aiNode> BuildHierarchy(const ColladaParser &pParser, const Collada::Node *pNode, unsigned int depth = 1);
 
     /// Resolve node instances
     void ResolveNodeInstances(const ColladaParser &pParser, const Collada::Node *pNode,
@@ -232,6 +232,7 @@ private:
     bool noSkeletonMesh;
     bool removeEmptyBones;
     bool ignoreUpDirection;
+    unsigned int mMaxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH;
     bool ignoreUnitSize;
     bool useColladaName;
 

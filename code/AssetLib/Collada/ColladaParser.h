@@ -50,6 +50,7 @@
 #include "ColladaHelper.h"
 #include <assimp/ai_assert.h>
 #include <assimp/XmlParser.h>
+#include <assimp/config.h>
 
 #include <map>
 
@@ -70,8 +71,9 @@ public:
     /// Map for generic metadata as aiString.
     using StringMetaData = std::map<std::string, aiString>;
 
-    /// Constructor from XML file.
-    ColladaParser(IOSystem *pIOHandler, const std::string &pFile);
+    /// Constructor from XML file. `<node>` elements nesting deeper than
+    /// `maxNodeDepth` are rejected (they are read recursively).
+    ColladaParser(IOSystem *pIOHandler, const std::string &pFile, unsigned int maxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH);
 
     /// Destructor
     ~ColladaParser();
@@ -199,6 +201,9 @@ public:
 
     /// Reads a scene node's contents including children and stores it in the given node
     void ReadSceneNode(XmlNode &node, Collada::Node *pNode);
+
+    /// Frees the node and mesh libraries
+    void ReleaseLibraries();
     
     /// Reads a mesh reference in a node and adds it to the node's mesh list
     void ReadNodeGeometry(XmlNode &node, Collada::Node *pNode);
@@ -301,6 +306,10 @@ private:
 
     /// Collada file format version
     Collada::FormatVersion mFormat;
+
+    /// ReadSceneNode's current and deepest permitted `<node>` nesting
+    unsigned int mNodeDepth = 0;
+    unsigned int mMaxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH;
 };
 
 // ------------------------------------------------------------------------------------------------

@@ -119,6 +119,7 @@ void FBXImporter::SetupProperties(const Importer *pImp) {
     mSettings.convertToMeters = pImp->GetPropertyBool(AI_CONFIG_FBX_CONVERT_TO_M, false);
     mSettings.ignoreUpDirection = pImp->GetPropertyBool(AI_CONFIG_IMPORT_FBX_IGNORE_UP_DIRECTION, false);
     mSettings.useSkeleton = pImp->GetPropertyBool(AI_CONFIG_FBX_USE_SKELETON_BONE_CONTAINER, false);
+    mSettings.maxNodeDepth = static_cast<unsigned int>(std::max(1, pImp->GetPropertyInteger(AI_CONFIG_IMPORT_MAX_NODE_DEPTH, AI_DEFAULT_MAX_NODE_DEPTH)));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -153,14 +154,14 @@ void FBXImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
 		bool is_binary = false;
 		if (!strncmp(begin, "Kaydara FBX Binary", 18)) {
 			is_binary = true;
-            TokenizeBinary(tokens, begin, contents.size(), tempAllocator);
+            TokenizeBinary(tokens, begin, contents.size(), tempAllocator, mSettings.maxNodeDepth);
 		} else {
             Tokenize(tokens, begin, tempAllocator);
 		}
 
 		// use this information to construct a very rudimentary
 		// parse-tree representing the FBX scope structure
-        Parser parser(tokens, tempAllocator, is_binary);
+        Parser parser(tokens, tempAllocator, is_binary, mSettings.maxNodeDepth);
 
 		// take the raw parse-tree and convert it to a FBX DOM
 		Document doc(parser, mSettings);

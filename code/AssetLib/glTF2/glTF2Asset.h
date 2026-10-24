@@ -62,6 +62,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if !defined(ASSIMP_BUILD_NO_GLTF_IMPORTER) && !defined(ASSIMP_BUILD_NO_GLTF2_IMPORTER)
 
 #include <assimp/Exceptional.h>
+#include <assimp/config.h>
 
 #include <algorithm>
 #include <list>
@@ -969,6 +970,7 @@ struct Node : public Object {
     std::string jointName; //!< Name used when this node is a joint in a skin.
 
     Ref<Node> parent; //!< This is not part of the glTF specification. Used as a helper.
+    bool claimed = false; //!< Already some node's child; glTF requires a strict tree.
 
     Node() = default;
     void Read(Value &obj, Asset &r);
@@ -1240,6 +1242,9 @@ public:
     LazyDict<Texture> textures;
 
     Ref<Scene> scene;
+
+    //! Deepest `children` chain Load() follows before rejecting the file.
+    unsigned int maxNodeDepth = AI_DEFAULT_MAX_NODE_DEPTH;
 
 public:
     Asset(IOSystem *io = nullptr, rapidjson::IRemoteSchemaDocumentProvider *schemaDocumentProvider = nullptr) :

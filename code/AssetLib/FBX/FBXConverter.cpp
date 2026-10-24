@@ -273,6 +273,10 @@ void FBXConverter::ConvertNodes(uint64_t id, aiNode *parent, aiNode *root_node, 
         const Model *const model = dynamic_cast<const Model *>(object);
 
         if (nullptr != model) {
+            if (!mConvertedModels.insert(model->ID()).second) {
+                FBXImporter::LogWarn("model ", model->Name(), " is linked under more than one parent; ignoring the extra link");
+                continue;
+            }
             nodes_chain.clear();
             post_nodes_chain.clear();
             aiMatrix4x4 new_abs_transform = parent_transform;
@@ -298,8 +302,10 @@ void FBXConverter::ConvertNodes(uint64_t id, aiNode *parent, aiNode *root_node, 
 
             // link all nodes in a row
             aiNode *last_parent = parent;
+            unsigned int depth = mNodeDepth;
             for (PotentialNode& child : nodes_chain) {
                 ai_assert(child.mNode);
+                ++depth;
 
                 if (last_parent != parent) {
                     last_parent->mNumChildren = 1;
@@ -324,6 +330,7 @@ void FBXConverter::ConvertNodes(uint64_t id, aiNode *parent, aiNode *root_node, 
             if (child_conns.size()) {
                 for (PotentialNode& postnode : post_nodes_chain) {
                     ai_assert(postnode.mNode);
+                    ++depth;
 
                     if (last_parent != parent) {
                         last_parent->mNumChildren = 1;
@@ -341,8 +348,14 @@ void FBXConverter::ConvertNodes(uint64_t id, aiNode *parent, aiNode *root_node, 
                 post_nodes_chain.clear();
             }
 
-            // recursion call - child nodes
+            // recursion call - child nodes, within the nesting cap
+            if (depth > doc.Settings().maxNodeDepth) {
+                throw DeadlyImportError("FBX: model hierarchy nests deeper than ", doc.Settings().maxNodeDepth, " scene nodes");
+            }
+            const unsigned int parentDepth = mNodeDepth;
+            mNodeDepth = depth;
             ConvertNodes(model->ID(), last_parent, root_node, new_abs_transform);
+            mNodeDepth = parentDepth;
 
             if (doc.Settings().readLights) {
                 ConvertLights(*model, node_name);

@@ -52,12 +52,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/Importer.hpp>
+#include <assimp/config.h>
 
+#include <algorithm>
 #include <cctype>
 #include <ios>
 #include <list>
 #include <memory>
 #include <sstream>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace {
 // Checks whether the passed string is a gcs version.
@@ -81,6 +86,66 @@ std::string StripVersionHash(const std::string &filename) {
         return filename.substr(0, pos);
     }
     return filename;
+}
+
+// Why an imported node graph cannot be handed to the recursive consumers
+// downstream (validation, post-processing, exporters, ~aiNode).
+enum class NodeGraphFault { None, TooDeep, Shared };
+
+// Walks the node graph iteratively: depth-first with an explicit stack, so a
+// hostile graph is measured without recursing into it. The root has depth 1.
+// Collects every distinct node into `nodes` either way.
+NodeGraphFault InspectNodeGraph(aiNode *root, unsigned int maxDepth, std::vector<aiNode *> &nodes) {
+    NodeGraphFault fault = NodeGraphFault::None;
+    std::unordered_set<const aiNode *> seen;
+    std::vector<std::pair<aiNode *, unsigned int>> stack{ { root, 1u } };
+    while (!stack.empty()) {
+        const auto [node, depth] = stack.back();
+        stack.pop_back();
+        if (!seen.insert(node).second) {
+            fault = NodeGraphFault::Shared;
+            continue;
+        }
+        nodes.push_back(node);
+        if (depth > maxDepth && fault == NodeGraphFault::None) {
+            fault = NodeGraphFault::TooDeep;
+        }
+        if (node->mChildren == nullptr) {
+            continue;
+        }
+        for (unsigned int i = node->mNumChildren; i-- > 0;) {
+            if (node->mChildren[i] != nullptr) {
+                stack.emplace_back(node->mChildren[i], depth + 1);
+            }
+        }
+    }
+    return fault;
+}
+
+// Rejects an imported scene whose node graph is deeper than `maxDepth` or is
+// not a tree. The graph is freed node by node first, because ~aiNode recurses
+// (overflowing on a deep chain) and frees a shared node twice.
+void EnforceNodeGraphLimits(aiScene *scene, unsigned int maxDepth) {
+    if (scene->mRootNode == nullptr) {
+        return;
+    }
+    std::vector<aiNode *> nodes;
+    const NodeGraphFault fault = InspectNodeGraph(scene->mRootNode, maxDepth, nodes);
+    if (fault == NodeGraphFault::None) {
+        return;
+    }
+    for (aiNode *node : nodes) {
+        node->mNumChildren = 0;
+    }
+    for (aiNode *node : nodes) {
+        delete node;
+    }
+    scene->mRootNode = nullptr;
+    if (fault == NodeGraphFault::TooDeep) {
+        throw DeadlyImportError("Scene graph nesting exceeds the limit of ", maxDepth,
+                " levels (" AI_CONFIG_IMPORT_MAX_NODE_DEPTH ")");
+    }
+    throw DeadlyImportError("Scene graph is not a tree: a node is reachable from more than one parent");
 }
 }  // namespace
 
@@ -129,6 +194,10 @@ aiScene *BaseImporter::ReadFile(Importer *pImp, const std::string &pFile, IOSyst
     // dispatch importing
     try {
         InternReadFile(pFile, sc.get(), &filter);
+
+        // Before anything recurses into the node graph.
+        EnforceNodeGraphLimits(sc.get(), static_cast<unsigned int>(std::max(1,
+                pImp->GetPropertyInteger(AI_CONFIG_IMPORT_MAX_NODE_DEPTH, AI_DEFAULT_MAX_NODE_DEPTH))));
 
         // Calculate import scale hook - required because pImp not available anywhere else
         // passes scale into ScaleProcess
