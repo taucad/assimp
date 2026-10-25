@@ -55,6 +55,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/DefaultLogger.hpp>
 #include <assimp/Importer.hpp>
 #include <assimp/ObjMaterial.h>
+#include <algorithm>
 #include <memory>
 
 static constexpr aiImporterDesc desc = {
@@ -411,6 +412,97 @@ std::unique_ptr<aiMesh> ObjFileImporter::createTopology(const ObjFile::Model *pM
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Creates an indexed vertex array for a mesh of triangles and polygons
+void ObjFileImporter::createIndexedVertexArray(const ObjFile::Model *pModel,
+        const ObjFile::Mesh *pObjMesh,
+        aiMesh *pMesh,
+        unsigned int numIndices) {
+    constexpr unsigned int kNone = ~0u;
+    const bool hasNormals = !pModel->mNormals.empty() && pObjMesh->m_hasNormals;
+    const bool hasColors = !pModel->mVertexColors.empty();
+    const bool hasUVs = !pModel->mTextureCoord.empty() && pObjMesh->m_uiUVCoordinates[0];
+
+    // One chain of output vertices per position index; the chains are almost always one long,
+    // so a lookup is a direct index instead of a hash of the triple.
+    struct Corner {
+        unsigned int vertex, texture, normal, next;
+    };
+    std::vector<unsigned int> firstForPosition(pModel->mVertices.size(), kNone);
+    std::vector<Corner> corners;
+    corners.reserve(std::min<size_t>(numIndices, pModel->mVertices.size()));
+
+    bool normalsok = hasNormals, uvok = hasUVs;
+    unsigned int outIndex = 0;
+    for (const ObjFile::Face *sourceFace : pObjMesh->m_Faces) {
+        aiFace &destFace = pMesh->mFaces[outIndex++];
+        for (size_t vertexIndex = 0; vertexIndex < sourceFace->m_vertices.size(); ++vertexIndex) {
+            const unsigned int vertex = sourceFace->m_vertices[vertexIndex];
+            if (vertex >= pModel->mVertices.size()) {
+                throw DeadlyImportError("OBJ: vertex index out of range");
+            }
+            unsigned int normal = kNone, texture = kNone;
+            if (hasNormals && vertexIndex < sourceFace->m_normals.size()) {
+                normal = sourceFace->m_normals[vertexIndex];
+                if (normal >= pModel->mNormals.size()) {
+                    normalsok = false;
+                }
+            }
+            if (hasUVs && vertexIndex < sourceFace->m_texturCoords.size()) {
+                texture = sourceFace->m_texturCoords[vertexIndex];
+                if (texture >= pModel->mTextureCoord.size()) {
+                    uvok = false;
+                }
+            }
+
+            unsigned int found = firstForPosition[vertex];
+            while (found != kNone && (corners[found].texture != texture || corners[found].normal != normal)) {
+                found = corners[found].next;
+            }
+            if (found == kNone) {
+                if (corners.size() >= AI_MAX_VERTICES) {
+                    throw DeadlyImportError("OBJ: Too many vertices");
+                }
+                found = static_cast<unsigned int>(corners.size());
+                corners.push_back({ vertex, texture, normal, firstForPosition[vertex] });
+                firstForPosition[vertex] = found;
+            }
+            destFace.mIndices[vertexIndex] = found;
+        }
+    }
+    std::vector<unsigned int>().swap(firstForPosition);
+
+    pMesh->mNumVertices = static_cast<unsigned int>(corners.size());
+    if (pMesh->mNumVertices == 0) {
+        throw DeadlyImportError("OBJ: no vertices");
+    }
+    pMesh->mVertices = new aiVector3D[pMesh->mNumVertices];
+    if (normalsok) {
+        pMesh->mNormals = new aiVector3D[pMesh->mNumVertices];
+    }
+    if (hasColors) {
+        pMesh->mColors[0] = new aiColor4D[pMesh->mNumVertices];
+    }
+    if (uvok) {
+        pMesh->mNumUVComponents[0] = pModel->mTextureCoordDim;
+        pMesh->mTextureCoords[0] = new aiVector3D[pMesh->mNumVertices];
+    }
+    for (unsigned int i = 0; i < pMesh->mNumVertices; ++i) {
+        const Corner &corner = corners[i];
+        pMesh->mVertices[i] = pModel->mVertices[corner.vertex];
+        if (normalsok && corner.normal != kNone) {
+            pMesh->mNormals[i] = pModel->mNormals[corner.normal];
+        }
+        if (hasColors && corner.vertex < pModel->mVertexColors.size()) {
+            const aiVector3D &color = pModel->mVertexColors[corner.vertex];
+            pMesh->mColors[0][i] = aiColor4D(color.x, color.y, color.z, 1.0);
+        }
+        if (uvok && corner.texture != kNone) {
+            pMesh->mTextureCoords[0][i] = pModel->mTextureCoord[corner.texture];
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Creates a vertex array
 void ObjFileImporter::createVertexArray(const ObjFile::Model *pModel,
         const ObjFile::Object *pCurrentObject,
@@ -430,6 +522,14 @@ void ObjFileImporter::createVertexArray(const ObjFile::Model *pModel,
     // Get current mesh
     ObjFile::Mesh *pObjMesh = pModel->mMeshes[uiMeshIndex];
     if (nullptr == pObjMesh || pObjMesh->m_uiNumIndices < 1) {
+        return;
+    }
+
+    // Corners that share a (position, uv, normal) index triple share one output vertex, so
+    // polygon meshes come out indexed instead of one vertex per face corner. Line and point
+    // meshes keep the per-corner layout below.
+    if (!(pMesh->mPrimitiveTypes & (aiPrimitiveType_LINE | aiPrimitiveType_POINT))) {
+        createIndexedVertexArray(pModel, pObjMesh, pMesh, numIndices);
         return;
     }
 

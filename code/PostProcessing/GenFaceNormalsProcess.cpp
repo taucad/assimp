@@ -50,8 +50,86 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/qnan.h>
 #include <assimp/scene.h>
 #include <assimp/DefaultLogger.hpp>
+#include <algorithm>
+#include <vector>
 
 using namespace Assimp;
+
+namespace {
+
+// Appends a copy of array[source] for every entry of duplicatedFrom to a per-vertex array.
+template <class T>
+void appendDuplicates(T *&array, unsigned int oldCount, const std::vector<unsigned int> &duplicatedFrom) {
+    if (array == nullptr) {
+        return;
+    }
+    T *grown = new T[oldCount + duplicatedFrom.size()];
+    std::copy(array, array + oldCount, grown);
+    for (size_t i = 0; i < duplicatedFrom.size(); ++i) {
+        grown[oldCount + i] = array[duplicatedFrom[i]];
+    }
+    delete[] array;
+    array = grown;
+}
+
+// A shared vertex that needs a second face normal is split; the copy carries every other
+// channel of the original, its bone weights included, so per-vertex arrays stay in step.
+void appendDuplicateVertices(aiMesh *mesh, const std::vector<unsigned int> &duplicatedFrom) {
+    const unsigned int oldCount = mesh->mNumVertices;
+    appendDuplicates(mesh->mVertices, oldCount, duplicatedFrom);
+    appendDuplicates(mesh->mTangents, oldCount, duplicatedFrom);
+    appendDuplicates(mesh->mBitangents, oldCount, duplicatedFrom);
+    for (unsigned int c = 0; c < AI_MAX_NUMBER_OF_COLOR_SETS; ++c) {
+        appendDuplicates(mesh->mColors[c], oldCount, duplicatedFrom);
+    }
+    for (unsigned int t = 0; t < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++t) {
+        appendDuplicates(mesh->mTextureCoords[t], oldCount, duplicatedFrom);
+    }
+    for (unsigned int a = 0; a < mesh->mNumAnimMeshes; ++a) {
+        aiAnimMesh *anim = mesh->mAnimMeshes[a];
+        if (anim == nullptr || anim->mNumVertices != oldCount) {
+            continue;
+        }
+        appendDuplicates(anim->mVertices, oldCount, duplicatedFrom);
+        appendDuplicates(anim->mNormals, oldCount, duplicatedFrom);
+        appendDuplicates(anim->mTangents, oldCount, duplicatedFrom);
+        appendDuplicates(anim->mBitangents, oldCount, duplicatedFrom);
+        for (unsigned int c = 0; c < AI_MAX_NUMBER_OF_COLOR_SETS; ++c) {
+            appendDuplicates(anim->mColors[c], oldCount, duplicatedFrom);
+        }
+        for (unsigned int t = 0; t < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++t) {
+            appendDuplicates(anim->mTextureCoords[t], oldCount, duplicatedFrom);
+        }
+        anim->mNumVertices = oldCount + static_cast<unsigned int>(duplicatedFrom.size());
+    }
+    if (mesh->mNumBones > 0) {
+        std::vector<std::vector<unsigned int>> copiesOf(oldCount);
+        for (size_t i = 0; i < duplicatedFrom.size(); ++i) {
+            copiesOf[duplicatedFrom[i]].push_back(oldCount + static_cast<unsigned int>(i));
+        }
+        for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+            aiBone *bone = mesh->mBones[b];
+            std::vector<aiVertexWeight> weights(bone->mWeights, bone->mWeights + bone->mNumWeights);
+            for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
+                const aiVertexWeight &weight = bone->mWeights[w];
+                if (weight.mVertexId < oldCount) {
+                    for (unsigned int copy : copiesOf[weight.mVertexId]) {
+                        weights.emplace_back(copy, weight.mWeight);
+                    }
+                }
+            }
+            if (weights.size() != bone->mNumWeights) {
+                delete[] bone->mWeights;
+                bone->mNumWeights = static_cast<unsigned int>(weights.size());
+                bone->mWeights = new aiVertexWeight[bone->mNumWeights];
+                std::copy(weights.begin(), weights.end(), bone->mWeights);
+            }
+        }
+    }
+    mesh->mNumVertices = oldCount + static_cast<unsigned int>(duplicatedFrom.size());
+}
+
+} // namespace
 
 // ------------------------------------------------------------------------------------------------
 // Returns whether the processing step is in the given flag field.
@@ -112,16 +190,16 @@ bool GenFaceNormalsProcess::GenMeshFaceNormals(aiMesh *pMesh) {
     // mask to indicate if a vertex was already referenced and needs to be duplicated
     std::vector<bool> alreadyReferenced;
     alreadyReferenced.resize(pMesh->mNumVertices, false);
-    std::vector<aiVector3D> duplicatedVertices;
+    std::vector<unsigned int> duplicatedFrom;
 
     auto storeNormalSplitVertex = [&](unsigned int index, const aiVector3D& normal) {
         if (!alreadyReferenced[index]) {
             normals[index]           = normal;
             alreadyReferenced[index] = true;
         } else {
-            duplicatedVertices.push_back(pMesh->mVertices[index]);
+            duplicatedFrom.push_back(index);
             normals.push_back(normal);
-            index = pMesh->mNumVertices + static_cast<unsigned int>(duplicatedVertices.size() - 1);
+            index = pMesh->mNumVertices + static_cast<unsigned int>(duplicatedFrom.size() - 1);
         }
         return index;
     };
@@ -154,14 +232,8 @@ bool GenFaceNormalsProcess::GenMeshFaceNormals(aiMesh *pMesh) {
     }
 
     // store normals (and additional vertices) back into the mesh
-    if (!duplicatedVertices.empty()) {
-        const aiVector3D * oldVertices = pMesh->mVertices;
-        auto oldNumVertices = pMesh->mNumVertices;
-        pMesh->mNumVertices += static_cast<unsigned int>(duplicatedVertices.size());
-        pMesh->mVertices = new aiVector3D[pMesh->mNumVertices];
-        memcpy(pMesh->mVertices, oldVertices, oldNumVertices * sizeof(aiVector3D));
-        memcpy(pMesh->mVertices + oldNumVertices, duplicatedVertices.data(), duplicatedVertices.size() * sizeof(aiVector3D));
-        delete[] oldVertices;
+    if (!duplicatedFrom.empty()) {
+        appendDuplicateVertices(pMesh, duplicatedFrom);
     }
     pMesh->mNormals = new aiVector3D[pMesh->mNumVertices];
     memcpy(pMesh->mNormals, normals.data(), normals.size() * sizeof(aiVector3D));

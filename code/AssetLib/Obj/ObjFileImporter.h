@@ -55,6 +55,7 @@ namespace Assimp {
 namespace ObjFile {
 struct Object;
 struct Model;
+struct Mesh;
 } // namespace ObjFile
 
 // ------------------------------------------------------------------------------------------------
@@ -93,6 +94,10 @@ protected:
     //! \brief  Creates topology data like faces and meshes for the geometry.
     std::unique_ptr<aiMesh> createTopology(const ObjFile::Model *pModel, const ObjFile::Object *pData,
             unsigned int uiMeshIndex);
+
+    //! \brief  Creates indexed vertices for a mesh of triangles and polygons.
+    void createIndexedVertexArray(const ObjFile::Model *pModel, const ObjFile::Mesh *pObjMesh,
+            aiMesh *pMesh, unsigned int numIndices);
 
     //! \brief  Creates vertices from model.
     void createVertexArray(const ObjFile::Model *pModel, const ObjFile::Object *pCurrentObject,
